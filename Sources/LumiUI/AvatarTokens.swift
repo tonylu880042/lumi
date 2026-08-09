@@ -19,8 +19,16 @@ public enum AvatarTokens {
     /// 兩眼中心點的水平距離。
     public static let eyeGap: CGFloat = 202
     public static let eyeCY: CGFloat = 172
-    public static let irisR: CGFloat = 62
+    public static let irisR: CGFloat = 54
     public static let pupilR: CGFloat = 36
+    /// 虹膜「彩色主體」相對於 `irisR`（深色外圈半徑）的比例（§3.1 步驟 2/3：
+    /// 外圈先畫在 `irisR`，主體漸層畫在這個比例縮小後的半徑）。深色外圈本身
+    /// 在視覺上跟眼框描邊（`lash`，同樣接近黑）幾乎融為一體，讓瞳孔的可移動
+    /// 範圍以外圈為界只是白白浪費空間、對可讀性沒有幫助，所以瞳孔位移的
+    /// 「有效半徑」也用這個比例，而不是外圈的 `irisR`（P1 review：detected 三個
+    /// 方向的視線幾乎分不出來，見 `LumiEyeView` 的換算）。單一常數同時餵給繪圖
+    /// 與位移換算，兩者不會各自為政、彼此漂移。
+    public static let irisBodyScale: CGFloat = 0.88
 
     // MARK: - Face layout
 

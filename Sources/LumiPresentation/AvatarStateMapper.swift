@@ -23,7 +23,14 @@ public struct AvatarStateMapper: Sendable {
             return AvatarVisualState(
                 eyeOpenAmount: 1.00,
                 irisScale: 1.05,
-                pupilOffset: .init(x: 0.55 * direction.sign, y: 0),
+                // 應：§5.2 寫的是「約 ±0.55」，這裡取 0.60 而非規格字面值。
+                // 左右三個方向在螢幕上幾乎分不出來（P1 review：156pt 寬的眼睛裡，
+                // 0.55 換算成的實際位移不到眼睛寬度的 10%）。0.65 是唯一 clamp
+                // 邊界（`AvatarVisualState.init`），但 Continuous 層的微眼動會再疊加
+                // 最多 ±0.05（`ContinuousLayer.saccadeAmplitude`）；用滿 0.65 會讓
+                // 往外側的那半圈微眼動永遠貼著 clamp 邊界，看起來像視線卡住。0.60
+                // 留出剛好 0.05 的餘裕給微眼動，同時比 0.55 明顯更好辨識。
+                pupilOffset: .init(x: 0.60 * direction.sign, y: 0),
                 highlightIntensity: 0.85, softGlossOpacity: 0.85,
                 eyebrowStyle: .raisedSoft,
                 blushOpacity: 0.20,

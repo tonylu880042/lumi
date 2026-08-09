@@ -37,8 +37,14 @@ public struct LumiEyeView: View {
 
         // §3.1／§4.1：正規化位移已在 AvatarVisualState.init 被 clamp（唯一 clamp 邊界），
         // 這裡只需把已經合法的正規化座標換算成實際點數。
-        let ox = CGFloat(state.pupilOffset.x) * (rx - irisR)
-        let oy = CGFloat(state.pupilOffset.y) * (ry - irisR)
+        //
+        // travel range 用「虹膜彩色主體」的半徑（irisR * irisBodyScale），不是深色
+        // 外圈的 irisR ——外圈在視覺上跟眼框描邊幾乎融為一體，讓它整圈都留在眼白
+        // 內對可讀性沒有幫助，卻讓瞳孔可移動的範圍少了六成。彩色主體仍然完全在
+        // 眼白內移動，§3.1「瞳孔位移時不得穿出眼白」不受影響。
+        let irisBodyR = irisR * AvatarTokens.irisBodyScale
+        let ox = CGFloat(state.pupilOffset.x) * (rx - irisBodyR)
+        let oy = CGFloat(state.pupilOffset.y) * (ry - irisBodyR)
         let irisCenter = CGPoint(x: center.x + ox, y: center.y + oy)
 
         // 曲率隨 eyeSquintAmount 微調（§3.2：眼皮由「開合量、曲率」共同控制）。
@@ -114,10 +120,13 @@ public struct LumiEyeView: View {
                             colors: [AvatarTokens.irisMid, AvatarTokens.irisMid, AvatarTokens.irisDeep],
                             center: UnitPoint(x: 0.35, y: 0.30),
                             startRadius: 0,
-                            endRadius: irisR * 0.88
+                            endRadius: irisR * AvatarTokens.irisBodyScale
                         )
                     )
-                    .frame(width: 2 * irisR * 0.88, height: 2 * irisR * 0.88)
+                    .frame(
+                        width: 2 * irisR * AvatarTokens.irisBodyScale,
+                        height: 2 * irisR * AvatarTokens.irisBodyScale
+                    )
 
                 Circle()
                     .fill(AvatarTokens.pupil)
