@@ -30,6 +30,11 @@ public enum AvatarTokens {
 
     // MARK: - Colors
 
+    /// 畫布背景色，移植自 `eye-lab.html`（已審過的淺粉背景）。`LumiAvatarView`
+    /// 本身刻意不畫背景（M1 決定，保留可重用性）——這個 token 給宿主（App）用，
+    /// 讓背景色跟其他顏色一樣集中在這裡，不是各自宿主臨時挑一個顏色。
+    public static let background = Color(hex: 0xFFF8FC)
+
     public static let eyeWhite = Color.white
     /// §4.2 虹膜深色外圈。
     public static let irisRing = Color(hex: 0x1B0B33)
