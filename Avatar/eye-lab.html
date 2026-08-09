@@ -1,0 +1,293 @@
+<meta charset="utf-8">
+<title>Lumi Eye Lab</title>
+<style>
+  body { font: 14px/1.6 -apple-system, "PingFang TC", sans-serif; margin: 0; background: #FBF7FF; color: #2A1450; }
+  .wrap { display: flex; gap: 24px; padding: 24px; flex-wrap: wrap; }
+  .stage { flex: 1 1 420px; min-width: 320px; background: #fff; border-radius: 20px; padding: 16px; box-shadow: 0 2px 20px rgba(90,40,150,.08); }
+  .panel { flex: 0 0 300px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { flex: 0 0 130px; font-size: 12px; }
+  .row input[type=range] { flex: 1; }
+  .row output { flex: 0 0 44px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: #7B4BC4; }
+  select { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid #D8C8F0; font-size: 14px; }
+  h3 { margin: 18px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: #8A6BB0; }
+  .decor { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .decor svg { background: #fff; border-radius: 10px; padding: 6px; }
+  code { background: #F2EAFF; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+
+<div class="wrap">
+  <div class="stage">
+    <svg id="face" viewBox="0 0 640 420" width="100%"></svg>
+    <div class="decor" id="decor"></div>
+  </div>
+
+  <div class="panel">
+    <h3>AssistantState（§5.2 基準表）</h3>
+    <select id="state"></select>
+
+    <h3>連續參數</h3>
+    <div id="sliders"></div>
+
+    <h3>圖層開關（§9.3 高光對照）</h3>
+    <div class="row"><label>顯示高光</label><input type="checkbox" id="showHL" checked></div>
+    <div class="row"><label>顯示柔光</label><input type="checkbox" id="showGloss" checked></div>
+    <div class="row"><label>顯示睫毛</label><input type="checkbox" id="showLash" checked></div>
+    <div class="row"><label>深色背景</label><input type="checkbox" id="darkBg"></div>
+  </div>
+</div>
+
+<script>
+// ── Design tokens ───────────────────────────────────────────────
+const T = {
+  eyeRX: 78, eyeRY: 92, eyeGap: 202, eyeCY: 172,
+  irisR: 62, pupilR: 36,
+  browY: 44, mouthY: 322, blushY: 288,
+  white: "#FFFFFF",
+  irisRing: "#1B0B33",     // §4.2 深色外圈
+  irisMid:  "#6B34AE",     // 品牌主色
+  irisDeep: "#2E1259",     // 下緣略深
+  pupil:    "#140724",
+  lash:     "#151515",
+  blush:    "#F4A3B4",
+  brow:     "#151515",
+  mouth:    "#E23F55",
+  wave:     "#E8517A",
+};
+
+// §8 音訊處理：raw amplitude 必須先平滑 → 降採樣 → clamp（純函式，可測）
+// ponytail: 一階低通就夠，換 RMS window 等實機有抖動再說
+const AUDIO = {
+  smooth: (prev, raw, k = 0.35) => prev + (raw - prev) * k,
+  clampAmp: v => clamp(v, 0, 1),
+  // 固定的 bar 輪廓：不得每幀隨機（§4.1 同理，避免機械式抖動）
+  profile: [.35,.62,.48,.85,.70,1.0,.78,.92,.55,.74,1.0,.66,.88,.50,.72,.40],
+};
+
+// §5.1 clamp ranges — 與 AvatarStateMapper 必須一致
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const CLAMP = {
+  eyeOpenAmount:      v => clamp(v, 0, 1),
+  pupilX:             v => clamp(v, -0.65, 0.65),
+  pupilY:             v => clamp(v, -0.45, 0.45),
+  irisScale:          v => clamp(v, 0.92, 1.12),
+  pupilScale:         v => clamp(v, 0.88, 1.08),
+  highlightIntensity: v => clamp(v, 0, 1),
+  blushOpacity:       v => clamp(v, 0, 1),
+  sparkleIntensity:   v => clamp(v, 0, 1),
+  amplitude:          v => clamp(v, 0, 1),
+};
+
+// §5.2 基準狀態表 — 這份資料就是 M0 Mapper 的測試 fixture
+const STATES = {
+  idle:        { eyeOpenAmount:.88, pupilX:0,    pupilY:0,    irisScale:1.00, pupilScale:1.00, highlightIntensity:.70, blushOpacity:.15, sparkleIntensity:.15, mouth:"softSmile", brow:"neutral" },
+  detected:    { eyeOpenAmount:1.00,pupilX:.55,  pupilY:0,    irisScale:1.05, pupilScale:1.00, highlightIntensity:.85, blushOpacity:.20, sparkleIntensity:.30, mouth:"softSmile", brow:"raised"  },
+  recognizing: { eyeOpenAmount:.95, pupilX:.15,  pupilY:0,    irisScale:0.98, pupilScale:0.92, highlightIntensity:.65, blushOpacity:.10, sparkleIntensity:.10, mouth:"neutral",   brow:"focused" },
+  greeting:    { eyeOpenAmount:1.00,pupilX:0,    pupilY:0,    irisScale:1.08, pupilScale:1.00, highlightIntensity:1.00,blushOpacity:.70, sparkleIntensity:.90, mouth:"wideSmile", brow:"raised"  },
+  listening:   { eyeOpenAmount:.92, pupilX:0,    pupilY:0,    irisScale:1.00, pupilScale:1.00, highlightIntensity:.75, blushOpacity:.25, sparkleIntensity:.10, mouth:"neutral",   brow:"focused", amplitude:.65, waveformMode:"input"  },
+  thinking:    { eyeOpenAmount:.88, pupilX:.30,  pupilY:-.35, irisScale:0.97, pupilScale:1.00, highlightIntensity:.65, blushOpacity:.15, sparkleIntensity:.35, mouth:"smallO",    brow:"asym"    },
+  speaking:    { eyeOpenAmount:.92, pupilX:0,    pupilY:0,    irisScale:1.00, pupilScale:1.00, highlightIntensity:.75, blushOpacity:.30, sparkleIntensity:.10, mouth:"speaking",  brow:"neutral", amplitude:.70, waveformMode:"output" },
+  encouraging: { eyeOpenAmount:1.00,pupilX:0,    pupilY:0,    irisScale:1.12, pupilScale:1.06, highlightIntensity:1.00,blushOpacity:.85, sparkleIntensity:1.00,mouth:"wideSmile", brow:"raised"  },
+  reminding:   { eyeOpenAmount:.90, pupilX:0,    pupilY:0,    irisScale:0.98, pupilScale:1.00, highlightIntensity:.65, blushOpacity:.25, sparkleIntensity:.15, mouth:"softSmile", brow:"caring"  },
+  confused:    { eyeOpenAmount:.86, pupilX:.25,  pupilY:0,    irisScale:0.96, pupilScale:0.92, highlightIntensity:.45, blushOpacity:.10, sparkleIntensity:.10, mouth:"smallO",    brow:"asym"    },
+  offline:     { eyeOpenAmount:.45, pupilX:0,    pupilY:.25,  irisScale:0.92, pupilScale:1.00, highlightIntensity:.25, blushOpacity:0,   sparkleIntensity:0,   mouth:"neutral",   brow:"relaxed" },
+};
+
+// §4.1 高光基準表：局部座標以虹膜中心為原點，直徑為虹膜直徑占比
+const HIGHLIGHTS = [
+  { name:"main",      dia:.22, opacity:1.00, x:-.28, y:-.30 },
+  { name:"secondary", dia:.09, opacity:.90,  x:-.05, y:-.18 },
+  { name:"bounce",    dia:.12, opacity:.22,  x: .25, y: .28 },
+];
+
+// ── 單眼繪製：§3.1 由後至前 ───────────────────────────────────────
+function eye(side, p) {
+  const id = side;                       // "L" / "R"
+  const s = side === "L" ? -1 : 1;
+  const cx = 320 + s * T.eyeGap / 2, cy = T.eyeCY;
+  const rx = T.eyeRX, ry = T.eyeRY;
+
+  const irisR  = T.irisR * p.irisScale;
+  const pupilR = T.pupilR * p.pupilScale;
+  // 正規化位移先 clamp，再轉實際點數（§3.1）
+  const ox = CLAMP.pupilX(p.pupilX) * (rx - irisR);
+  const oy = CLAMP.pupilY(p.pupilY) * (ry - irisR);
+  const ix = cx + ox, iy = cy + oy;
+
+  // 上眼皮：open=1 貼齊眼睛頂端，open=0 完全蓋住
+  const open = CLAMP.eyeOpenAmount(p.eyeOpenAmount);
+  // open=1 時眼皮收到眼睛頂端之上（看不見）；open=0 時完全蓋住
+  const lidY = (cy - ry - 8) + (1 - open) * (2 * ry + 8);
+
+  const hl = p.showHL ? HIGHLIGHTS.map(h => `
+      <circle cx="${(ix + h.x * irisR).toFixed(1)}" cy="${(iy + h.y * irisR).toFixed(1)}"
+              r="${(h.dia * irisR).toFixed(1)}" fill="#fff"
+              opacity="${(h.opacity * p.highlightIntensity).toFixed(3)}"/>`).join("") : "";
+
+  const gloss = p.showGloss ? `
+      <ellipse cx="${ix}" cy="${(iy - irisR * .34).toFixed(1)}"
+               rx="${(irisR * .74).toFixed(1)}" ry="${(irisR * .42).toFixed(1)}"
+               fill="url(#gloss)" opacity="${(0.55 * p.highlightIntensity).toFixed(3)}"/>` : "";
+
+  // 睫毛：外側上緣三根，左右鏡像（§4.1 光向一致，睫毛可鏡像）
+  const lash = p.showLash ? `
+      <g stroke="${T.lash}" stroke-width="6" stroke-linecap="round" fill="none"
+         transform="translate(${cx} ${cy}) scale(${s} 1)">
+        <path d="M 24 -87 q 22 -11 34 -27"/>
+        <path d="M 47 -72 q 23 -8 36 -21"/>
+        <path d="M 63 -51 q 23 -2 38 -10"/>
+      </g>` : "";
+
+  return `
+    <defs>
+      <radialGradient id="iris${id}" cx="35%" cy="30%" r="72%">
+        <stop offset="0%"   stop-color="${T.irisMid}"/>
+        <stop offset="58%"  stop-color="${T.irisMid}"/>
+        <stop offset="100%" stop-color="${T.irisDeep}"/>
+      </radialGradient>
+      <clipPath id="lidClip${id}">
+        <ellipse cx="${cx}" cy="${cy}" rx="${rx + 3}" ry="${ry + 3}"/>
+      </clipPath>
+      <mask id="lid${id}">
+        <ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="#fff"/>
+        <path d="M ${cx - rx - 4} ${cy - ry - 4}
+                 H ${cx + rx + 4} V ${lidY.toFixed(1)}
+                 Q ${cx} ${(lidY + ry * .26).toFixed(1)} ${cx - rx - 4} ${lidY.toFixed(1)} Z" fill="#000"/>
+      </mask>
+    </defs>
+
+    <g mask="url(#lid${id})">
+      <ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${T.white}"/>
+      <circle cx="${ix}" cy="${iy}" r="${irisR.toFixed(1)}" fill="${T.irisRing}"/>
+      <circle cx="${ix}" cy="${iy}" r="${(irisR * .88).toFixed(1)}" fill="url(#iris${id})"/>
+      <circle cx="${ix}" cy="${iy}" r="${pupilR.toFixed(1)}" fill="${T.pupil}"/>
+      ${gloss}
+      ${hl}
+      <ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="none"
+               stroke="${T.lash}" stroke-width="6"/>
+    </g>
+    <path d="M ${cx - rx - 4} ${lidY.toFixed(1)}
+             Q ${cx} ${(lidY + ry * .26).toFixed(1)} ${cx + rx + 4} ${lidY.toFixed(1)}"
+          fill="none" stroke="${T.lash}" stroke-width="6" stroke-linecap="round"
+          clip-path="url(#lidClip${id})"/>
+    ${lash}`;
+}
+
+const BROWS = {
+  neutral: "M -46 0 q 46 -18 92 0",  raised:  "M -46 6 q 46 -30 92 -2",
+  focused: "M -46 -4 q 46 -8 92 4",  caring:  "M -46 -6 q 46 -14 92 8",
+  relaxed: "M -46 2 q 46 -6 92 0",   asym:    "M -46 0 q 46 -18 92 0",
+};
+const MOUTHS = {
+  neutral:   `<path d="M -22 0 q 22 8 44 0" stroke="${T.mouth}" stroke-width="7" fill="none" stroke-linecap="round"/>`,
+  softSmile: `<path d="M -30 0 q 30 26 60 0" stroke="${T.mouth}" stroke-width="8" fill="none" stroke-linecap="round"/>`,
+  wideSmile: `<path d="M -42 -6 q 42 54 84 0 q -42 16 -84 0 Z" fill="${T.mouth}"/>`,
+  smallO:    `<ellipse cx="0" cy="6" rx="13" ry="16" fill="${T.mouth}"/>`,
+  // speaking：不是換嘴型，是同一個 Path 吃 openAmount（§3.2 開口量）
+  speaking:  a => `<ellipse cx="0" cy="${(4 + 10 * a).toFixed(1)}" rx="${(26 + 8 * a).toFixed(1)}"
+                            ry="${(5 + 22 * a).toFixed(1)}" fill="${T.mouth}"/>
+                   <path d="M -${(26 + 8*a).toFixed(1)} 4 q ${(26+8*a).toFixed(1)} -14 ${(52+16*a).toFixed(1)} 0"
+                         fill="none" stroke="${T.mouth}" stroke-width="6" stroke-linecap="round"/>`,
+};
+
+// Waveform：listening = 收音（input）、speaking = 發聲（output）
+function waveform(mode, amp) {
+  if (mode === "none") return "";
+  const n = AUDIO.profile.length, w = 7, gap = 6, maxH = 42;
+  const total = n * w + (n - 1) * gap;
+  const color = mode === "input" ? "#8B5CF6" : T.wave;
+  return `<g transform="translate(${320 - total / 2} 386)">` + AUDIO.profile.map((p, i) => {
+    const h = Math.max(4, p * amp * maxH);
+    return `<rect x="${i * (w + gap)}" y="${(-h / 2).toFixed(1)}" width="${w}"
+                  height="${h.toFixed(1)}" rx="${w / 2}" fill="${color}"/>`;
+  }).join("") + `</g>`;
+}
+
+// 同一個 amplitude 同時餵嘴巴和 waveform —— 兩個消費者，一個來源
+function mouthShape(p) {
+  const m = MOUTHS[p.mouth] || MOUTHS.neutral;
+  return typeof m === "function" ? m(p.amplitude) : m;
+}
+
+function render() {
+  const p = readParams();
+  const browPath = BROWS[p.brow] || BROWS.neutral;
+  // asym：一側眉輕抬（§5.2 thinking / confused）
+  const asymL = p.brow === "asym" ? -10 : 0;
+
+  document.getElementById("face").innerHTML = `
+    <rect x="0" y="0" width="640" height="420" rx="24"
+          fill="${p.darkBg ? "#2A1450" : "#FFF8FC"}"/>
+    ${eye("L", p)}${eye("R", p)}
+    <g transform="translate(${320 - T.eyeGap/2} ${T.browY + asymL}) rotate(${asymL ? -7 : 0})">
+      <path d="${browPath}" stroke="${T.brow}" stroke-width="10" fill="none" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(${320 + T.eyeGap/2} ${T.browY})">
+      <path d="${browPath}" stroke="${T.brow}" stroke-width="10" fill="none" stroke-linecap="round"/>
+    </g>
+    <ellipse cx="${320 - T.eyeGap/2 - T.eyeRX - 22}" cy="${T.blushY}" rx="38" ry="21" fill="${T.blush}" opacity="${p.blushOpacity}"/>
+    <ellipse cx="${320 + T.eyeGap/2 + T.eyeRX + 22}" cy="${T.blushY}" rx="38" ry="21" fill="${T.blush}" opacity="${p.blushOpacity}"/>
+    <g transform="translate(320 ${T.mouthY})">${mouthShape(p)}</g>
+    ${waveform(p.waveformMode || "none", p.amplitude)}
+    <g opacity="${p.sparkleIntensity}">
+      <g transform="translate(74 106) scale(1.5)">${SPARKLE}</g>
+      <g transform="translate(566 142) scale(1.2)">${SPARKLE}</g>
+    </g>
+    <defs>
+      <radialGradient id="gloss" cx="50%" cy="35%" r="60%">
+        <stop offset="0%" stop-color="#fff" stop-opacity=".85"/>
+        <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+      </radialGradient>
+    </defs>`;
+}
+
+// ── 離散裝飾：這幾個才是真正該當成 SVG 檔交付的東西 ─────────────
+const SPARKLE = `<path d="M 0 -16 Q 3 -3 16 0 Q 3 3 0 16 Q -3 3 -16 0 Q -3 -3 0 -16 Z" fill="#F2857A"/>`;
+const HEART   = `<path d="M 0 14 C -18 2 -18 -12 -8 -12 C -3 -12 0 -8 0 -5 C 0 -8 3 -12 8 -12 C 18 -12 18 2 0 14 Z" fill="#F589A0"/>`;
+const QMARK   = `<path d="M -7 -12 q 0 -9 8 -9 q 8 0 8 8 q 0 6 -6 9 q -3 2 -3 6" stroke="#6B34AE" stroke-width="5" fill="none" stroke-linecap="round"/><circle cx="0" cy="14" r="3.2" fill="#6B34AE"/>`;
+const SWEAT   = `<path d="M 0 -14 C 7 -3 10 3 10 7 A 10 10 0 0 1 -10 7 C -10 3 -7 -3 0 -14 Z" fill="#7FC5E8"/>`;
+
+// ── UI ──────────────────────────────────────────────────────────
+const SLIDERS = [
+  ["eyeOpenAmount","開眼量",0,1],  ["pupilX","瞳孔 X",-0.65,0.65], ["pupilY","瞳孔 Y",-0.45,0.45],
+  ["irisScale","虹膜縮放",0.92,1.12], ["pupilScale","瞳孔縮放",0.88,1.08],
+  ["highlightIntensity","高光強度",0,1], ["blushOpacity","腮紅",0,1], ["sparkleIntensity","Sparkle",0,1],
+  ["amplitude","音量 amplitude",0,1],
+];
+let current = "greeting";
+
+document.getElementById("sliders").innerHTML = SLIDERS.map(([k,label,lo,hi]) => `
+  <div class="row"><label>${label}</label>
+    <input type="range" id="s_${k}" min="${lo}" max="${hi}" step="0.01"><output id="o_${k}"></output></div>`).join("");
+
+document.getElementById("state").innerHTML =
+  Object.keys(STATES).map(k => `<option value="${k}">${k}</option>`).join("");
+
+function applyState(name) {
+  current = name;
+  document.getElementById("state").value = name;
+  const st = STATES[name];
+  SLIDERS.forEach(([k]) => document.getElementById("s_" + k).value = st[k] ?? 0);
+  render();
+}
+
+function readParams() {
+  const p = { ...STATES[current] };
+  SLIDERS.forEach(([k]) => p[k] = CLAMP[k](parseFloat(document.getElementById("s_" + k).value)));
+  SLIDERS.forEach(([k]) => document.getElementById("o_" + k).textContent = p[k].toFixed(2));
+  p.showHL    = document.getElementById("showHL").checked;
+  p.showGloss = document.getElementById("showGloss").checked;
+  p.showLash  = document.getElementById("showLash").checked;
+  p.darkBg    = document.getElementById("darkBg").checked;
+  return p;
+}
+
+document.getElementById("state").onchange = e => applyState(e.target.value);
+document.querySelectorAll("input").forEach(el => el.oninput = render);
+
+document.getElementById("decor").innerHTML = [["sparkle",SPARKLE],["heart",HEART],["question-mark",QMARK],["sweat-drop",SWEAT]]
+  .map(([n,d]) => `<svg viewBox="-20 -20 40 40" width="44" height="44" title="${n}">${d}</svg>`).join("");
+
+document.getElementById("state").value = current;
+applyState(current);
+</script>
