@@ -6,6 +6,104 @@ import LumiDomain
 private let mapper = AvatarStateMapper()
 private func ~= (lhs: Double, rhs: Double) -> Bool { abs(lhs - rhs) < 0.001 }
 
+@Test("Continuous 合成保留 base effect 與非預設 effectIntensity")
+func continuousPreservesBaseEffectIntensity() {
+    var rng = SeededGenerator(seed: 3)
+    let schedule = BlinkSchedule(using: &rng)
+    let base = AvatarVisualState(
+        eyeOpenAmount: 0.88,
+        highlightIntensity: 0.7,
+        softGlossOpacity: 0.7,
+        blushOpacity: 0.15,
+        effect: .sparkles,
+        effectIntensity: 0.3,
+        transition: .init(duration: 0.4, curve: .easeInOut)
+    )
+
+    let result = ContinuousLayer.apply(to: base, at: 0.5, schedule: schedule, reducedMotion: false)
+    #expect(result.effect == base.effect)
+    #expect(result.effectIntensity ~= base.effectIntensity)
+}
+
+// MARK: - 音訊振幅
+
+@Test("listening waveform 使用 processed amplitude，但嘴巴維持 State base")
+func listeningWaveformUsesProcessedAmplitudeWithoutOpeningMouth() {
+    var rng = SeededGenerator(seed: 3)
+    let schedule = BlinkSchedule(using: &rng)
+    let base = mapper.map(.listening)
+
+    let result = ContinuousLayer.apply(
+        to: base,
+        at: 0.5,
+        schedule: schedule,
+        processedAmplitude: 0.8,
+        reducedMotion: false
+    )
+
+    #expect(result.waveformMode == .microphoneInput)
+    #expect(result.audioAmplitude ~= 0.8)
+    #expect(result.mouthOpenAmount ~= base.mouthOpenAmount)
+}
+
+@Test("speaking waveform 與嘴巴共用同一個 processed amplitude")
+func speakingWaveformAndMouthUseSameProcessedAmplitude() {
+    var rng = SeededGenerator(seed: 3)
+    let schedule = BlinkSchedule(using: &rng)
+    let base = mapper.map(.speaking)
+
+    let result = ContinuousLayer.apply(
+        to: base,
+        at: 0.5,
+        schedule: schedule,
+        processedAmplitude: 0.8,
+        reducedMotion: false
+    )
+
+    #expect(result.waveformMode == .audioOutput)
+    #expect(result.audioAmplitude ~= 0.8)
+    #expect(result.mouthOpenAmount ~= 0.8)
+}
+
+@Test("沒有 waveform 時忽略 processed amplitude，audioAmplitude 與 mouthOpenAmount 都是 0")
+func noWaveformIgnoresProcessedAmplitude() {
+    var rng = SeededGenerator(seed: 3)
+    let schedule = BlinkSchedule(using: &rng)
+    let base = AvatarVisualState(
+        eyeOpenAmount: 0.88,
+        highlightIntensity: 0.7,
+        softGlossOpacity: 0.7,
+        blushOpacity: 0.15,
+        mouthOpenAmount: 0.4,
+        audioAmplitude: 0.5,
+        waveformMode: .none,
+        transition: .init(duration: 0.4, curve: .easeInOut)
+    )
+
+    let result = ContinuousLayer.apply(
+        to: base,
+        at: 0.5,
+        schedule: schedule,
+        processedAmplitude: 0.8,
+        reducedMotion: false
+    )
+
+    #expect(result.audioAmplitude ~= 0)
+    #expect(result.mouthOpenAmount ~= 0)
+}
+
+@Test("processed amplitude 沒有提供時預設為 0，維持既有呼叫相容性")
+func processedAmplitudeDefaultsToZero() {
+    var rng = SeededGenerator(seed: 3)
+    let schedule = BlinkSchedule(using: &rng)
+    let base = mapper.map(.speaking)
+
+    let result = ContinuousLayer.apply(to: base, at: 0.5, schedule: schedule, reducedMotion: false)
+
+    #expect(result.audioAmplitude ~= 0)
+    #expect(result.mouthOpenAmount ~= 0)
+}
+
 // MARK: - 眨眼
 
 @Test("眨眼在排程的高峰時間點讓眼睛閉合到 0，其餘時間維持 base 值")
@@ -14,27 +112,57 @@ func blinkReachesZeroAtScheduledTimeAndRestsBetweenBlinks() {
     let schedule = BlinkSchedule(using: &rng)
     let base = mapper.map(.idle)
 
-    let peak = schedule.starts[0] + BlinkSchedule.closeDuration
+    let peak = schedule.start(at: 0) + BlinkSchedule.closeDuration
     let atPeak = ContinuousLayer.apply(to: base, at: peak, schedule: schedule, reducedMotion: false)
     #expect(atPeak.eyeOpenAmount < 0.01)
 
     // 兩次眨眼中間（第一次眨眼開始前一秒，一定還沒眨）：維持 base 的開眼量。
-    let between = schedule.starts[0] - 1.0
+    let between = schedule.start(at: 0) - 1.0
     let atRest = ContinuousLayer.apply(to: base, at: between, schedule: schedule, reducedMotion: false)
     #expect(atRest.eyeOpenAmount ~= base.eyeOpenAmount)
+}
+
+@Test("固定 seed 在一小時後仍會於 bounded interval 內持續眨眼")
+func seededBlinkScheduleContinuesPastOneHour() {
+    var rng = SeededGenerator(seed: 42)
+    let schedule = BlinkSchedule(using: &rng)
+    let base = mapper.map(.idle)
+
+    // 眨眼間隔上限為 6 秒；掃一個完整的 bounded interval，不依賴任意
+    // 單一取樣瞬間剛好落在眨眼上。現有一小時 horizon 實作在此區間
+    // closure 永遠為 0，這條測試因此先以 RED 證明 bug。
+    let start = 3_600.0
+    let end = start + 6.0
+    let sampleStep = 0.01
+    var maxClosure = 0.0
+    var time = start
+    while time <= end {
+        let state = ContinuousLayer.apply(
+            to: base,
+            at: time,
+            schedule: schedule,
+            reducedMotion: false
+        )
+        maxClosure = max(maxClosure, 1.0 - state.eyeOpenAmount / base.eyeOpenAmount)
+        time += sampleStep
+    }
+
+    #expect(maxClosure > 0)
 }
 
 @Test("眨眼間隔在 2–6 秒之間變動，同一個 seed 可重現")
 func blinkIntervalsAreVariableAndReproducibleForSameSeed() {
     var rngA = SeededGenerator(seed: 42)
     var rngB = SeededGenerator(seed: 42)
-    let scheduleA = BlinkSchedule(horizon: 120, using: &rngA)
-    let scheduleB = BlinkSchedule(horizon: 120, using: &rngB)
+    let scheduleA = BlinkSchedule(using: &rngA)
+    let scheduleB = BlinkSchedule(using: &rngB)
+    let startsA = (0 ..< 128).map { scheduleA.start(at: $0) }
+    let startsB = (0 ..< 128).map { scheduleB.start(at: $0) }
 
-    #expect(scheduleA.starts == scheduleB.starts)
-    #expect(scheduleA.starts.count > 5)
+    #expect(startsA == startsB)
+    #expect(startsA.count > 5)
 
-    let intervals = zip(scheduleA.starts, scheduleA.starts.dropFirst()).map { $1 - $0 }
+    let intervals = zip(startsA, startsA.dropFirst()).map { $1 - $0 }
     #expect(intervals.allSatisfy { (2.0 ... 6.0).contains($0) })
     // 不是固定間隔——四捨五入到 0.01 秒後仍應該有不只一種數值。
     #expect(Set(intervals.map { ($0 * 100).rounded() }).count > 1)
@@ -44,9 +172,58 @@ func blinkIntervalsAreVariableAndReproducibleForSameSeed() {
 func differentSeedsProduceDifferentSchedules() {
     var rngA = SeededGenerator(seed: 1)
     var rngB = SeededGenerator(seed: 2)
-    let scheduleA = BlinkSchedule(horizon: 60, using: &rngA)
-    let scheduleB = BlinkSchedule(horizon: 60, using: &rngB)
-    #expect(scheduleA.starts != scheduleB.starts)
+    let scheduleA = BlinkSchedule(using: &rngA)
+    let scheduleB = BlinkSchedule(using: &rngB)
+    let startsA = (0 ..< 32).map { scheduleA.start(at: $0) }
+    let startsB = (0 ..< 32).map { scheduleB.start(at: $0) }
+    #expect(startsA != startsB)
+}
+
+@Test("長時間時間輸入不重播 RNG，固定 seed 仍維持 deterministic")
+func longRunningQueriesRemainDeterministic() {
+    var rngA = SeededGenerator(seed: 42)
+    var rngB = SeededGenerator(seed: 42)
+    let scheduleA = BlinkSchedule(using: &rngA)
+    let scheduleB = BlinkSchedule(using: &rngB)
+    let base = mapper.map(.idle)
+    let times: [Double] = [3_600, 7_200, 86_400, 250_000, 1_000_000]
+
+    for time in times {
+        let resultA = ContinuousLayer.apply(to: base, at: time, schedule: scheduleA, reducedMotion: false)
+        let resultB = ContinuousLayer.apply(to: base, at: time, schedule: scheduleB, reducedMotion: false)
+        #expect(resultA == resultB)
+    }
+}
+
+@Test("高序號眨眼仍可直接查詢，不需從 t=0 重播 RNG")
+func highOrdinalBlinkRemainsReachable() {
+    var rngA = SeededGenerator(seed: 42)
+    var rngB = SeededGenerator(seed: 42)
+    let scheduleA = BlinkSchedule(using: &rngA)
+    let scheduleB = BlinkSchedule(using: &rngB)
+    let base = mapper.map(.idle)
+    let index = 250_000
+
+    let startA = scheduleA.start(at: index)
+    let startB = scheduleB.start(at: index)
+    #expect(startA == startB)
+    #expect((2.0 ... 6.0).contains(startA - scheduleA.start(at: index - 1)))
+
+    let normal = ContinuousLayer.apply(
+        to: base,
+        at: startA + BlinkSchedule.closeDuration,
+        schedule: scheduleA,
+        reducedMotion: false
+    )
+    let gentle = ContinuousLayer.apply(
+        to: base,
+        at: startA + BlinkSchedule.closeDuration,
+        schedule: scheduleA,
+        reducedMotion: true
+    )
+    #expect(normal.eyeOpenAmount < 0.01)
+    #expect(gentle.eyeOpenAmount > normal.eyeOpenAmount)
+    #expect(gentle.eyeOpenAmount < base.eyeOpenAmount)
 }
 
 // MARK: - 微眼動
@@ -162,11 +339,12 @@ func highlightBreathingPeakToPeakIsSmallerThanSmallestStateGap() {
 @Test("眨眼峰值與呼吸相位不會反覆對齊（§4.3：週期不可與固定眨眼同步）")
 func blinkAndBreathingDoNotRepeatedlyCoincide() {
     var rng = SeededGenerator(seed: 11)
-    let schedule = BlinkSchedule(horizon: 600, using: &rng)
+    let schedule = BlinkSchedule(using: &rng)
 
     // 若同步，每次眨眼峰值時呼吸相位（sin 值）會集中在同一個點附近，標準差趨近 0。
-    let phases = schedule.starts.map { start in
-        sin(2 * Double.pi * (start + BlinkSchedule.closeDuration) / ContinuousLayer.breathingPeriod)
+    let phases: [Double] = (0 ..< 150).map { index in
+        let start = schedule.start(at: index)
+        return sin(2 * Double.pi * (start + BlinkSchedule.closeDuration) / ContinuousLayer.breathingPeriod)
     }
     let mean = phases.reduce(0, +) / Double(phases.count)
     var sumSquaredDeviation = 0.0
@@ -185,7 +363,7 @@ func reducedMotionBlinkIsGentleNotJumpy() {
     var rng = SeededGenerator(seed: 5)
     let schedule = BlinkSchedule(using: &rng)
     let base = mapper.map(.idle)
-    let peak = schedule.starts[0] + BlinkSchedule.closeDuration
+    let peak = schedule.start(at: 0) + BlinkSchedule.closeDuration
 
     let normal = ContinuousLayer.apply(to: base, at: peak, schedule: schedule, reducedMotion: false)
     let gentle = ContinuousLayer.apply(to: base, at: peak, schedule: schedule, reducedMotion: true)

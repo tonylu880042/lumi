@@ -8,7 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		D355131EF36BF919D8AD9A03 /* LumiDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 33971DE69E87272953A4E74E /* LumiDomain */; };
+		B23D9A1CE4F047F3B67B1A01 /* LumiApplication in Frameworks */ = {isa = PBXBuildFile; productRef = 9FD1A4E2C93B4C7EA5B6D802 /* LumiApplication */; };
 		DC6BC1312254425B863AD503 /* LumiPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = CC45E634027F16005E357178 /* LumiPresentation */; };
+		E47B6A2FD8C84F1A9C02E503 /* LumiInfrastructure in Frameworks */ = {isa = PBXBuildFile; productRef = 6A3F8C1D4E5B4790B2C7D604 /* LumiInfrastructure */; };
 		A4569A74F03F70DCCBE42FB8 /* LumiUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1B2A9C8B8430A4A68E2E31A2 /* LumiUI */; };
 /* End PBXBuildFile section */
 
@@ -30,7 +32,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				D355131EF36BF919D8AD9A03 /* LumiDomain in Frameworks */,
+				B23D9A1CE4F047F3B67B1A01 /* LumiApplication in Frameworks */,
 				DC6BC1312254425B863AD503 /* LumiPresentation in Frameworks */,
+				E47B6A2FD8C84F1A9C02E503 /* LumiInfrastructure in Frameworks */,
 				A4569A74F03F70DCCBE42FB8 /* LumiUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -75,7 +79,9 @@
 			name = LumiApp;
 			packageProductDependencies = (
 				33971DE69E87272953A4E74E /* LumiDomain */,
+				9FD1A4E2C93B4C7EA5B6D802 /* LumiApplication */,
 				CC45E634027F16005E357178 /* LumiPresentation */,
+				6A3F8C1D4E5B4790B2C7D604 /* LumiInfrastructure */,
 				1B2A9C8B8430A4A68E2E31A2 /* LumiUI */,
 			);
 			productName = LumiApp;
@@ -269,7 +275,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -293,7 +299,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -332,9 +338,17 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = LumiDomain;
 		};
+		9FD1A4E2C93B4C7EA5B6D802 /* LumiApplication */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LumiApplication;
+		};
 		CC45E634027F16005E357178 /* LumiPresentation */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = LumiPresentation;
+		};
+		6A3F8C1D4E5B4790B2C7D604 /* LumiInfrastructure */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LumiInfrastructure;
 		};
 		1B2A9C8B8430A4A68E2E31A2 /* LumiUI */ = {
 			isa = XCSwiftPackageProductDependency;

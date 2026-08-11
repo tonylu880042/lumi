@@ -1,10 +1,9 @@
 import SwiftUI
-import LumiDomain
 import LumiPresentation
 
 /// 完整的臉：雙眼、眉毛、腮紅、嘴巴、waveform。純函式消費「一個」`AvatarVisualState`——
-/// 沒有 view-model、沒有 `@State` 動畫驅動、沒有計時器。M2/M3 才會疊加 Continuous／
-/// Event 層與動畫。
+/// 沒有 view-model、沒有 `@State` 動畫驅動、沒有計時器。Continuous／
+/// Event 層與動畫由 `AnimatedLumiAvatarView` 合成後再交給這裡渲染。
 ///
 /// 固定 640×420 座標系＋scale-to-fit（CLAUDE.md「不做 device 分支」），沒有
 /// `isPad` 或 size-class 判斷。
@@ -69,7 +68,88 @@ public struct LumiAvatarView: View {
                 waveform
                     .position(x: cx, y: AvatarTokens.waveformY)
             }
+
+            if state.sparkleIntensity > 0.001 {
+                ambientSparkles
+            }
+            if let effect = state.effect {
+                // Event/state decorations use the compositor's intensity envelope.
+                // Ambient sparkles above intentionally keep their independent
+                // `sparkleIntensity` opacity.
+                eventDecoration(for: effect)
+                    .opacity(state.effectIntensity)
+            }
         }
+    }
+
+    // MARK: - Effects（M3：Event 層／`effectIntensity` 的可見結果）
+
+    /// 環境 sparkle 對：不對稱地固定在兩個角落（移植自 eye-lab.html 的
+    /// `render()`），透明度直接讀 `sparkleIntensity`——這一欄位在 State 層本來就
+    /// 一直有值（idle 0.15、greeting 0.90…），跟 `effect` 是否有 Event 觸發無關。
+    private var ambientSparkles: some View {
+        ForEach(Array(AvatarTokens.ambientSparkles.enumerated()), id: \.offset) { _, placement in
+            SparkleShape()
+                .fill(AvatarTokens.sparkleColor)
+                .frame(width: 40, height: 40)
+                .scaleEffect(placement.scale)
+                .opacity(state.sparkleIntensity)
+                .position(placement.position)
+        }
+    }
+
+    /// `effect` 只有 State 層（例如 `confused` 的 `.questionMark`）或 Event 層
+    /// 會設定，兩者用同一套渲染，View 不分辨來源。單一裝飾固定畫在右上角
+    /// （§8：Effects 不得蓋到眼睛或讀成臉部損傷），celebration 另外處理，見
+    /// `celebrationDecoration`。
+    @ViewBuilder
+    private func eventDecoration(for effect: AvatarEffect) -> some View {
+        switch effect {
+        case .sparkles:
+            SparkleShape()
+                .fill(AvatarTokens.sparkleColor)
+                .frame(width: AvatarTokens.eventDecorationSize, height: AvatarTokens.eventDecorationSize)
+                .position(AvatarTokens.eventDecorationPosition)
+        case .hearts:
+            HeartShape()
+                .fill(AvatarTokens.heartColor)
+                .frame(width: AvatarTokens.eventDecorationSize, height: AvatarTokens.eventDecorationSize)
+                .position(AvatarTokens.eventDecorationPosition)
+        case .questionMark:
+            questionMarkDecoration
+        case .sweatDrop:
+            SweatDropShape()
+                .fill(AvatarTokens.sweatDropColor)
+                .frame(width: AvatarTokens.eventDecorationSize, height: AvatarTokens.eventDecorationSize)
+                .position(AvatarTokens.eventDecorationPosition)
+        case .celebration:
+            // CelebrationKind 的三個 case 共用同一個克制的視覺（見
+            // `celebrationDecoration`）——不做三套美術，也不用顏色分辨，
+            // §13 把「更豐富的慶祝效果」留給之後評估。
+            celebrationDecoration
+        }
+    }
+
+    /// 原始 SVG 是「一條 stroke path（鉤子）＋一個獨立的 fill circle（點）」兩個
+    /// 元素疊在一起，這裡用 `ZStack` 還原同樣的疊圖方式。
+    private var questionMarkDecoration: some View {
+        ZStack {
+            QuestionMarkHook()
+                .stroke(AvatarTokens.questionMarkColor, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+            QuestionMarkDot()
+                .fill(AvatarTokens.questionMarkColor)
+        }
+        .frame(width: AvatarTokens.eventDecorationSize, height: AvatarTokens.eventDecorationSize)
+        .position(AvatarTokens.eventDecorationPosition)
+    }
+
+    /// 克制的 celebration：單一顆 sparkle，畫在雙眉間的正上方，不做粒子系統、
+    /// 不做大型慶祝美術（CLAUDE.md「Vector-first」／M3 任務單 Part 3）。
+    private var celebrationDecoration: some View {
+        SparkleShape()
+            .fill(AvatarTokens.sparkleColor)
+            .frame(width: AvatarTokens.celebrationSize, height: AvatarTokens.celebrationSize)
+            .position(AvatarTokens.celebrationPosition)
     }
 
     // MARK: - Eyebrows
@@ -259,23 +339,17 @@ private struct AmplitudeMouth: Shape {
     }
 }
 
-#Preview("11 個基準狀態") {
-    ScrollView {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 320))], spacing: 16) {
-            ForEach(Array(previewStates.enumerated()), id: \.offset) { _, item in
-                VStack(spacing: 4) {
-                    LumiAvatarView(state: item.state)
-                        .frame(height: 200)
-                    Text(item.name)
-                        .font(.caption)
-                }
-            }
-        }
+#Preview("Lumi Avatar") {
+    LumiAvatarView(state: previewAvatarState)
+        .frame(width: 420, height: 280)
         .padding()
-    }
 }
 
-private var previewStates: [(name: String, state: AvatarVisualState)] {
-    let mapper = AvatarStateMapper()
-    return AssistantState.baselineCases.map { (String(describing: $0), mapper.map($0)) }
-}
+private let previewAvatarState = AvatarVisualState(
+    eyeOpenAmount: 1,
+    highlightIntensity: 0.9,
+    softGlossOpacity: 0.7,
+    blushOpacity: 0.2,
+    mouthStyle: .softSmile,
+    transition: AvatarTransition(duration: 0.3, curve: .easeInOut)
+)

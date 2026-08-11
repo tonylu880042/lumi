@@ -22,6 +22,7 @@ func greetingUsesBrightWateryEyesAndWarmExpression() {
 @Test("§5.2 基準表的眼睛數值", arguments: [
     (AssistantState.idle,                       0.88, 1.00, 1.00),
     (.detected(direction: .center),             1.00, 1.05, 1.00),
+    (.rotating,                                  0.98, 1.02, 0.96),
     (.recognizing,                              0.95, 0.98, 0.92),
     (.greeting,                                 1.00, 1.08, 1.00),
     (.listening,                                0.92, 1.00, 1.00),
@@ -39,13 +40,35 @@ func baselineEyeValues(state: AssistantState, open: Double, iris: Double, pupil:
     #expect(r.pupilScale ~= pupil)
 }
 
-@Test("11 個基準狀態都有明確 mapping，沒有任何一個靜默落回 idle（§5.3、§12）")
+@Test("12 個基準狀態都有明確 mapping，沒有任何一個靜默落回 idle（§5.3、§12）")
 func everyBaselineStateHasDistinctMapping() {
     let results = AssistantState.baselineCases.map(mapper.map)
-    #expect(results.count == 11)
+    #expect(results.count == 12)
     // idle 以外不得與 idle 完全相同 —— 相同就代表漏了 mapping
     let idle = mapper.map(.idle)
     #expect(results.dropFirst().allSatisfy { $0 != idle })
+}
+
+@Test("rotating 是獨立的置中專注表情，不是 idle 或 recognizing 的靜默落回")
+func rotatingUsesCenteredAttentiveExpression() {
+    let r = mapper.map(.rotating)
+    #expect(r != mapper.map(.idle))
+    #expect(r != mapper.map(.recognizing))
+    #expect(r.eyeOpenAmount ~= 0.98)
+    #expect(r.irisScale ~= 1.02)
+    #expect(r.pupilOffset == .zero)
+    #expect(r.pupilScale ~= 0.96)
+    #expect(r.highlightIntensity ~= 0.80)
+    #expect(r.softGlossOpacity ~= 0.80)
+    #expect(r.eyelidStyle == .focused)
+    #expect(r.eyebrowStyle == .attentive)
+    #expect(r.blushOpacity ~= 0.15)
+    #expect(r.mouthStyle == .neutral)
+    #expect(r.sparkleIntensity ~= 0.18)
+    #expect(r.waveformMode == .none)
+    #expect(r.effect == nil)
+    #expect(r.effectIntensity ~= 0)
+    #expect(r.transition == .init(duration: 0.28, curve: .easeInOut))
 }
 
 // MARK: - §11.1(2) 邊界測試
@@ -57,6 +80,7 @@ func outOfRangeValuesAreClamped() {
         pupilOffset: .init(x: -5, y: 5), pupilScale: -3,
         highlightIntensity: 7, softGlossOpacity: -1,
         blushOpacity: 4, sparkleIntensity: -2,
+        effect: .sparkles, effectIntensity: 9,
         transition: .init(duration: -1, curve: .easeInOut)
     )
     #expect(r.eyeOpenAmount ~= 1.0)
@@ -68,7 +92,32 @@ func outOfRangeValuesAreClamped() {
     #expect(r.softGlossOpacity ~= 0.0)
     #expect(r.blushOpacity ~= 1.0)
     #expect(r.sparkleIntensity ~= 0.0)
+    #expect(r.effectIntensity ~= 1.0)
     #expect(r.transition.duration ~= 0.0)
+}
+
+@Test("既有 State effect 未指定強度時預設可見；指定值仍由唯一 init clamp")
+func effectIntensityDefaultsVisibleForExistingStateEffectsAndClamps() {
+    let state = AvatarVisualState(
+        eyeOpenAmount: 0.8,
+        highlightIntensity: 0.7,
+        softGlossOpacity: 0.7,
+        blushOpacity: 0.2,
+        effect: .questionMark,
+        transition: .init(duration: 0.3, curve: .easeInOut)
+    )
+    #expect(state.effectIntensity ~= 1.0)
+
+    let low = AvatarVisualState(
+        eyeOpenAmount: 0.8,
+        highlightIntensity: 0.7,
+        softGlossOpacity: 0.7,
+        blushOpacity: 0.2,
+        effect: .sparkles,
+        effectIntensity: -1,
+        transition: .init(duration: 0.3, curve: .easeInOut)
+    )
+    #expect(low.effectIntensity ~= 0.0)
 }
 
 @Test("所有狀態的輸出都落在規格範圍內", arguments: AssistantState.baselineCases)

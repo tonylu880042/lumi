@@ -89,6 +89,41 @@ public enum AvatarTokens {
     public static let waveformBarGap: CGFloat = 6
     public static let waveformMaxHeight: CGFloat = 42
     public static let waveformY: CGFloat = 386
+
+    // MARK: - Effect decorations（M3：Event 層的可見結果／`sparkleIntensity`）
+    //
+    // 形狀本身（`SparkleShape`／`HeartShape`／`QuestionMarkHook`＋`QuestionMarkDot`／
+    // `SweatDropShape`，見 `EffectShapes.swift`）原封不動移植自 `Avatar/eye-lab.html`
+    // 的 `SPARKLE`／`HEART`／`QMARK`／`SWEAT`；這裡只集中管理顏色與擺放位置。
+
+    /// 環境 sparkle 對：由 `sparkleIntensity` 直接驅動透明度。位置與縮放照抄
+    /// eye-lab.html `render()` 裡固定寫死的兩個 `<g transform>`——那兩個位置已經
+    /// 對照概念圖審過，都落在雙眼可移動範圍（x ≤ 499）之外，不會蓋到臉。
+    public struct SparklePlacement: Sendable {
+        public let position: CGPoint
+        public let scale: CGFloat
+    }
+    public static let ambientSparkles: [SparklePlacement] = [
+        SparklePlacement(position: CGPoint(x: 74, y: 106), scale: 1.5),
+        SparklePlacement(position: CGPoint(x: 566, y: 142), scale: 1.2),
+    ]
+
+    /// 單一 Event decoration（sparkles／hearts／questionMark／sweatDrop）固定畫在
+    /// 右上角：x=566 已經比右眼最外緣（421+78=499）還要再往外，不論 y 取多少都
+    /// 不會跟眼睛重疊；y 刻意選在眼睛頂端（80）之上，也避開臉頰腮紅（288）。
+    public static let eventDecorationPosition = CGPoint(x: 566, y: 90)
+    public static let eventDecorationSize: CGFloat = 56
+
+    /// Celebration：刻意只用「一顆」sparkle 畫在雙眉之間的正上方（x=320 剛好是
+    /// 左右眉毛範圍［173–265］／［375–467］之外的空隙），不做三套不同美術、
+    /// 不做粒子系統（§13：更豐富的慶祝效果留給之後評估）。
+    public static let celebrationPosition = CGPoint(x: 320, y: 26)
+    public static let celebrationSize: CGFloat = 34
+
+    public static let sparkleColor = Color(hex: 0xF2857A)
+    public static let heartColor = Color(hex: 0xF589A0)
+    public static let questionMarkColor = Color(hex: 0x6B34AE)
+    public static let sweatDropColor = Color(hex: 0x7FC5E8)
 }
 
 extension Color {

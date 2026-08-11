@@ -39,6 +39,21 @@ public struct AvatarStateMapper: Sendable {
                 transition: .init(duration: 0.22, curve: .easeOut)
             )
 
+        case .rotating:
+            return AvatarVisualState(
+                eyeOpenAmount: 0.98,
+                irisScale: 1.02,
+                pupilOffset: .zero,
+                pupilScale: 0.96,
+                highlightIntensity: 0.80, softGlossOpacity: 0.80,
+                eyelidStyle: .focused, eyebrowStyle: .attentive,
+                blushOpacity: 0.15,
+                mouthStyle: .neutral,
+                sparkleIntensity: 0.18,
+                waveformMode: .none,
+                transition: .init(duration: 0.28, curve: .easeInOut)
+            )
+
         case .recognizing:
             // 「瞳孔跟隨臉部」是 Continuous 層的即時輸入，State 層輸出置中基準。
             return AvatarVisualState(

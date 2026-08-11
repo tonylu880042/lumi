@@ -12,9 +12,13 @@ Curves Lumi Avatar — iPad ＋ iPhone SwiftUI，大眼睛虛擬助理角色。
   不做 PNG／GIF 逐格換圖。想「多畫幾張表情圖」時，先回頭讀規格 §10。
 - **狀態邊界**：`AssistantState`（Domain）不得含座標、透明度或任何 SwiftUI 型別。
   只有純函式 `AvatarStateMapper` 能轉成 `AvatarVisualState`，View 只消費後者。
+- **模組邊界**：`LumiUI` 只能依賴 SwiftUI 與 `LumiPresentation`，不得 import `LumiDomain`。
+  Domain state／event 必須先映射成 Presentation model／command。
 - **動畫三層**：Continuous（眨眼、微眼動）／State（狀態表情）／Event（0.4–2s 覆蓋）
   由同一個合成器管理。合成順序 State → Continuous → Event → Accessibility 限制，
   最後一層永遠贏。多個 View 不得同時寫同一個參數。
+- **Reduced Motion 保留語意**：移除位移、彈跳、旋轉與循環粒子，但保留靜態圖示或短淡入淡出；
+  不得讓 Event 在「減少動態效果」下完全消失。
 - **左右眼共用 token**：非刻意表情不得出現不對稱的大小、光向或色彩。
 - **不做對嘴**：`speaking` 的嘴巴只由平滑後的 amplitude 驅動開口量，不做音素／唇形同步。
   中文要對嘴需要 漢字→韻母 對照表，成本遠高於 iPad 觀看距離下的可見差異。已否決，別再提。

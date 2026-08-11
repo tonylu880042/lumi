@@ -1,21 +1,34 @@
 import Foundation
-import LumiDomain
 
 /// 唯一的合成器（CLAUDE.md「動畫三層」）：State → Continuous → Event → Accessibility，
-/// 最後一層永遠贏。Event 層是 M3 的範圍，這裡不先蓋樓梯間——`compose` 目前只做
-/// State → Continuous → Accessibility 三步，之後要加 Event 只需要在 Continuous
-/// 與 Accessibility 中間插一步，不需要先做插件框架。
+/// 最後一層永遠贏。三層固定，不做插件框架或 registry。
 public enum AvatarCompositor {
     public static func compose(
         base: AvatarVisualState,
         at time: TimeInterval,
         blinkSchedule: BlinkSchedule,
+        activeEvent: ActiveEvent? = nil,
+        processedAmplitude: Double = 0,
         reducedMotion: Bool
     ) -> AvatarVisualState {
         let continuous = ContinuousLayer.apply(
-            to: base, at: time, schedule: blinkSchedule, reducedMotion: reducedMotion
+            to: base,
+            at: time,
+            schedule: blinkSchedule,
+            processedAmplitude: processedAmplitude,
+            reducedMotion: reducedMotion
         )
-        return applyAccessibility(continuous, base: base, reducedMotion: reducedMotion)
+        let event = EventLayer.apply(to: continuous, at: time, active: activeEvent)
+        let eventIsPlaying = activeEvent.map {
+            let elapsed = time - $0.startTime
+            return EventLayer.isActive(elapsed: elapsed, duration: EventLayer.duration(for: $0.kind))
+        } ?? false
+        return applyAccessibility(
+            event,
+            base: base,
+            reducedMotion: reducedMotion,
+            eventIsPlaying: eventIsPlaying
+        )
     }
 
     /// Accessibility 永遠最後生效、永遠贏（§8 優先權規則 1）。即使日後 Event 層
@@ -31,7 +44,10 @@ public enum AvatarCompositor {
     ///   直接關掉眨眼會讓角色看起來像壞掉的娃娃眼，比留著更違反「保留狀態可
     ///   辨識性」。
     private static func applyAccessibility(
-        _ state: AvatarVisualState, base: AvatarVisualState, reducedMotion: Bool
+        _ state: AvatarVisualState,
+        base: AvatarVisualState,
+        reducedMotion: Bool,
+        eventIsPlaying: Bool
     ) -> AvatarVisualState {
         guard reducedMotion else { return state }
         return AvatarVisualState(
@@ -53,7 +69,10 @@ public enum AvatarCompositor {
             audioAmplitude: base.audioAmplitude,
             sparkleIntensity: base.sparkleIntensity,
             waveformMode: base.waveformMode,
-            effect: base.effect,
+            effect: state.effect,
+            effectIntensity: state.effect == nil
+                ? 0
+                : (eventIsPlaying ? 1 : state.effectIntensity),
             overallBrightness: base.overallBrightness,
             transition: base.transition
         )

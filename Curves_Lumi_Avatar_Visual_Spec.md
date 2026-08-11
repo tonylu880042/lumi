@@ -188,7 +188,11 @@ LumiAvatar
 
 `playful`、`memberRecognized`、`firstVisit`、`longTimeNoSee`、`goalAchieved`、`weeklyGoalCompleted` 與 `error` 等較適合定義為短暫 Event，而非長駐 `AssistantState`。事件結束後應回到「當下最新的主狀態」，不可回到事件開始時已過期的狀態。
 
-若 Domain 已存在額外狀態，例如 `rotating`，應新增明確 mapping；不可由 View 以 `default` 靜默落回 `idle`。
+`encouraging` 與 `confused` 是可持續到下一次轉移的 `AssistantState`，不是短暫 Event。Domain 不得再為同一語意新增 `encouragement`、`retry` 或 `confusion` 等重複 Event case；短暫的 sparkle、question mark 等效果由既有 Event 或 Presentation 合成器處理。
+
+Phase 1 已新增不帶方向參數的 `rotating`；其表情使用置中、專注的等待視覺，不延續 `detected` 的左右注視、不顯示 waveform，也不加入 Event effect。它必須保有明確 mapping、測試與 snapshot，不可由 View 以 `default` 靜默落回 `idle`。`ending` 與 `returnHome` 是 Application action，不是 `AssistantState`。
+
+Domain Event 必須先由 Presentation 完整映射成 `AvatarEventCommand`；`LumiUI` 不得直接 import `LumiDomain`。本節邊界以 `docs/decisions/ADR-0005-development-scope-and-boundaries.md` 為準。
 
 ## 6. `AvatarVisualState` 建議欄位
 
@@ -223,9 +227,11 @@ struct AvatarVisualState: Equatable, Sendable {
     var mouthOpenAmount: Double
 
     // Feedback
+    var audioAmplitude: Double
     var sparkleIntensity: Double
     var waveformMode: WaveformMode
     var effect: AvatarEffect?
+    var effectIntensity: Double   // Recommended clamp: 0 ... 1; nil effect is always 0
 
     // Whole-avatar presentation
     var overallBrightness: Double
@@ -362,7 +368,7 @@ struct LumiEyeView: View {
 - Waveform 的 raw amplitude 應先做平滑、降採樣與最大值限制，避免抖動及不必要重繪。
 - Effects 結束時移除事件 overlay，不直接改寫 Domain 狀態。
 - 畫面離開、App 進入背景或 `offline` 時，停止不必要的時間軸與音訊驅動畫面更新。
-- 支援系統「減少動態效果」：將大幅彈跳、旋轉與粒子移動替換為淡入淡出或靜態圖示。
+- 支援系統「減少動態效果」：將大幅彈跳、旋轉與粒子移動替換為短淡入淡出或靜態圖示；不得直接移除事件的語意回饋。
 
 ## 8. 動畫分層：Continuous / State / Event
 
@@ -390,7 +396,9 @@ State base
 2. Event 只覆蓋它宣告擁有的欄位；其餘仍取最新 State。
 3. State 決定語意與主要表情。
 4. Continuous 不得讓 `offline` 看起來興奮，也不得把 `confused` 的視線拉回中央。
-5. 新 Event 到來時需有明確策略：排隊、取代或忽略；不可無限制疊加。
+5. 同時只保留一個 Event；新 Event 立即取代舊 Event，不排隊、不疊加。取消會立即清除，逾時後回到當下最新的主狀態。
+6. `LumiUI` 只接收 Presentation `AvatarEventCommand`；不得直接接收 Domain `AssistantEvent`。
+7. Reduced Motion 仍保留事件的靜態圖示或短淡入淡出，只移除位移、彈跳、旋轉與循環粒子。
 
 ## 9. 圖像資源交付結構
 
@@ -507,7 +515,7 @@ happy-03.png
 5. **Clock／Random 測試**：眨眼以注入的 Clock 與 RandomSource 測試，不在測試中真實等待。
 6. **音訊轉換測試**：RMS/amplitude 的平滑、降採樣與 clamp 可預測。
 7. **Snapshot／圖像回歸測試**：驗證每個狀態、眼皮開合與主要注視方向；固定裝置尺寸、色彩模式與 scale。
-8. **Accessibility 測試**：Reduced Motion 時不執行大幅位移或循環粒子，但保留狀態可辨識性。
+8. **Accessibility 測試**：Reduced Motion 時不執行大幅位移或循環粒子，但保留狀態與事件語意的可辨識性。
 
 不要只測 View 內部 modifier 數量，也不要使用固定 `sleep` 等待動畫。動畫的決策、時間軸與合成應抽離成可直接測試的資料。
 
@@ -574,13 +582,14 @@ func testCelebrationEndsOnLatestStateRatherThanCapturedOldState() async {
 
 最小回歸矩陣應包含：
 
-- 11 個基準 `AssistantState` 各一張。
+- 12 個 Phase 1 基準 `AssistantState` 各一張。
 - `detected` 左／右方向。
 - `listening` 與 `speaking` 的 waveform 靜態代表幀。
 - Open、Half、Closed、Happy Curve 四種眼皮。
 - Watery-eye highlights 開啟與基準強度。
 - Reduced Motion 的 `greeting` 與 `encouraging`。
-- 至少一種深色與一種淺色背景。
+- 至少覆蓋亮白與淡紫兩種正式產品背景。深色背景只可作為非產品的對比診斷，
+  不得視為 Lumi 支援的主題或正式畫面。
 
 Snapshot 只用來攔截非預期視覺變更，不能取代 Mapper、邊界與事件生命週期的單元測試。
 
@@ -590,13 +599,13 @@ MVP 視覺完成需同時符合：
 
 - 眼睛不是單純圓形：包含深色外圈、虹膜深淺、瞳孔、柔光與 2–4 個白色高光。
 - 主高光固定在左上光向，左右眼一致。
-- 11 個基準 `AssistantState` 都有明確、可測試的 visual mapping。
+- 12 個 Phase 1 基準 `AssistantState` 都有明確、可測試的 visual mapping 與 snapshot。
 - `detected` 可依來客方向連續移動視線，且瞳孔不穿出眼睛。
 - 眨眼不是 GIF，等待時間可變且測試不需真實 sleep。
 - `listening` 與 `speaking` waveform 可由實際 amplitude 驅動。
 - Continuous、State 與 Event 不互相永久覆寫。
 - 事件結束後回到最新主狀態。
-- Reduced Motion 有可辨識但低動態的替代呈現。
+- Reduced Motion 有可辨識但低動態的替代呈現，且不會抹除 Event 語意。
 - 核心視覺不依賴大量 PNG／GIF 換圖。
 - Mapper、clamp、合成優先權與事件生命週期測試通過。
 - 指定的 snapshot matrix 已建立並由設計／產品確認基準。
@@ -620,4 +629,3 @@ MVP 視覺完成需同時符合：
 - [Apple Developer Documentation — PhaseAnimator](https://developer.apple.com/documentation/swiftui/phaseanimator)
 - [Apple Developer Documentation — KeyframeAnimator](https://developer.apple.com/documentation/swiftui/keyframeanimator)
 - [Apple Developer Documentation — Controlling the timing and movements of your animations](https://developer.apple.com/documentation/swiftui/controlling-the-timing-and-movements-of-your-animations)
-

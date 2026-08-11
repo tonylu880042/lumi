@@ -23,32 +23,45 @@ public struct SeededGenerator: RandomNumberGenerator, Sendable {
     }
 }
 
-/// 預先算好的眨眼時間表。§12「等待時間可變」——用可注入的 `RandomNumberGenerator`
-/// 產生一串 2–6 秒的隨機等待間隔，累加成「眨眼開始時間」陣列。
+/// 持續、可重現的眨眼時間軸。§12「等待時間可變」——用可注入的
+/// `RandomNumberGenerator` 取得 seed 與首次等待時間，之後以無狀態的 SplitMix64
+/// hash 由眨眼序號產生微幅 jitter。時間軸不預先配置一小時的陣列，也不會在每幀
+/// 從 t=0 重播 RNG；每次 query 只計算固定數量的候選眨眼，記憶體維持 O(1)。
 ///
-/// 這是一次性建構出來的值：`ContinuousLayer.apply` 對同一個 schedule、同一個
-/// time 永遠回傳同一個結果，維持純函式性質（時間就是注入的 Clock）。
+/// 第 n 次眨眼（n > 0）的開始時間為：
+///
+///     firstStart + 4 * n + jitter(n)
+///
+/// `jitter(0) == 0`、其餘 jitter 落在 -1...1，因此相鄰間隔落在 2...6 秒。
+/// 同一個 seed 與同一個時間輸入永遠得到同一結果，維持純函式性質（時間就是
+/// 呼叫端注入的 Clock）。
 public struct BlinkSchedule: Sendable {
-    /// 眨眼開始時間（秒），嚴格遞增。
-    let starts: [Double]
+    private static let nominalInterval: Double = 4.0
+    private static let jitterAmplitude: Double = 1.0
+    private static let randomUnitScale = 1.0 / 9_007_199_254_740_992.0 // 2^53
+
+    private let seed: UInt64
+    private let firstStart: Double
 
     /// 快關慢開：關眼比開眼快，符合真實眨眼的不對稱曲線（§7.3）。
     static let closeDuration: Double = 0.09
     static let openDuration: Double = 0.15
     static var totalDuration: Double { closeDuration + openDuration }
 
-    /// - Parameters:
-    ///   - horizon: 預先算到第幾秒為止。1 小時對測試與一般 App 前景使用已足夠；
-    ///     App 若需要跑更久，呼叫端可自行帶更大的 horizon 重建 schedule。
-    ///   - rng: 注入的隨機來源（見 `SeededGenerator`），使排程可重現。
-    public init(horizon: Double = 3600, using rng: inout some RandomNumberGenerator) {
-        var times: [Double] = []
-        var t = Double.random(in: 2 ... 6, using: &rng)
-        while t < horizon {
-            times.append(t)
-            t += Double.random(in: 2 ... 6, using: &rng)
-        }
-        self.starts = times
+    /// - Parameter rng: 注入的隨機來源（見 `SeededGenerator`），使排程可重現。
+    public init(using rng: inout some RandomNumberGenerator) {
+        self.seed = rng.next()
+        self.firstStart = Double.random(in: 2 ... 6, using: &rng)
+    }
+
+    /// Returns the deterministic start time for a blink ordinal. Internal for tests;
+    /// production callers should normally use `closureAmount(at:)`.
+    func start(at index: Int) -> Double {
+        precondition(index >= 0, "Blink index must be non-negative")
+        guard index > 0 else { return firstStart }
+        return firstStart
+            + Self.nominalInterval * Double(index)
+            + jitter(at: index)
     }
 
     /// 在時間 `t`，眨眼造成的閉合量：0 = 睜開，1 = 全閉。
@@ -73,18 +86,39 @@ public struct BlinkSchedule: Sendable {
     }
 
     private func lastStart(atOrBefore t: Double) -> Double? {
-        var lo = 0, hi = starts.count - 1
+        guard t.isFinite, t >= firstStart else { return nil }
+
+        // Every start differs from its nominal 4-second slot by at most one
+        // second. Checking this fixed-size neighborhood avoids a scan from t=0
+        // while still finding the latest start for any practical elapsed time.
+        let relativeSlot = floor((t - firstStart) / Self.nominalInterval)
+        // `Double(Int.max - 3)` rounds to the same representable value as
+        // `Double(Int.max)` on 64-bit platforms. Keep the strict comparison
+        // against the latter so the subsequent Int conversion can never trap.
+        guard relativeSlot < Double(Int.max) else { return nil }
+        let center = Int(relativeSlot)
+        let lower = max(0, center - 2)
+        let upper = center + 2
         var result: Double?
-        while lo <= hi {
-            let mid = (lo + hi) / 2
-            if starts[mid] <= t {
-                result = starts[mid]
-                lo = mid + 1
-            } else {
-                hi = mid - 1
+
+        for index in lower ... upper {
+            let candidate = start(at: index)
+            if candidate <= t {
+                result = candidate
             }
         }
         return result
+    }
+
+    private func jitter(at index: Int) -> Double {
+        guard index > 0 else { return 0 }
+        var value = seed &+ UInt64(index)
+        value &+= 0x9E37_79B9_7F4A_7C15
+        value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
+        let bits = value ^ (value >> 31)
+        let unit = Double(bits >> 11) * Self.randomUnitScale
+        return (unit * 2 - 1) * Self.jitterAmplitude
     }
 }
 
@@ -120,6 +154,7 @@ public enum ContinuousLayer {
         to base: AvatarVisualState,
         at time: TimeInterval,
         schedule: BlinkSchedule,
+        processedAmplitude: Double = 0,
         reducedMotion: Bool
     ) -> AvatarVisualState {
         let closure = schedule.closureAmount(at: time, gentle: reducedMotion)
@@ -145,6 +180,21 @@ public enum ContinuousLayer {
         let saccadeX = saccadeRadius * cos(saccadeAngle)
         let saccadeY = saccadeRadius * sin(saccadeAngle)
 
+        let normalizedAmplitude = AvatarRange.unit.clamping(processedAmplitude)
+        let audioAmplitude: Double
+        let mouthOpenAmount: Double
+        switch base.waveformMode {
+        case .none:
+            audioAmplitude = 0
+            mouthOpenAmount = 0
+        case .audioOutput:
+            audioAmplitude = normalizedAmplitude
+            mouthOpenAmount = normalizedAmplitude
+        case .microphoneInput, .processing:
+            audioAmplitude = normalizedAmplitude
+            mouthOpenAmount = base.mouthOpenAmount
+        }
+
         return AvatarVisualState(
             eyeOpenAmount: eyeOpenAmount,
             eyeSquintAmount: base.eyeSquintAmount,
@@ -165,11 +215,12 @@ public enum ContinuousLayer {
             eyebrowTilt: base.eyebrowTilt,
             blushOpacity: base.blushOpacity,
             mouthStyle: base.mouthStyle,
-            mouthOpenAmount: base.mouthOpenAmount,
-            audioAmplitude: base.audioAmplitude,
+            mouthOpenAmount: mouthOpenAmount,
+            audioAmplitude: audioAmplitude,
             sparkleIntensity: base.sparkleIntensity,
             waveformMode: base.waveformMode,
             effect: base.effect,
+            effectIntensity: base.effectIntensity,
             overallBrightness: base.overallBrightness,
             transition: base.transition
         )

@@ -103,6 +103,8 @@ public struct AvatarVisualState: Equatable, Sendable {
     public let sparkleIntensity: Double
     public let waveformMode: WaveformMode
     public let effect: AvatarEffect?
+    /// Event decoration opacity. State effects default to visible; no effect always has zero intensity.
+    public let effectIntensity: Double
 
     // Whole-avatar
     public let overallBrightness: Double
@@ -128,6 +130,7 @@ public struct AvatarVisualState: Equatable, Sendable {
         sparkleIntensity: Double = 0,
         waveformMode: WaveformMode = .none,
         effect: AvatarEffect? = nil,
+        effectIntensity: Double = 1.0,
         overallBrightness: Double = 1.0,
         transition: AvatarTransition
     ) {
@@ -150,6 +153,7 @@ public struct AvatarVisualState: Equatable, Sendable {
         self.sparkleIntensity = AvatarRange.unit.clamping(sparkleIntensity)
         self.waveformMode = waveformMode
         self.effect = effect
+        self.effectIntensity = effect == nil ? 0 : AvatarRange.unit.clamping(effectIntensity)
         self.overallBrightness = AvatarRange.brightness.clamping(overallBrightness)
         self.transition = transition
     }
