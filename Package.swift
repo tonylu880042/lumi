@@ -13,13 +13,26 @@ let package = Package(
         .library(name: "LumiInfrastructure", targets: ["LumiInfrastructure"]),
         .library(name: "LumiUI", targets: ["LumiUI"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/stasel/WebRTC.git",
+            exact: "151.0.0"
+        )
+    ],
     targets: [
         .target(name: "LumiDomain"),
         .target(name: "LumiApplication", dependencies: ["LumiDomain"]),
-        .target(name: "LumiPresentation", dependencies: ["LumiDomain"]),
-        .target(name: "LumiInfrastructure", dependencies: ["LumiApplication", "LumiDomain"]),
+        .target(name: "LumiPresentation", dependencies: ["LumiApplication", "LumiDomain"]),
+        .target(
+            name: "LumiInfrastructure",
+            dependencies: [
+                "LumiApplication",
+                "LumiDomain",
+                .product(name: "WebRTC", package: "WebRTC")
+            ]
+        ),
         .target(name: "LumiUI", dependencies: ["LumiPresentation"]),
-        .testTarget(name: "LumiPresentationTests", dependencies: ["LumiPresentation"]),
+        .testTarget(name: "LumiPresentationTests", dependencies: ["LumiPresentation", "LumiApplication"]),
         .testTarget(
             name: "LumiUISnapshotTests",
             dependencies: ["LumiUI", "LumiPresentation", "LumiDomain"],

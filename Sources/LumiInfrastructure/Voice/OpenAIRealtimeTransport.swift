@@ -3,11 +3,17 @@
 /// A concrete WebRTC implementation belongs in Infrastructure and is injected
 /// through this protocol. The adapter only owns session lifecycle; it never
 /// constructs a network client or an audio engine itself.
+public enum OpenAIRealtimeConnectionPurpose: Equatable, Sendable {
+    case initial
+    case reconnect
+}
+
 public protocol OpenAIRealtimeTransport: Sendable {
     /// Connects this fresh transport using one short-lived client credential.
     func connect(
         clientSecret: OpenAIRealtimeClientSecret,
-        configuration: OpenAIRealtimeConfiguration
+        configuration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose
     ) async throws
 
     /// Returns the provider event stream for this transport instance.

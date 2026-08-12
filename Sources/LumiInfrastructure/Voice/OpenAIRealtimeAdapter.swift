@@ -127,7 +127,8 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         while acceptedGeneration == generation, !Task.isCancelled {
             let outcome = await runConnection(
                 generation: acceptedGeneration,
-                configuration: sessionConfiguration
+                configuration: sessionConfiguration,
+                purpose: retryCount == 0 ? .initial : .reconnect
             )
             guard acceptedGeneration == generation, !Task.isCancelled else { return }
 
@@ -147,16 +148,21 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
                         finishStart(
                             throwing: OpenAIRealtimeAdapterError.connectionEndedBeforeReady
                         )
+                        currentTransport = nil
+                        worker = nil
                     } else {
-                        publish(.failure)
+                        finishTerminalFailure()
                     }
-                    currentTransport = nil
-                    worker = nil
                     return
                 }
                 retryCount += 1
             case .retryFailed:
-                publish(.failure)
+                finishTerminalFailure()
+                return
+            case .authorizationRequired:
+                phase = .idle
+                publish(.authorizationRequired)
+                finishSubscribers()
                 currentTransport = nil
                 worker = nil
                 return
@@ -169,11 +175,13 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         case failedBeforeReady(any Error)
         case unexpectedEnd
         case retryFailed
+        case authorizationRequired
     }
 
     private func runConnection(
         generation acceptedGeneration: UInt64,
-        configuration sessionConfiguration: OpenAIRealtimeConfiguration
+        configuration sessionConfiguration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose
     ) async -> ConnectionOutcome {
         let wasStarting = phase == .starting
 
@@ -195,7 +203,8 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
             currentTransport = transport
             try await transport.connect(
                 clientSecret: secret,
-                configuration: sessionConfiguration
+                configuration: sessionConfiguration,
+                purpose: purpose
             )
             guard acceptedGeneration == generation, !Task.isCancelled else {
                 await transport.close()
@@ -253,6 +262,10 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
             if wasStarting {
                 return .failedBeforeReady(error)
             }
+            if let authorizationError = error as? VoiceSessionAuthorizationError,
+               authorizationError == .authorizationRequired {
+                return .authorizationRequired
+            }
             return .retryFailed
         }
     }
@@ -293,6 +306,14 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         for id in terminated {
             subscribers.removeValue(forKey: id)
         }
+    }
+
+    private func finishTerminalFailure() {
+        phase = .idle
+        publish(.failure)
+        finishSubscribers()
+        currentTransport = nil
+        worker = nil
     }
 
     private func finishSubscribers() {

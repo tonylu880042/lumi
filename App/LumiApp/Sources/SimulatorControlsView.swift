@@ -18,6 +18,49 @@ enum SimulatorControlMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// Session voice actions exposed by the Simulator overlay. The four
+/// artificial lifecycle actions are available only when the injected model
+/// owns deterministic Mock voice controls.
+enum SimulatorVoiceControl: String, CaseIterable, Identifiable, Equatable {
+    case startVoice
+    case userSpeechStarted
+    case userSpeechEnded
+    case responseReady
+    case voiceFailure
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .startVoice:
+            "啟動語音"
+        case .userSpeechStarted:
+            "模擬使用者開始說話"
+        case .userSpeechEnded:
+            "模擬使用者說完"
+        case .responseReady:
+            "模擬回覆就緒"
+        case .voiceFailure:
+            "模擬語音失敗"
+        }
+    }
+
+    func accessibilityHint(hasArtificialVoiceControls: Bool) -> String {
+        switch self {
+        case .startVoice:
+            hasArtificialVoiceControls ? "啟動模擬語音工作階段" : "啟動語音工作階段"
+        case .userSpeechStarted:
+            "送出使用者開始說話事件"
+        case .userSpeechEnded:
+            "送出使用者說話結束事件"
+        case .responseReady:
+            "送出模擬回覆完成事件"
+        case .voiceFailure:
+            "保留目前狀態並顯示可重試提示"
+        }
+    }
+}
+
 enum SimulatorControlCatalog {
     static let tuningStates: [(label: String, state: AssistantState)] = [
         ("idle", .idle),
@@ -45,6 +88,26 @@ enum SimulatorControlCatalog {
         ("weeklyGoalCompleted", .weeklyGoalCompleted),
         ("error", .error),
     ]
+
+    /// Derives the rendered voice-control catalog from the actual model
+    /// capability. The view below consumes this exact descriptor list, so Live
+    /// has no artificial buttons in its hierarchy rather than merely disabling
+    /// them.
+    @MainActor
+    static func voiceControls(
+        for simulationModel: SessionSimulationModel
+    ) -> [SimulatorVoiceControl] {
+        var controls: [SimulatorVoiceControl] = [.startVoice]
+        if simulationModel.hasArtificialVoiceControls {
+            controls.append(contentsOf: [
+                .userSpeechStarted,
+                .userSpeechEnded,
+                .responseReady,
+                .voiceFailure
+            ])
+        }
+        return controls
+    }
 }
 
 /// Overlay-only debug controls. It does not own session state or touch ports;
@@ -214,45 +277,9 @@ struct SimulatorControlsView: View {
             .accessibilityLabel("確認訪客身分")
             .accessibilityHint("完成選定的模擬身分結果")
 
-            Button("啟動語音") {
-                simulationModel.startVoiceSession()
+            ForEach(SimulatorControlCatalog.voiceControls(for: simulationModel)) { control in
+                voiceControlButton(control)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!simulationModel.canStartVoiceSession)
-            .accessibilityLabel("啟動語音")
-            .accessibilityHint("啟動模擬語音工作階段")
-
-            Button("模擬使用者開始說話") {
-                simulationModel.simulateUserSpeechStarted()
-            }
-            .buttonStyle(.bordered)
-            .disabled(!simulationModel.canSimulateUserSpeechStarted)
-            .accessibilityLabel("模擬使用者開始說話")
-            .accessibilityHint("送出使用者開始說話事件")
-
-            Button("模擬使用者說完") {
-                simulationModel.simulateUserSpeechEnded()
-            }
-            .buttonStyle(.bordered)
-            .disabled(!simulationModel.canSimulateUserSpeechEnded)
-            .accessibilityLabel("模擬使用者說完")
-            .accessibilityHint("送出使用者說話結束事件")
-
-            Button("模擬回覆就緒") {
-                simulationModel.simulateResponseReady()
-            }
-            .buttonStyle(.bordered)
-            .disabled(!simulationModel.canSimulateResponseReady)
-            .accessibilityLabel("模擬回覆就緒")
-            .accessibilityHint("送出模擬回覆完成事件")
-
-            Button("模擬語音失敗") {
-                simulationModel.simulateVoiceFailure()
-            }
-            .buttonStyle(.bordered)
-            .disabled(!simulationModel.canSimulateVoiceFailure)
-            .accessibilityLabel("模擬語音失敗")
-            .accessibilityHint("保留目前狀態並顯示可重試提示")
 
             Button("模擬逾時") {
                 simulationModel.endSession(cause: .timeout)
@@ -306,6 +333,74 @@ struct SimulatorControlsView: View {
                     .foregroundStyle(.red)
                     .accessibilityLabel("錯誤：\(errorMessage)")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func voiceControlButton(
+        _ control: SimulatorVoiceControl
+    ) -> some View {
+        switch control {
+        case .startVoice:
+            Button(control.label) {
+                simulationModel.startVoiceSession()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!simulationModel.canStartVoiceSession)
+            .accessibilityLabel(control.label)
+            .accessibilityHint(
+                control.accessibilityHint(
+                    hasArtificialVoiceControls: simulationModel.hasArtificialVoiceControls
+                )
+            )
+        case .userSpeechStarted:
+            Button(control.label) {
+                simulationModel.simulateUserSpeechStarted()
+            }
+            .buttonStyle(.bordered)
+            .disabled(!simulationModel.canSimulateUserSpeechStarted)
+            .accessibilityLabel(control.label)
+            .accessibilityHint(
+                control.accessibilityHint(
+                    hasArtificialVoiceControls: simulationModel.hasArtificialVoiceControls
+                )
+            )
+        case .userSpeechEnded:
+            Button(control.label) {
+                simulationModel.simulateUserSpeechEnded()
+            }
+            .buttonStyle(.bordered)
+            .disabled(!simulationModel.canSimulateUserSpeechEnded)
+            .accessibilityLabel(control.label)
+            .accessibilityHint(
+                control.accessibilityHint(
+                    hasArtificialVoiceControls: simulationModel.hasArtificialVoiceControls
+                )
+            )
+        case .responseReady:
+            Button(control.label) {
+                simulationModel.simulateResponseReady()
+            }
+            .buttonStyle(.bordered)
+            .disabled(!simulationModel.canSimulateResponseReady)
+            .accessibilityLabel(control.label)
+            .accessibilityHint(
+                control.accessibilityHint(
+                    hasArtificialVoiceControls: simulationModel.hasArtificialVoiceControls
+                )
+            )
+        case .voiceFailure:
+            Button(control.label) {
+                simulationModel.simulateVoiceFailure()
+            }
+            .buttonStyle(.bordered)
+            .disabled(!simulationModel.canSimulateVoiceFailure)
+            .accessibilityLabel(control.label)
+            .accessibilityHint(
+                control.accessibilityHint(
+                    hasArtificialVoiceControls: simulationModel.hasArtificialVoiceControls
+                )
+            )
         }
     }
 

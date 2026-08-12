@@ -1,0 +1,24 @@
+{
+  "name": "curves-lumi-realtime-broker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Curves Lumi Phase 2.3 Realtime credential broker scaffold",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "generate-device-token": "node scripts/generate-device-token.ts",
+    "smoke-client-secret": "node scripts/smoke-client-secret.ts"
+  },
+  "dependencies": {
+    "@vercel/firewall": "1.2.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2"
+  }
+}

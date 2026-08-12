@@ -10,7 +10,8 @@ public enum VoiceContext: Equatable, Sendable {
 /// Semantic lifecycle events emitted by a voice session.
 ///
 /// Provider errors and payloads stay behind the Infrastructure adapter. The
-/// coordinator uses `.failure` to present its current-state retry behavior.
+/// coordinator uses `.failure` for generic retry behavior and
+/// `.authorizationRequired` for device setup routing.
 public enum VoiceSessionEvent: Equatable, Sendable {
     /// The user started speaking while the assistant was producing audio.
     ///
@@ -21,6 +22,13 @@ public enum VoiceSessionEvent: Equatable, Sendable {
     case userSpeechEnded
     case responseReady
     case failure
+    /// The current device credential must be provisioned again.
+    case authorizationRequired
+}
+
+/// Semantic signal that the current device must be provisioned again.
+public enum VoiceSessionAuthorizationError: Error, Equatable, Sendable {
+    case authorizationRequired
 }
 
 /// Application boundary for a provider-independent voice session.

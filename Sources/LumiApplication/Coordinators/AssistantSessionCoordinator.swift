@@ -20,6 +20,10 @@ public actor AssistantSessionCoordinator {
 
     private var nextSubscriberID: UInt64 = 0
     private var subscribers: [UInt64: AsyncStream<AssistantState>.Continuation] = [:]
+    private var nextAuthorizationSubscriberID: UInt64 = 0
+    private var authorizationSubscribers: [
+        UInt64: AsyncStream<Void>.Continuation
+    ] = [:]
     private var identityRecognitionInProgress = false
     private var voiceSessionStartInProgress = false
     private var voiceEventConsumerTask: Task<Void, Never>?
@@ -63,6 +67,26 @@ public actor AssistantSessionCoordinator {
         }
         subscribers[subscriberID] = continuation
         continuation.yield(state)
+        return pair.stream
+    }
+
+    /// Returns an independent stream for provider-neutral device setup
+    /// routing. It emits once for each authorization invalidation observed by
+    /// the coordinator's sole voice-event consumer.
+    public func authorizationRequiredUpdates() -> AsyncStream<Void> {
+        let subscriberID = nextAuthorizationSubscriberID
+        nextAuthorizationSubscriberID &+= 1
+
+        let pair = AsyncStream<Void>.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        pair.continuation.onTermination = { @Sendable [weak self] _ in
+            Task { [weak self] in
+                await self?.removeAuthorizationSubscriber(id: subscriberID)
+            }
+        }
+        authorizationSubscribers[subscriberID] = pair.continuation
         return pair.stream
     }
 
@@ -374,6 +398,10 @@ public actor AssistantSessionCoordinator {
         subscribers.removeValue(forKey: id)
     }
 
+    private func removeAuthorizationSubscriber(id: UInt64) {
+        authorizationSubscribers.removeValue(forKey: id)
+    }
+
     private func clearOrientationOperation(generation: UInt64) {
         guard orientationOperationGeneration == generation else { return }
         orientationOperation = nil
@@ -431,6 +459,8 @@ public actor AssistantSessionCoordinator {
         switch event {
         case .failure:
             voiceRequiresRetry = true
+        case .authorizationRequired:
+            publishAuthorizationRequired()
         case .assistantInterrupted:
             applyVoiceTransition(.userSpeechStarted)
         case .userSpeechStarted:
@@ -453,6 +483,18 @@ public actor AssistantSessionCoordinator {
         }
     }
 
+    private func publishAuthorizationRequired() {
+        var terminatedSubscribers: [UInt64] = []
+        for (id, continuation) in authorizationSubscribers {
+            if case .terminated = continuation.yield(()) {
+                terminatedSubscribers.append(id)
+            }
+        }
+        for id in terminatedSubscribers {
+            authorizationSubscribers.removeValue(forKey: id)
+        }
+    }
+
     private func targetAngle(
         for direction: PresenceDirection
     ) throws(RotationAngleError) -> RotationAngle {
@@ -469,6 +511,9 @@ public actor AssistantSessionCoordinator {
     deinit {
         voiceEventConsumerTask?.cancel()
         for continuation in subscribers.values {
+            continuation.finish()
+        }
+        for continuation in authorizationSubscribers.values {
             continuation.finish()
         }
     }

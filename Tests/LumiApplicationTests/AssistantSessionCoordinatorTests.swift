@@ -922,6 +922,36 @@ struct AssistantSessionCoordinatorTests {
         #expect(await coordinator.voiceRequiresRetry == false)
     }
 
+    @Test("forwards authorization-required voice events without changing session state")
+    func forwardsAuthorizationRequiredWithoutChangingSessionState() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        try await enterSpeaking(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            result: .unknown
+        )
+
+        var authorizationUpdates =
+            (await coordinator.authorizationRequiredUpdates()).makeAsyncIterator()
+        await voice.emit(.authorizationRequired)
+        #expect(await authorizationUpdates.next() != nil)
+        #expect(await coordinator.state == .speaking)
+        #expect(await coordinator.voiceRequiresRetry == false)
+
+        await voice.emit(.failure)
+        #expect(await waitUntil { await coordinator.voiceRequiresRetry })
+        #expect(await coordinator.state == .speaking)
+    }
+
     @Test("maps assistant interruption to listening without a duplicate speech event")
     func assistantInterruptionEntersListening() async throws {
         let hardware = TestHardware()

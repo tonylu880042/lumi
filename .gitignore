@@ -3,3 +3,12 @@
 DerivedData/
 .DS_Store
 *.xcuserstate
+
+# Phase 2.3 broker / Vercel generated and secret material
+.vercel/
+.env*
+!.env.example
+!**/.env.example
+node_modules/
+coverage/
+Broker/dist/

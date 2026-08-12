@@ -2,7 +2,7 @@
 
 > File: `roadmap.md`
 > Status: Active
-> Last updated: 2026-08-10
+> Last updated: 2026-08-12
 > Development principles: Clean Architecture + TDD + Ask-if-Unclear
 
 ## 1. Roadmap Goal
@@ -471,10 +471,72 @@ Phase 2.1 decisions:
 - the app receives only injected short-lived credentials; the standard OpenAI
   API key remains on the company backend
 
+Phase 2.1 completed:
+- provider-independent Realtime configuration and redacted short-lived client
+  secret contracts
+- an injected transport and factory seam requiring no network or microphone in
+  tests
+- deterministic provider event mapping for readiness, first playable audio,
+  interruption, failures, and unknown future events
+- a cancellation-safe adapter with one fresh-credential reconnect attempt and
+  no provider types crossing `VoiceSessionPort`
+
+Phase 2.2 completed scope:
+- use `stasel/WebRTC` pinned to exact version `151.0.0`
+- implement a concrete peer connection with local microphone input, remote
+  assistant-audio playback, `oai-events`, and ephemeral-token SDP exchange
+- configure provider-default `server_vad` with automatic response and
+  interruption; defer threshold tuning to physical-iPad validation
+- request microphone permission just in time, use a voice-chat audio session,
+  prefer the iPad speaker without overriding wired or Bluetooth HFP routes, and
+  add the approved microphone purpose string
+- reject expired credentials before permission, media, or signaling, without
+  inventing an expiry safety margin
+- request the initial greeting exactly once and never replay it during the
+  adapter's automatic reconnect
+- keep the App on mock voice by default; concrete credential backend, Live mode,
+  wall-clock timeout values, and real Avatar amplitude remain later Phase 2 work
+
+Phase 2.2 implementation status: **Complete (automated gates)**
+- resolved revision: `19aa8c1fc7120d50df987b7111f42d5024df3d54`
+- upstream binary checksum:
+  `64a218fad3d84a0d783321aa9a1eec58ca266ac7879123f86b0b44b703b7d8dc`
+- focused `OpenAIWebRTCTransportTests`: 21 tests in 1 suite passed
+- Swift Testing: 247 tests in 16 suites passed; XCTest: 4 snapshot tests
+  passed
+- unsigned iOS Simulator build completed successfully
+- automated checks used deterministic fakes and did not exercise real
+  credentials, OpenAI network traffic, a microphone, or a physical iPad
+- the App remains on `MockVoiceSessionPort`; physical-iPad validation of
+  permission presentation, routing, echo cancellation, barge-in, interruption
+  recovery, and Taiwan Mandarin quality is deferred
+
+Phase 2.3 status: **Automated implementation/review through Task 17 complete; local checkpoint staging/commit authorized under 33A (2026-08-13), no push; Preview remains stopped and the Task 18 external gate is pending with no deployment**
+- add a separately installable `LumiApp-Live` composition while preserving the
+  existing offline Mock scheme
+- add a minimal Vercel client-secret broker; the standard OpenAI key remains a
+  server-only sensitive environment value
+- authorize revocable per-iPad tokens through this-device-only Keychain storage
+  and SHA-256 Vercel allowlists, with no member identity data in the broker
+- keep hardware and identity mocked while real WebRTC voice drives the existing
+  coordinator lifecycle
+- isolate Preview and Production credentials, endpoints, and Keychain
+  namespaces; require Preview review and physical-iPad evidence before explicit
+  Production promotion
+- defer App Attest, QR enrollment, a database registry, real identity, member
+  data, timeout tuning, and Avatar amplitude
+
 Refer to:
 
 ```text
+docs/phase-2.2-webrtc-transport.md
+docs/phase-2.2-webrtc-implementation-plan.md
+docs/decisions/ADR-0008-phase-2.2-webrtc-transport.md
 docs/decisions/ADR-0007-phase-2-realtime-voice-contract.md
+docs/phase-2.3-live-voice.md
+docs/phase-2.3-live-voice-implementation-plan.md
+docs/phase-2.3-live-voice-task-list.md
+docs/decisions/ADR-0009-phase-2.3-live-voice-broker.md
 ```
 
 ### Exit Criteria

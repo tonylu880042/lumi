@@ -25,6 +25,7 @@ struct OpenAIRealtimeAdapterTests {
         await transport.emit(.sessionCreated)
         try await start.value
         #expect(await completion.isCompleted)
+        #expect(await transport.connectionPurposes == [.initial])
 
         await transport.emit(.outputAudioStarted)
         await transport.emit(.inputAudioSpeechStarted)
@@ -123,11 +124,13 @@ struct OpenAIRealtimeAdapterTests {
         let source = TestClientSecretSource(secrets: [
             try makeSecret("first-secret"),
             try makeSecret("second-secret"),
+            try makeSecret("third-secret"),
         ])
         let firstTransport = TestRealtimeTransport()
         let secondTransport = TestRealtimeTransport()
+        let thirdTransport = TestRealtimeTransport()
         let factory = TestRealtimeTransportFactory(
-            transports: [firstTransport, secondTransport]
+            transports: [firstTransport, secondTransport, thirdTransport]
         )
         let adapter = makeAdapter(source: source, factory: factory)
         let recorder = EventRecorder()
@@ -142,6 +145,8 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
         #expect(await source.callCount == 2)
         #expect(await factory.makeCallCount == 2)
+        #expect(await firstTransport.connectionPurposes == [.initial])
+        #expect(await secondTransport.connectionPurposes == [.reconnect])
 
         await secondTransport.emit(.inputAudioSpeechStarted)
         for _ in 0 ..< 8 { await Task.yield() }
@@ -163,8 +168,19 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await source.callCount == 2)
         #expect(await factory.makeCallCount == 2)
 
-        await adapter.stop()
         await observer.value
+
+        let freshRecorder = EventRecorder()
+        let freshObserver = await observe(adapter: adapter, recorder: freshRecorder)
+        let freshStart = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await thirdTransport.connectCallCount == 1 })
+        await thirdTransport.emit(.sessionCreated)
+        try await freshStart.value
+        #expect(await source.callCount == 3)
+        #expect(await factory.makeCallCount == 3)
+
+        await adapter.stop()
+        await freshObserver.value
         #expect(await secondTransport.closeCallCount == 1)
     }
 
@@ -173,11 +189,13 @@ struct OpenAIRealtimeAdapterTests {
         let source = TestClientSecretSource(secrets: [
             try makeSecret("first-secret"),
             try makeSecret("retry-secret"),
+            try makeSecret("third-secret"),
         ])
         let firstTransport = TestRealtimeTransport()
         let retryTransport = TestRealtimeTransport(connectError: TestTransportError.connectFailed)
+        let thirdTransport = TestRealtimeTransport()
         let factory = TestRealtimeTransportFactory(
-            transports: [firstTransport, retryTransport]
+            transports: [firstTransport, retryTransport, thirdTransport]
         )
         let adapter = makeAdapter(source: source, factory: factory)
         let recorder = EventRecorder()
@@ -195,10 +213,63 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await source.callCount == 2)
         #expect(await factory.makeCallCount == 2)
         #expect(await recorder.events == [.failure])
+        await observer.value
+
+        let freshRecorder = EventRecorder()
+        let freshObserver = await observe(adapter: adapter, recorder: freshRecorder)
+        let freshStart = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await thirdTransport.connectCallCount == 1 })
+        await thirdTransport.emit(.sessionCreated)
+        try await freshStart.value
+        #expect(await source.callCount == 3)
+        #expect(await factory.makeCallCount == 3)
 
         await adapter.stop()
-        await observer.value
+        await freshObserver.value
         #expect(await retryTransport.closeCallCount == 1)
+    }
+
+    @Test("active reconnect authorization invalidation does not emit generic failure")
+    func activeReconnectAuthorizationInvalidationDoesNotEmitGenericFailure() async throws {
+        let source = TestClientSecretSource(outcomes: [
+            .secret(try makeSecret("first-secret")),
+            .authorizationRequired,
+            .secret(try makeSecret("third-secret")),
+        ])
+        let firstTransport = TestRealtimeTransport()
+        let secondTransport = TestRealtimeTransport()
+        let factory = TestRealtimeTransportFactory(
+            transports: [firstTransport, secondTransport]
+        )
+        let adapter = makeAdapter(
+            source: source,
+            factory: factory
+        )
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.emit(.sessionCreated)
+        try await start.value
+
+        await firstTransport.finishUnexpectedly()
+        #expect(await waitUntil { await source.callCount == 2 })
+        #expect(await waitUntil { await recorder.count == 1 })
+        #expect(await recorder.events == [.authorizationRequired])
+        #expect(await factory.makeCallCount == 1)
+        await observer.value
+
+        let freshObserver = await observe(adapter: adapter, recorder: EventRecorder())
+        let freshStart = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+        await secondTransport.emit(.sessionCreated)
+        try await freshStart.value
+        #expect(await source.callCount == 3)
+        #expect(await factory.makeCallCount == 2)
+
+        await adapter.stop()
+        await freshObserver.value
     }
 
     @Test("two disconnects before readiness fail startup without a third attempt")
@@ -261,12 +332,16 @@ struct OpenAIRealtimeAdapterTests {
 }
 
 private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
-    private var secrets: [OpenAIRealtimeClientSecret]
+    private var outcomes: [TestClientSecretOutcome]
     private(set) var callCount = 0
     private(set) var receivedConfigurations: [OpenAIRealtimeConfiguration] = []
 
     init(secrets: [OpenAIRealtimeClientSecret]) {
-        self.secrets = secrets
+        self.outcomes = secrets.map(TestClientSecretOutcome.secret)
+    }
+
+    init(outcomes: [TestClientSecretOutcome]) {
+        self.outcomes = outcomes
     }
 
     func clientSecret(
@@ -274,9 +349,19 @@ private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
     ) async throws -> OpenAIRealtimeClientSecret {
         callCount += 1
         receivedConfigurations.append(configuration)
-        guard !secrets.isEmpty else { throw TestTransportError.exhaustedCredentials }
-        return secrets.removeFirst()
+        guard !outcomes.isEmpty else { throw TestTransportError.exhaustedCredentials }
+        switch outcomes.removeFirst() {
+        case .secret(let secret):
+            return secret
+        case .authorizationRequired:
+            throw VoiceSessionAuthorizationError.authorizationRequired
+        }
     }
+}
+
+private enum TestClientSecretOutcome: Sendable {
+    case secret(OpenAIRealtimeClientSecret)
+    case authorizationRequired
 }
 
 private actor TestRealtimeTransportFactory: OpenAIRealtimeTransportFactory {
@@ -297,6 +382,7 @@ private actor TestRealtimeTransportFactory: OpenAIRealtimeTransportFactory {
 private actor TestRealtimeTransport: OpenAIRealtimeTransport {
     private let connectError: (any Error)?
     private(set) var connectCallCount = 0
+    private(set) var connectionPurposes: [OpenAIRealtimeConnectionPurpose] = []
     private(set) var closeCallCount = 0
     private var continuation: AsyncStream<OpenAIRealtimeProviderEvent>.Continuation?
 
@@ -306,9 +392,11 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
 
     func connect(
         clientSecret _: OpenAIRealtimeClientSecret,
-        configuration _: OpenAIRealtimeConfiguration
+        configuration _: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose
     ) async throws {
         connectCallCount += 1
+        connectionPurposes.append(purpose)
         if let connectError { throw connectError }
     }
 
@@ -338,7 +426,8 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
 private actor ExhaustedRealtimeTransport: OpenAIRealtimeTransport {
     func connect(
         clientSecret _: OpenAIRealtimeClientSecret,
-        configuration _: OpenAIRealtimeConfiguration
+        configuration _: OpenAIRealtimeConfiguration,
+        purpose _: OpenAIRealtimeConnectionPurpose
     ) async throws {
         throw TestTransportError.exhaustedTransports
     }

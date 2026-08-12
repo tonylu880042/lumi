@@ -11,6 +11,17 @@ struct VoiceSessionPortContractTests {
         #expect(Mirror(reflecting: event).children.isEmpty)
         acceptsSendable(event)
     }
+
+    @Test("authorization-required error is payload-free and equatable")
+    func authorizationRequiredIsPayloadFreeAndEquatable() {
+        let error = VoiceSessionAuthorizationError.authorizationRequired
+
+        #expect(error == .authorizationRequired)
+        #expect(Mirror(reflecting: error).children.isEmpty)
+        #expect(!String(describing: error).contains("authorization-marker"))
+        #expect(!String(reflecting: error).contains("authorization-marker"))
+        acceptsSendable(error)
+    }
 }
 
 private func acceptsSendable(_ event: any Sendable) {

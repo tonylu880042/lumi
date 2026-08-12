@@ -4,6 +4,35 @@ import LumiDomain
 import LumiInfrastructure
 import LumiPresentation
 
+/// App-internal controls that exist only for deterministic Mock voice flows.
+///
+/// Live composition passes `nil`; provider startup and events then remain owned
+/// by `AssistantSessionCoordinator` and its injected `VoiceSessionPort`.
+struct VoiceSimulationControls: Sendable {
+    let hasPendingStart: @Sendable () async -> Bool
+    let completeStart: @Sendable () async -> Void
+    let emit: @Sendable (VoiceSessionEvent) async -> Void
+
+    init(
+        hasPendingStart: @escaping @Sendable () async -> Bool,
+        completeStart: @escaping @Sendable () async -> Void,
+        emit: @escaping @Sendable (VoiceSessionEvent) async -> Void
+    ) {
+        self.hasPendingStart = hasPendingStart
+        self.completeStart = completeStart
+        self.emit = emit
+    }
+
+    /// Compatibility adapter for the existing deterministic Mock actor.
+    init(voice: MockVoiceSessionPort) {
+        self.init(
+            hasPendingStart: { await voice.hasPendingStart },
+            completeStart: { await voice.completeStart() },
+            emit: { event in await voice.emit(event) }
+        )
+    }
+}
+
 /// App-side adapter for the deterministic Phase 1.3 session simulation.
 ///
 /// The coordinator remains the only owner of the active session state. This
@@ -98,7 +127,8 @@ final class SessionSimulationModel: ObservableObject {
     private let coordinator: AssistantSessionCoordinator
     private let hardware: MockHardwareControlPort
     private let identity: MockIdentityRecognitionAdapter
-    private let voice: MockVoiceSessionPort
+    private let voiceSimulationControls: VoiceSimulationControls?
+    private let onAuthorizationRequired: @MainActor () -> Void
     private let mapper: AvatarStateMapper
     private let eventMapper: AvatarEventCommandMapper
 
@@ -115,6 +145,8 @@ final class SessionSimulationModel: ObservableObject {
     private static let maxPendingRequestYields = 128
 
     private var stateUpdatesTask: Task<Void, Never>?
+    private var authorizationRegistrationTask: Task<AsyncStream<Void>, Never>?
+    private var authorizationUpdatesTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
     private var actionGeneration: UInt64 = 0
 
@@ -122,23 +154,50 @@ final class SessionSimulationModel: ObservableObject {
         coordinator: AssistantSessionCoordinator,
         hardware: MockHardwareControlPort,
         identity: MockIdentityRecognitionAdapter,
-        voice: MockVoiceSessionPort,
+        voiceSimulationControls: VoiceSimulationControls? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
-        eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper()
+        eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
     ) {
         self.coordinator = coordinator
         self.hardware = hardware
         self.identity = identity
-        self.voice = voice
+        self.voiceSimulationControls = voiceSimulationControls
+        self.onAuthorizationRequired = onAuthorizationRequired
         self.mapper = mapper
         self.eventMapper = eventMapper
         self.assistantState = .idle
         self.avatarState = mapper.map(.idle)
         subscribeToStateUpdates()
+        subscribeToAuthorizationUpdates()
+    }
+
+    /// Keeps the existing Mock App composition source-compatible while the
+    /// model itself stores only the narrow optional capability seam.
+    convenience init(
+        coordinator: AssistantSessionCoordinator,
+        hardware: MockHardwareControlPort,
+        identity: MockIdentityRecognitionAdapter,
+        voice: MockVoiceSessionPort,
+        mapper: AvatarStateMapper = AvatarStateMapper(),
+        eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
+    ) {
+        self.init(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voiceSimulationControls: VoiceSimulationControls(voice: voice),
+            mapper: mapper,
+            eventMapper: eventMapper,
+            onAuthorizationRequired: onAuthorizationRequired
+        )
     }
 
     deinit {
         stateUpdatesTask?.cancel()
+        authorizationRegistrationTask?.cancel()
+        authorizationUpdatesTask?.cancel()
         actionTask?.cancel()
     }
 
@@ -199,23 +258,29 @@ final class SessionSimulationModel: ObservableObject {
         assistantState == .greeting && pendingAction == nil
     }
 
+    /// Whether the UI may expose deterministic artificial voice controls.
+    var hasArtificialVoiceControls: Bool {
+        voiceSimulationControls != nil
+    }
+
     /// The Simulator exposes each lifecycle event as an explicit action. A
     /// pending action closes the small async gap between `emit` and the
     /// coordinator's state stream so a fast repeated tap cannot duplicate it.
     var canSimulateUserSpeechStarted: Bool {
-        assistantState == .speaking && pendingAction == nil
+        hasArtificialVoiceControls && assistantState == .speaking && pendingAction == nil
     }
 
     var canSimulateUserSpeechEnded: Bool {
-        assistantState == .listening && pendingAction == nil
+        hasArtificialVoiceControls && assistantState == .listening && pendingAction == nil
     }
 
     var canSimulateResponseReady: Bool {
-        assistantState == .thinking && pendingAction == nil
+        hasArtificialVoiceControls && assistantState == .thinking && pendingAction == nil
     }
 
     var canSimulateVoiceFailure: Bool {
-        switch assistantState {
+        guard hasArtificialVoiceControls else { return false }
+        return switch assistantState {
         case .speaking, .listening, .thinking:
             pendingAction == nil
         default:
@@ -357,40 +422,98 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
-    /// Starts the mock voice session and explicitly completes its readiness
-    /// boundary. No timer is used: a bounded yield loop waits for the mock's
-    /// pending request, then the same user action calls `completeStart()`.
+    /// Starts the voice session. In Mock mode, the optional controls keep the
+    /// deterministic readiness boundary explicit; Live mode simply awaits the
+    /// coordinator's provider-owned startup.
     func startVoiceSession() {
         guard canStartVoiceSession else { return }
         let operationID = beginAction(.startingVoice)
 
         let coordinator = coordinator
-        let voice = voice
+        let authorizationRegistrationTask = authorizationRegistrationTask
+        let controls = voiceSimulationControls
         actionTask = Task { [weak self] in
-            let startTask = Task {
-                try await coordinator.startVoiceSession()
-            }
+            _ = await authorizationRegistrationTask?.value
 
-            do {
-                let requestIsPending = try await withTaskCancellationHandler(
-                    operation: {
-                        var pending = false
-                        for _ in 0 ..< Self.maxPendingRequestYields {
-                            try Task.checkCancellation()
-                            if await voice.hasPendingStart {
-                                pending = true
-                                break
+            if let controls {
+                let startTask = Task {
+                    try await coordinator.startVoiceSession()
+                }
+
+                do {
+                    let requestIsPending = try await withTaskCancellationHandler(
+                        operation: {
+                            var pending = false
+                            for _ in 0 ..< Self.maxPendingRequestYields {
+                                try Task.checkCancellation()
+                                if await controls.hasPendingStart() {
+                                    pending = true
+                                    break
+                                }
+                                await Task.yield()
                             }
-                            await Task.yield()
+                            return pending
+                        },
+                        onCancel: {
+                            startTask.cancel()
                         }
-                        return pending
-                    },
-                    onCancel: {
-                        startTask.cancel()
-                    }
-                )
+                    )
 
-                guard requestIsPending else {
+                    guard requestIsPending else {
+                        startTask.cancel()
+                        let result = await startTask.result
+                        if case let .failure(error) = result,
+                           let authorizationError = error as? VoiceSessionAuthorizationError,
+                           authorizationError == .authorizationRequired {
+                            guard !Task.isCancelled else {
+                                self?.finishAction(operationID)
+                                return
+                            }
+                            self?.onAuthorizationRequired()
+                            self?.finishAction(operationID)
+                            return
+                        }
+                        guard !Task.isCancelled else {
+                            self?.finishAction(operationID)
+                            return
+                        }
+                        self?.failAction(
+                            message: Self.voiceStartErrorMessage,
+                            operationID: operationID
+                        )
+                        return
+                    }
+
+                    try Task.checkCancellation()
+                    await controls.completeStart()
+                    _ = try await withTaskCancellationHandler(
+                        operation: {
+                            try await startTask.value
+                        },
+                        onCancel: {
+                            startTask.cancel()
+                        }
+                    )
+                    guard !Task.isCancelled else {
+                        self?.finishAction(operationID)
+                        return
+                    }
+                    // The coordinator's state stream publishes `speaking`; the
+                    // model intentionally does not own or mutate Domain state.
+                } catch let error as VoiceSessionAuthorizationError {
+                    startTask.cancel()
+                    _ = try? await startTask.value
+                    guard error == .authorizationRequired, !Task.isCancelled else {
+                        self?.finishAction(operationID)
+                        return
+                    }
+                    self?.onAuthorizationRequired()
+                    self?.finishAction(operationID)
+                } catch is CancellationError {
+                    startTask.cancel()
+                    _ = try? await startTask.value
+                    self?.finishAction(operationID)
+                } catch {
                     startTask.cancel()
                     _ = try? await startTask.value
                     guard !Task.isCancelled else {
@@ -401,32 +524,26 @@ final class SessionSimulationModel: ObservableObject {
                         message: Self.voiceStartErrorMessage,
                         operationID: operationID
                     )
-                    return
                 }
+                return
+            }
 
-                try Task.checkCancellation()
-                await voice.completeStart()
-                _ = try await withTaskCancellationHandler(
-                    operation: {
-                        try await startTask.value
-                    },
-                    onCancel: {
-                        startTask.cancel()
-                    }
-                )
+            do {
+                _ = try await coordinator.startVoiceSession()
                 guard !Task.isCancelled else {
                     self?.finishAction(operationID)
                     return
                 }
-                // The coordinator's state stream publishes `speaking`; the
-                // model intentionally does not own or mutate Domain state.
+            } catch let error as VoiceSessionAuthorizationError {
+                guard error == .authorizationRequired, !Task.isCancelled else {
+                    self?.finishAction(operationID)
+                    return
+                }
+                self?.onAuthorizationRequired()
+                self?.finishAction(operationID)
             } catch is CancellationError {
-                startTask.cancel()
-                _ = try? await startTask.value
                 self?.finishAction(operationID)
             } catch {
-                startTask.cancel()
-                _ = try? await startTask.value
                 guard !Task.isCancelled else {
                     self?.finishAction(operationID)
                     return
@@ -553,9 +670,9 @@ final class SessionSimulationModel: ObservableObject {
     func simulateVoiceFailure() {
         guard canSimulateVoiceFailure else { return }
         let operationID = beginAction(.voiceFailure)
-        let voice = voice
+        guard let controls = voiceSimulationControls else { return }
         actionTask = Task { [weak self] in
-            await voice.emit(.failure)
+            await controls.emit(.failure)
             guard !Task.isCancelled else {
                 self?.finishAction(operationID)
                 return
@@ -581,6 +698,22 @@ final class SessionSimulationModel: ObservableObject {
             for await nextState in updates {
                 guard !Task.isCancelled else { return }
                 self?.receive(nextState)
+            }
+        }
+    }
+
+    private func subscribeToAuthorizationUpdates() {
+        let coordinator = coordinator
+        let registrationTask = Task {
+            await coordinator.authorizationRequiredUpdates()
+        }
+        authorizationRegistrationTask = registrationTask
+        authorizationUpdatesTask = Task { [weak self] in
+            let updates = await registrationTask.value
+            for await _ in updates {
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                self.onAuthorizationRequired()
             }
         }
     }
@@ -685,10 +818,10 @@ final class SessionSimulationModel: ObservableObject {
         _ event: VoiceSessionEvent,
         pendingAction: PendingAction
     ) {
+        guard let controls = voiceSimulationControls else { return }
         let operationID = beginAction(pendingAction)
-        let voice = voice
         actionTask = Task { [weak self] in
-            await voice.emit(event)
+            await controls.emit(event)
             guard !Task.isCancelled else {
                 self?.finishAction(operationID)
                 return
