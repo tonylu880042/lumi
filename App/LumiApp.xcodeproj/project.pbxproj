@@ -13,12 +13,22 @@
 		E47B6A2FD8C84F1A9C02E503 /* LumiInfrastructure in Frameworks */ = {isa = PBXBuildFile; productRef = 6A3F8C1D4E5B4790B2C7D604 /* LumiInfrastructure */; };
 		A4569A74F03F70DCCBE42FB8 /* LumiUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1B2A9C8B8430A4A68E2E31A2 /* LumiUI */; };
 		F6E6D7C8B9A04152A3B4C5D6 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F6E6D7C7B9A04152A3B4C5D6 /* XCTest.framework */; };
+		B1243B63F2A54A00A50FB286 /* SFace.mlpackage in Resources */ = {isa = PBXBuildFile; fileRef = 086F984E67C14EC391532445 /* SFace.mlpackage */; };
+		AC21E9DC2420452699CA90A3 /* YuNet.mlpackage in Resources */ = {isa = PBXBuildFile; fileRef = 95FFF6AA40FE46A5B75E7132 /* YuNet.mlpackage */; };
+		1A22EA0BFB7D48A49EAC0366 /* SFace-Apache-2.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 786C8AFB946C4BB29D870171 /* SFace-Apache-2.0.txt */; };
+		27CF6F96E315422FB360853D /* YuNet-MIT.txt in Resources */ = {isa = PBXBuildFile; fileRef = E31519F015374DE680A9EC49 /* YuNet-MIT.txt */; };
+		A3796F30E108414FAFF825E5 /* ModelProvenance.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F7A4B8D2E94B54A5A6C1F8 /* ModelProvenance.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		2FCFB5F3A8CE804B4FA0CE6E /* LumiApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LumiApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F6E6D7C6B9A04152A3B4C5D6 /* LumiAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LumiAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F6E6D7C7B9A04152A3B4C5D6 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		086F984E67C14EC391532445 /* SFace.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper.mlpackage; name = SFace.mlpackage; path = SFace.mlpackage; sourceTree = "<group>"; };
+		95FFF6AA40FE46A5B75E7132 /* YuNet.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper.mlpackage; name = YuNet.mlpackage; path = YuNet.mlpackage; sourceTree = "<group>"; };
+		786C8AFB946C4BB29D870171 /* SFace-Apache-2.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = SFace-Apache-2.0.txt; path = SFace-Apache-2.0.txt; sourceTree = "<group>"; };
+		E31519F015374DE680A9EC49 /* YuNet-MIT.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = YuNet-MIT.txt; path = YuNet-MIT.txt; sourceTree = "<group>"; };
+		C0F7A4B8D2E94B54A5A6C1F8 /* ModelProvenance.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = ModelProvenance.json; path = ModelProvenance.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -62,9 +72,30 @@
 			isa = PBXGroup;
 			children = (
 				9C49689C62385D5B5A567478 /* Sources */,
+				A2D3E4F56789012345678901 /* Resources */,
 				F6E6D7C5B9A04152A3B4C5D6 /* LumiAppTests */,
 				6E1D0E6223A36E1BBCA0DEF0 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		A2D3E4F56789012345678901 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				B3E4F5678901234567890123 /* Models */,
+			);
+			path = LumiApp/Resources;
+			sourceTree = "<group>";
+		};
+		B3E4F5678901234567890123 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				086F984E67C14EC391532445 /* SFace.mlpackage */,
+				95FFF6AA40FE46A5B75E7132 /* YuNet.mlpackage */,
+				786C8AFB946C4BB29D870171 /* SFace-Apache-2.0.txt */,
+				E31519F015374DE680A9EC49 /* YuNet-MIT.txt */,
+				C0F7A4B8D2E94B54A5A6C1F8 /* ModelProvenance.json */,
+			);
+			path = Models;
 			sourceTree = "<group>";
 		};
 		6E1D0E6223A36E1BBCA0DEF0 /* Products */ = {
@@ -174,6 +205,11 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1243B63F2A54A00A50FB286 /* SFace.mlpackage in Resources */,
+				AC21E9DC2420452699CA90A3 /* YuNet.mlpackage in Resources */,
+				1A22EA0BFB7D48A49EAC0366 /* SFace-Apache-2.0.txt in Resources */,
+				27CF6F96E315422FB360853D /* YuNet-MIT.txt in Resources */,
+				A3796F30E108414FAFF825E5 /* ModelProvenance.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -448,6 +484,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Lumi 需要使用相機，才能進行現場人臉校準與辨識測試。";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Lumi 需要使用麥克風，才能與您進行即時語音互動。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -499,6 +536,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = LumiApp/Info-Live.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Lumi 需要使用相機，才能進行現場人臉校準與辨識測試。";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Lumi 需要使用麥克風，才能與您進行即時語音互動。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

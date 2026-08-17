@@ -9,6 +9,11 @@ import LumiUI
 struct ContentView: View {
     @ObservedObject private var simulationModel: SessionSimulationModel
 
+#if DEBUG
+    private let calibrationModel: DebugIdentityCalibrationModel?
+    @State private var isCalibrationPresented = false
+#endif
+
     @State private var controlsMode: SimulatorControlMode = .session
     @State private var direction: PresenceDirection = .center
     @State private var identityChoice: SessionSimulationModel.VisitorIdentityChoice = .unknown
@@ -27,7 +32,20 @@ struct ContentView: View {
 
     init(simulationModel: SessionSimulationModel) {
         self._simulationModel = ObservedObject(wrappedValue: simulationModel)
+#if DEBUG
+        self.calibrationModel = nil
+#endif
     }
+
+#if DEBUG
+    init(
+        simulationModel: SessionSimulationModel,
+        calibrationModel: DebugIdentityCalibrationModel
+    ) {
+        self._simulationModel = ObservedObject(wrappedValue: simulationModel)
+        self.calibrationModel = calibrationModel
+    }
+#endif
 
     private var renderedAvatarState: AvatarVisualState {
         switch controlsMode {
@@ -74,7 +92,25 @@ struct ContentView: View {
                     processedAmplitude: $processedAmplitude
                 )
             }
+#if DEBUG
+            if calibrationModel != nil {
+                Button("DEBUG 身份校準") {
+                    isCalibrationPresented = true
+                }
+                .buttonStyle(.bordered)
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .accessibilityIdentifier("debug-identity-calibration")
+            }
+#endif
         }
+#if DEBUG
+        .sheet(isPresented: $isCalibrationPresented) {
+            if let calibrationModel {
+                DebugIdentityCalibrationView(model: calibrationModel)
+            }
+        }
+#endif
         .onChange(of: rawAmplitude) { _, newValue in
             processedAmplitude = amplitudeProcessor.process([newValue])
         }

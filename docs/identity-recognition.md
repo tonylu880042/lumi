@@ -1,11 +1,11 @@
 # Curves Lumi — Identity Recognition Specification
 
 > File: `identity-recognition.md`
-> Status: Draft for implementation
-> Last updated: 2026-08-09
+> Status: In implementation
+> Last updated: 2026-08-17
 > Scope: Milestone 3 — Member Identity Recognition
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
-> Decisions: `docs/decisions/ADR-0004-face-match-confidence-policy.md`, `docs/decisions/ADR-0005-development-scope-and-boundaries.md`
+> Decisions: `docs/decisions/ADR-0004-face-match-confidence-policy.md`, `docs/decisions/ADR-0005-development-scope-and-boundaries.md`, `docs/decisions/ADR-0010-sface-embedding-model.md`
 
 ---
 
@@ -353,28 +353,27 @@ Potential signals:
 - previously tracked target continuity
 - recognition status
 
-### Unresolved Product Decision
-
-If the target-selection policy has not been explicitly approved, implementation must stop and ask.
-
-Recommended MVP candidate:
+### Approved MVP Policy (34A)
 
 ```text
-1. Use the face nearest the current rotation / visual center.
-2. Prefer temporal continuity with the previous selected face.
-3. If ambiguous, avoid personalized identity interaction.
+Exactly one detected face → select that face.
+Zero detected faces → no active identity target.
+Two or more detected faces → no active identity target.
 ```
 
-Do not automatically prioritize "recognized member" if doing so could cause Lumi to switch attention unexpectedly between people.
+The zero-face and multiple-face paths map outward to the existing public
+`RecognitionResult.unknown`; the UI does not receive a low-level reason. The
+MVP deliberately does not rank by face size, screen center, detector
+confidence, prior recognition, or temporal continuity. This fail-closed rule
+prevents Lumi from personalizing the wrong person when several people are in
+view.
 
 ### Tests
 
-- one face
-- two faces, clear center winner
-- two similarly centered faces
-- current target persists across frames
-- current target exits
-- ambiguous selection
+- zero faces returns no target
+- exactly one face preserves that face unchanged
+- two or more faces return no target regardless of ordering, geometry, or
+  confidence
 
 ---
 
@@ -393,6 +392,404 @@ Responsibilities may include:
 - optional alignment if supported by selected embedding model
 
 The exact preprocessing pipeline must follow the chosen embedding model specification.
+
+For the SFace primary path, decision 35A selects the pinned OpenCV Zoo YuNet
+2023mar model as an on-device five-landmark provider. Apple Vision remains the
+frame-level face-rectangle detector; YuNet is added specifically to produce the
+subject-relative right eye, left eye, nose tip, right mouth corner, and left
+mouth corner required by the official SFace alignment order.
+
+YuNet post-processing initially uses the explicitly approved 36B validation
+defaults: score threshold `0.9`, NMS IoU threshold `0.3`, and pre-NMS top-K
+`5000`. These are temporary OpenCV C++ demo values for getting the physical
+iPad pipeline running; they are not validated production thresholds and must
+remain injectable and replaceable.
+
+If store testing shows missed faces, too many or overlapping detections, or
+unexpected post-processing latency, these three defaults are an early
+diagnostic suspect. In particular, missed faces may be caused by the strict
+`0.9` score threshold rather than by SFace embedding quality. Do not tune these
+values silently: record the observed symptom, fixture/device conditions, and
+replacement values before changing them.
+
+### YuNet graph and conversion verification (2026-08-14)
+
+The pinned source graph has one Float32 BGR input named `input`, shape
+`[1, 3, 640, 640]`, values `0...255` with no explicit normalization, and 12
+Float32 raw outputs (`cls_*`, `obj_*`, `bbox_*`, and `kps_*` at strides 8, 16,
+and 32). The source downloaded with `--download` into the ignored
+`.build/yunet-conversion/` workspace was verified before loading: `232,589`
+bytes and SHA-256
+`8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`.
+
+The isolated conversion runner used macOS `26.5.1` arm64, Xcode `26.2
+(17C52)`, and Python `3.12.11` with exact build pins `coremltools 9.0`,
+`numpy 2.5.2`, `onnx 1.18.0`, `onnx2torch 1.5.15`, `onnxruntime 1.22.1`,
+`torch 2.7.0`, and `torchvision 0.22.0`. With deterministic input seed `42`,
+ONNX Runtime and Core ML produced all 12 named raw outputs with contract
+shapes and finite values. Every output passed the conversion gates (maximum
+absolute error `≤1e-5`, mean absolute error `≤1e-6`, cosine similarity
+`≥0.99999`):
+
+| gate | output | observed |
+| --- | --- | ---: |
+| maximum absolute error | `kps_32` | `3.91155481338501e-06` |
+| mean absolute error | `kps_32` | `7.537053897976875e-07` |
+| minimum cosine similarity | `obj_16` | `0.9999999992994741` |
+
+The source ONNX and the `.build/yunet-conversion/` conversion workspace remain
+ignored. Decision 40A separately approves repository tracking of the unchanged
+converted package under the App resources and records its provenance; this graph evidence still does
+not claim a 15-column `FaceDetectorYN` result or runtime post-processing parity.
+The 36B YuNet score/NMS/top-K validation defaults remain separate from later
+SFace identity-matching thresholds, which still require representative store
+data.
+
+### YuNet letterbox geometry decision (37A, 2026-08-14)
+
+The product owner approved a geometry-only boundary: each complete upright,
+non-mirrored frame is aspect-fit and centered into the fixed 640×640 YuNet
+canvas, preserving geometry. The scaled dimension uses explicit nearest-even
+rounding. Raster placement floors the left and top padding; an odd remainder
+goes to the right and bottom. YuNet's lower-left normalized point/rectangle
+outputs are de-letterboxed to the original frame's lower-left normalized
+coordinates, and any point or rectangle entering padding fails closed.
+
+The new SDK-free `YuNetLetterboxTransform` and its 13 focused tests are
+implementation evidence only. This geometry slice does not select a pixel
+resampling algorithm (nearest, bilinear, vImage, or Core Image), and does not
+authorize crop, stretch, native inference, recognition thresholds, or
+physical-iPad validation. App model-resource distribution is recorded
+separately by 40A.
+
+### YuNet vImage preprocessing decision (38A-1, 2026-08-15)
+
+The product owner approved 38A-1 on 2026-08-15. Each complete upright,
+non-mirrored BGRA frame follows the 37A aspect-fit transform onto a fixed
+640×640 canvas with black padding. Pixel scaling uses Apple's
+[`vImageScale_ARGB8888`](https://developer.apple.com/documentation/accelerate/vimagescale_argb8888%28_%3A_%3A_%3A_%3A%29)
+with the literal `vImage_Flags(kvImageNoFlags)`, which selects vImage's default
+Lanczos-3 resampling. The implementation does not use
+`kvImageHighQualityResampling` (Lanczos-5). The output is exact Float BGR
+NCHW `[1, 3, 640, 640]`, with values `0...255`, no normalization, alpha
+ignored, and the 37A transform attached.
+
+This fixed resampling choice may affect small-face and boundary-detail results.
+If field results are poor, treat 38A-1 resampling as a diagnostic variable,
+separate from the 36B YuNet detector defaults and from SFace identity
+thresholds. The product decision does not define Core ML runtime or inference
+orchestration, camera sampling, crop, SFace thresholds, or physical-iPad
+validation. It makes no claim about physical quality; 40A separately records
+the approved App resource distribution. Apple's
+[vImage resampling guidance](https://developer.apple.com/documentation/accelerate/resampling-in-vimage)
+is the source for the resampling behavior.
+
+Implementation evidence is limited to the new
+`YuNetVImagePreprocessor.swift` and
+`YuNetVImagePreprocessorTests.swift`: six focused tests pass. Root's
+independent YuNet chain passed 29/29, and the unsigned Simulator build
+succeeded. The full gate was attempted with no visible test failure, but the
+existing `swift-test`/testing-helper lifecycle hang prevented clean completion;
+no full-suite count or pass is claimed. These are engineering gates, not
+physical quality evidence.
+
+### YuNet Core ML raw inference adapter (38A-2, 2026-08-17)
+
+The product owner approved the raw-inference adapter boundary on 2026-08-17.
+The framework-free `Sendable` facade and driver protocol keep Core ML details
+in Infrastructure. The concrete actor owns the `sending MLModel`, validates
+model metadata once at construction, and validates every prediction's output
+provider before returning raw tensors. It uses Apple's [`MLModel`](https://developer.apple.com/documentation/coreml/mlmodel)
+async prediction API and [`MLMultiArray`](https://developer.apple.com/documentation/coreml/mlmultiarray)
+buffer contract; Core ML objects do not cross the driver boundary.
+
+The input contract is the exact Float32 BGR NCHW tensor `[1, 3, 640, 640]`,
+with values in `0...255`. The adapter accepts exactly these 12 raw outputs in
+the pinned canonical order: `cls_8`, `cls_16`, `cls_32`, `obj_8`, `obj_16`,
+`obj_32`, `bbox_8`, `bbox_16`, `bbox_32`, `kps_8`, `kps_16`, `kps_32`. For each
+stride `s`, `cls_s` and `obj_s` have shape `[1, (640/s)^2, 1]`, `bbox_s` has
+`[1, (640/s)^2, 4]`, and `kps_s` has `[1, (640/s)^2, 10]`.
+Core ML output arrays must be Float32, three-dimensional, and use positive
+strides. The copier supports the positive padded strides emitted by the real
+model (for example, `kps_8` has a physical channel stride of 16 while only 10
+logical channel values are copied); padding values are never returned. Caller
+cancellation is preserved, and all adapter failures use one payload-free
+redacted error.
+
+Implementation evidence is limited to the new
+`YuNetCoreMLRawInference.swift` and
+`YuNetCoreMLRawInferenceTests.swift`: the initial missing-symbol RED and a
+separate padded-`kps` exact-stride RED were followed by 11/11 focused tests,
+the independent YuNet chain passing 40/40, and a direct arm64 iOS 17 strict
+typecheck. Root's ignored conversion copy `.build/yunet-conversion/YuNet.mlpackage`
+runtime integration returned all 12 names, shapes, logical counts, and finite
+values. The unsigned Simulator build succeeded. The full `swift test` gate was
+attempted: XCTest snapshots showed 4/4 visible with no visible test failure,
+but the existing `swift-test`/testing-helper lifecycle did not cleanly exit;
+root terminated only its own PIDs, so no full-suite pass or count is claimed.
+The scoped diff check was clean. The generated absent-before
+`App/LumiApp.xcodeproj/project.xcworkspace` and root `/tmp` runtime harness
+were cleaned. The source ONNX and `.build/yunet-conversion/` conversion
+environment remain ignored; 40A approves repository tracking of the unchanged
+package under App resources, and Xcode compiles it into the bundled `.mlmodelc`
+resource.
+
+This adapter slice does not choose or implement runtime model
+discovery/loading or compute-unit policy; callers pass an already-loaded
+`MLModel`. The 40A App resource slice records package membership and compiled
+bundle outputs separately. It does not choose Vision↔YuNet candidate pairing.
+The 38A-3 candidate pipeline composes this adapter with preprocessing,
+postprocessing, and de-letterboxing. 39A defines the strict candidate pairer,
+and subsequent Infrastructure slices implement SFace crop, embedding, and
+storage; 40A/41A add bundled resources and lazy DEBUG calibration composition.
+It makes no physical-iPad quality or performance claim and does not select
+detector or identity thresholds. Keep the 36B YuNet detector defaults separate
+from SFace identity thresholds.
+
+### YuNet face-candidate pipeline (38A-3, 2026-08-17)
+
+The product owner approved 38A-3 on 2026-08-17. The candidate pipeline composes
+the fixed 38A-1 vImage preprocessor → existing Core ML raw inference → 36B
+postprocessor → 37A de-letterbox transform. It returns ordered,
+confidence-preserving `[DetectedFace]` YuNet candidates in original-frame
+lower-left normalized coordinates, with the exact five SFace roles. Apple
+Vision remains authoritative for frame-level rectangles: these candidates MUST
+be paired with Vision observations in a later slice. The pipeline never selects
+an identity or replaces Vision.
+
+The contract is strict fail-closed. Any bbox or landmark overlapping letterbox
+padding, malformed or missing geometry, or any stage error fails the whole
+frame; it never drops, clamps, or returns a partial result. Failures use a
+single payload-free redacted error, while `CancellationError` is preserved and
+wins a generic failure race.
+
+Implementation evidence is limited to the new
+`YuNetFaceCandidatePipeline.swift` and
+`YuNetFaceCandidatePipelineTests.swift`: tests-only missing-symbol RED followed
+by 11/11 focused tests. Root's independent YuNet chain passed 51/51 across
+five suites. Root's local ignored conversion copy `.build/yunet-conversion/YuNet.mlpackage`
+and the production candidate pipeline, run on a black 640×640 BGRA frame,
+returned zero candidates with clean completion; this is a connectivity smoke
+check only, not accuracy or quality evidence. The unsigned Simulator
+`BUILD SUCCEEDED` and the diff was clean. The generated absent-before
+`App/LumiApp.xcodeproj/project.xcworkspace` and root `/tmp` runtime harness
+were cleaned. The source ONNX and `.build/yunet-conversion/` conversion
+environment remain ignored; 40A approves repository tracking of the unchanged
+package under App resources, and Xcode compiles it into the bundled `.mlmodelc`
+resource.
+
+The full `swift test` gate was attempted: XCTest snapshots showed 4/4 visible,
+and pipeline tests were visibly passing with no observed failure, but the
+existing `swift-test`/testing-helper lifecycle did not cleanly exit; root
+terminated only its exact own PIDs, so no full-suite pass or count is claimed.
+
+At 38A-3, Vision↔YuNet candidate pairing policy (including IoU or other
+pairing thresholds) and target selection were deferred. The subsequent 39A
+pairer, SFace crop/alignment/embedding slices, embedding codec, typed SQLite
+samples, and sample recorder now implement those internal pieces. 40A adds
+the approved bundled model resources, and 41A adds lazy runtime loading and a
+DEBUG calibration composition. The production `IdentityRecognitionPort`,
+conversational/formal enrollment, and physical iPad accuracy/performance
+validation remain deferred. Keep the 36B detector defaults separate from
+identity thresholds.
+
+### Vision/YuNet candidate pairing (39A/39A-1A, 2026-08-17)
+
+The product owner approved 39A and 39A-1A on 2026-08-17. The pure pairer
+accepts exactly one Vision face and exactly one YuNet candidate. It requires
+strict mutual containment of the two bbox centers using `>` and `<`; boundary
+centers are excluded, with no epsilon, IoU, ranking, or configurable threshold.
+All other inputs fail closed with `nil`.
+
+On success, the new `DetectedFace` value owns the authoritative Vision bbox and
+confidence and YuNet's nonnil typed five-role SFace landmarks. Vision
+landmarks are ignored; YuNet bbox and confidence are never returned. This
+pairer performs no identity selection and uses no SDK.
+
+Implementation evidence is limited to the new
+`VisionYuNetCandidatePairer.swift` and
+`VisionYuNetCandidatePairerTests.swift`: missing-symbol RED followed by 8/8
+focused tests. Root's independent YuNet chain passed 74/74 across eight suites,
+including `FaceTargetSelector`. The full `swift test` gate was attempted:
+XCTest snapshots showed 4/4 and no visible test failure, but the known
+`swift-test`/testing-helper lifecycle hang prevented clean completion; no
+full-suite pass or count is claimed. Unsigned Simulator `xcodebuild`
+`BUILD SUCCEEDED`. The generated absent-before
+`App/LumiApp.xcodeproj/project.xcworkspace` was cleaned.
+
+At 39A, SFace crop/alignment/embedding were deferred; subsequent internal
+Infrastructure slices now implement SFace crop, Core ML embedding, the frame
+pipeline, embedding codec, typed SQLite samples, and the sample recorder. 40A
+adds the bundled model resources, and 41A now composes lazy runtime loading,
+camera fresh-frame capture, and the DEBUG calibration tool. The production
+`IdentityRecognitionPort`, conversational/formal enrollment, and
+physical-device calibration remain deferred. Keep the 36B detector defaults
+and 38A processing contracts separate from identity thresholds.
+
+### App-bundled Core ML resources (40A, 2026-08-17)
+
+The product owner approved 40A on 2026-08-17. The exact converted OpenCV Zoo
+`SFace.mlpackage` (approximately 37 MB) and `YuNet.mlpackage` (approximately
+300 KB) are present unchanged under `App/LumiApp/Resources/Models/` and
+approved for repository tracking with narrow ignore exceptions. Xcode includes
+both packages as Core ML compile inputs and emits the optimized
+`SFace.mlmodelc` and `YuNet.mlmodelc` resources in the App bundle; runtime
+model downloads are not used. This follows Apple's
+[`Core ML app integration guidance`](https://developer.apple.com/documentation/coreml/integrating-a-core-ml-model-into-your-app)
+and compiled-model loading contract
+([`MLModel.load(contentsOf:configuration:)`](https://developer.apple.com/documentation/coreml/mlmodel/load%28contentsof%3Aconfiguration%3A%29)).
+
+The App ships exact Apache-2.0 and MIT notices for SFace and YuNet
+independently. `ModelProvenance.json` records the pinned source ONNX byte
+counts/checksums and SHA-256 hashes for every copied package component. The
+source ONNX files and conversion virtual environments remain ignored build
+inputs; the App packages are the approved offline distribution artifacts.
+
+Implementation evidence: tests first produced the expected missing-locator
+symbol RED; the root focused hosted rerun passed 6/6 resource tests. The build
+log emitted `CoreMLModelCompile` for both packages and the unsigned generic
+Simulator build exited 0. The full `swift test` gate was attempted: all
+visible tests/snapshots showed no failures, but the existing
+`swift-test`/testing-helper lifecycle hung and required termination, so no
+clean full-suite pass or count is claimed.
+
+This resource slice did not itself implement runtime Core ML loading or live
+`IdentityRecognitionPort` composition. 41A now performs lazy loading of the
+bundled models for its DEBUG calibration graph and supplies the camera/UI
+composition; the production port, formal enrollment, physical-device
+quality/performance validation, and detector/identity thresholds remain
+deferred.
+
+### DEBUG physical calibration tool (41A, 2026-08-17)
+
+The product owner approved 41A on 2026-08-17 as a DEBUG-only, manually gated
+physical calibration tool. The Application boundary exposes only
+`IdentityCalibrationPort` results/evidence: sample outcomes, selected-member
+counts, and score-only candidates. Infrastructure owns the lazy bundled
+`.mlmodelc` model graph, Vision → YuNet → SFace processing, camera fresh-frame
+capture, and the SQLite full-gallery matcher. Presentation maps that boundary
+to UI-owned strings, counts, raw top-1/top-2 cosine scores, and margin. App
+composition retains one model per App root and loads the bundled
+`SFace.mlmodelc`/`YuNet.mlmodelc` graph only on the first explicit Start; both
+Mock Debug and Debug-Live use the same real camera/Core ML/SQLite calibration
+graph. The database URL is exactly
+`Library/Application Support/Lumi/IdentityCalibration.sqlite`; the loader
+creates the `Lumi` parent after resolving bundle resources. No photographs are
+saved.
+
+The tool requires explicit Start/Stop. Every capture arms the camera for
+exactly the next fresh frame; pre-arm buffered/stale frames are discarded.
+There is no warmup, timeout, preview, or image persistence, and stop or
+cancellation is fail-closed. A temporary member ID may be selected and reset
+only through explicit reset confirmation. The suggested 3–5 enrollment
+samples is soft guidance, not a cap or automatic completion. Return captures
+rank the full temporary gallery and show raw top-1/top-2 IDs, cosine scores,
+and margin only.
+
+This tool does not set detector or identity thresholds, produce
+`known`/`unknown`, implement the production `IdentityRecognitionPort`, conduct
+conversational/formal enrollment, call OpenAI or CloudKit, download or compile
+models at runtime, or claim physical-device quality. It is not a production
+recognition route.
+
+#### Physical iPad calibration runbook
+
+1. Install a signed Debug `LumiApp` build on the iPad.
+2. Open `DEBUG 身份校準`, tap `開始相機`, and grant camera permission.
+3. Select temporary ID `person-a`, tap `載入樣本數`, and first tap `拍攝回訪`
+   before adding samples; record the score-only evidence (if any).
+4. Capture 3–5 varied frontal/slight-angle samples with `非正式 enrollment`.
+5. Tap `拍攝回訪`; record gallery count, top-1/top-2 temporary IDs, cosines,
+   and margin.
+6. Select `person-b`, load it, capture 3–5 samples, then make return captures
+   for person A and then person B; compare candidate ordering evidence only.
+7. Reset only the selected temporary ID between reruns after confirmation.
+
+There is no preview: position the subject in front of the camera, and remember
+that each button consumes the next fresh frame. Successful automation and
+simulator gates do not claim physical accuracy, quality, or threshold validity.
+
+Implementation/TDD evidence: tests-first App RED reported missing composition
+and view symbols. A later lazy-start stop-race regression also went RED when a
+suspended start completed after Stop without issuing the required post-start
+stop; GREEN added that drain. Focused Presentation passed 15/15, Application
+3/3, Infrastructure 15/15, and App composition 7/7 in both Debug and
+Debug-Live. At this checkpoint Swift reported 545 tests across 47 suites plus
+4 XCTest snapshots passing. Full App Debug and Debug-Live runs passed 51/51
+each on the iPad Pro 11-inch M5 iOS 26.3.1 simulator. Generic Simulator
+Debug, Release, Debug-Live, and Release-Live builds all exited 0; built Debug
+and Debug-Live Info.plists contain the exact camera usage copy
+`Lumi 需要使用相機，才能進行現場人臉校準與辨識測試。`.
+Release and Release-Live binaries contain neither `DEBUG 身份校準` nor
+`非正式 enrollment`. Diff/whitespace checks were clean and the generated
+workspace was removed. These are simulator and automation gates only; no
+physical iPad run is claimed.
+
+### DEBUG Simulator photo-import fallback (42A, 2026-08-17)
+
+The product owner approved 42A on 2026-08-17 as a DEBUG-only fallback for
+calibration before a physical iPad is available. Each import uses the SwiftUI
+[`fileImporter`](https://developer.apple.com/documentation/SwiftUI/View/fileImporter%28isPresented%3AallowedContentTypes%3AonCompletion%3A%29)
+single-URL overload and accepts exactly JPEG, PNG, or HEIC. The selected URL is
+transient: it crosses UI → Presentation → Application and is opened only inside
+Infrastructure. Infrastructure requires a security-scoped start and balances
+exactly one stop on every successful-scope exit; a failed scope start fails
+closed. ImageIO validates the source UTI and exactly one image, applies the
+EXIF orientation via
+[`CGImagePropertyOrientation`](https://developer.apple.com/documentation/imageio/cgimagepropertyorientation),
+and creates an owned upright, non-mirrored, top-left BGRA8 `CameraFrame` with a
+64-byte padded row stride. The ImageIO thumbnail path uses
+[`CGImageSourceCreateThumbnailFromImageAlways`](https://developer.apple.com/documentation/imageio/kcgimagesourcecreatethumbnailfromimagealways)
+and
+[`CGImageSourceCreateThumbnailWithTransform`](https://developer.apple.com/documentation/imageio/kcgimagesourcecreatethumbnailwithtransform),
+with a maximum edge of 2048. That limit is a DEBUG import memory bound only,
+not a detector or identity threshold.
+
+Photo enrollment and live-camera enrollment share the same one-operation gate
+and the same Vision → YuNet → SFace → SQLite graph. Enrollment persists only
+the embedding; return-photo import ranks the full temporary gallery and never
+saves. The flow never requests camera permission or starts the camera, and it
+does not persist or log a photo, URL, decoded data, or preview. Picker
+cancellation is a no-op; other failures are fixed/redacted and
+`CancellationError` is preserved. The entire tool is excluded from Release
+builds. It makes no physical-quality, `known`/`unknown`, threshold, or formal
+enrollment claim.
+
+#### Simulator photo-import runbook
+
+1. On the Mac, use Finder **Share → Simulator** for one JPEG/PNG/HEIC, then
+   save it in the Simulator's Files app; alternatively place it in an iCloud
+   Drive location visible to the Simulator.
+2. Open `DEBUG 身份校準`, enter and load a temporary member ID, then use
+   `匯入 enrollment 照片` for 3–5 varied frontal/slight-angle photos.
+3. Use `匯入回訪照片` with a separate photo and record gallery count, raw
+   top-1/top-2 temporary IDs, cosine scores, and margin. Add another temporary
+   ID only by explicitly selecting it; reset only the selected ID after
+   confirmation.
+
+Apple documents the Finder-to-Simulator workflow in
+[`Sharing data with Simulator`](https://developer.apple.com/documentation/xcode/sharing-data-with-simulator).
+An Apple Developer Forums report notes that iOS 26 Simulator file sharing can
+open a shared file in Safari instead of Files
+([reported issue](https://developer.apple.com/forums/thread/787297)); this
+fallback therefore also supports iCloud Drive. It does not use the Mac camera
+and does not claim iPad camera quality. The source URL remains transient and
+the feature never stores a photo.
+
+Implementation/TDD evidence: the decoder passed 10/10, the Application port
+3/3, and the Infrastructure service 22/22. Presentation passed 26/26 in each
+of three consecutive runs. App composition passed 11/11 in both Debug and
+Debug-Live focused runs; full App Debug and Debug-Live targets passed 55/55
+each. Unsigned generic Simulator Debug, Release, Debug-Live, and Release-Live
+builds all exited 0, and Release binaries contain none of the DEBUG import
+labels. The exact full `swift test` gate was attempted: XCTest snapshots
+passed 4/4 and visible Swift Testing cases showed no failures, but the
+existing `swift-test`/`swiftpm-testing-helper` lifecycle hung after visible
+completion; the bounded run was interrupted with exit 130, so no clean
+full-suite pass or count is claimed. Scoped diff/whitespace checks were clean
+and the generated workspace
+was removed. These are simulator/connectivity gates only; no physical-device
+quality evidence is claimed.
 
 ### Important Rule
 
@@ -445,21 +842,24 @@ Domain should not depend on embedding dimensions.
 
 ### Model Selection
 
-The exact face embedding model is a blocking specification decision.
+ADR-0010 selects OpenCV Zoo SFace as the primary embedding model and Intel
+`face-reidentification-retail-0095` as the challenger. Both have Apache 2.0
+source terms. SFace uses a pinned 112×112 RGB FP32 input and produces a
+128-component embedding; cosine matching follows L2 normalization.
 
-Before implementation, document:
-- model name
-- source / license
-- input format
-- embedding dimension
-- preprocessing requirements
-- expected similarity metric
-- on-device performance
-- redistribution constraints
+The product owner corrected the SFace channel contract on 2026-08-17. The
+official [OpenCV 4.10.0 `FaceRecognizerSF` source](https://raw.githubusercontent.com/opencv/opencv/4.10.0/modules/objdetect/src/face_recognize.cpp)
+passes the conventional-BGR aligned image to
+[`blobFromImage`](https://docs.opencv.org/4.10.0/d6/d0f/group__dnn.html) with
+`swapRB=true`, so the graph input is RGB; the pinned
+[Zoo demo](https://raw.githubusercontent.com/opencv/opencv_zoo/4.10.0/models/face_recognition_sface/demo.py)
+starts from `cv.imread` without another channel swap. This corrects only the
+converter metadata and documented graph contract; conversion/parity values,
+the model hash, and physical quality or threshold decisions are unchanged.
 
-If the model is not yet selected, Codex must ask before implementing the real embedding adapter.
-
-Mocks may be created earlier.
+The model artifact, conversion toolchain, and numerical parity gate are fixed
+by ADR-0010. Physical-iPad performance and production confidence thresholds
+remain blocking validation work.
 
 ---
 

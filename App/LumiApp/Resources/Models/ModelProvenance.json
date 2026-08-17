@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "models": {
+    "SFace": {
+      "package": "SFace.mlpackage",
+      "source": {
+        "path": "opencv_zoo/4.10.0/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+        "bytes": 38696353,
+        "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+      },
+      "components": {
+        "Manifest.json": {
+          "bytes": 617,
+          "sha256": "e5a3ad45ccaae3650d347aee7382043230e6bb202ae0ad07526c34233eb60bc9"
+        },
+        "Data/com.apple.CoreML/model.mlmodel": {
+          "bytes": 44793,
+          "sha256": "9bb092e4b97dd08211e092628f8150f27cd5baa816d2feb57d6c1629272d69ce"
+        },
+        "Data/com.apple.CoreML/weights/weight.bin": {
+          "bytes": 38542848,
+          "sha256": "0d0f19ba62e35fcdc5fe4a6156971ec15b481373150b88295e641a4dd027d37c"
+        }
+      }
+    },
+    "YuNet": {
+      "package": "YuNet.mlpackage",
+      "source": {
+        "path": "opencv_zoo/4.10.0/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        "bytes": 232589,
+        "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+      },
+      "components": {
+        "Manifest.json": {
+          "bytes": 617,
+          "sha256": "303cdc31fb58e71a4194d08a37a3cfd94c5568561b3effa657a1a265eb430872"
+        },
+        "Data/com.apple.CoreML/model.mlmodel": {
+          "bytes": 79398,
+          "sha256": "4c1052cf336a9ac3416e9446616ed60c57c859d42d0f8066a0fefae854f7c39b"
+        },
+        "Data/com.apple.CoreML/weights/weight.bin": {
+          "bytes": 217704,
+          "sha256": "46ee672191a14e03b9794cffb3a381446cf3e886e94ff64dfc9553445924938b"
+        }
+      }
+    }
+  },
+  "licenses": {
+    "SFace": "https://raw.githubusercontent.com/opencv/opencv_zoo/4.10.0/models/face_recognition_sface/LICENSE",
+    "YuNet": "https://raw.githubusercontent.com/opencv/opencv_zoo/4.10.0/models/face_detection_yunet/LICENSE"
+  }
+}

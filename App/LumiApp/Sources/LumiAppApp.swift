@@ -168,14 +168,30 @@ struct LumiAppApp: App {
 @MainActor
 private struct MockCompositionRootView: View {
     @StateObject private var simulationModel: SessionSimulationModel
+#if DEBUG
+    @State private var calibrationModel: DebugIdentityCalibrationModel
+#endif
 
     init(simulationModel: SessionSimulationModel) {
         _simulationModel = StateObject(wrappedValue: simulationModel)
+#if DEBUG
+        _calibrationModel = State(
+            initialValue: AppIdentityCalibrationComposition.makeModel()
+        )
+#endif
     }
 
     var body: some View {
+#if DEBUG
+        ContentView(
+            simulationModel: simulationModel,
+            calibrationModel: calibrationModel
+        )
+        .preferredColorScheme(.light)
+#else
         ContentView(simulationModel: simulationModel)
             .preferredColorScheme(.light)
+#endif
     }
 }
 
@@ -187,6 +203,9 @@ private struct LiveCompositionRootView: View {
     @State private var setupModel: DeviceSetupModel
     @StateObject private var simulationModel: SessionSimulationModel
     @State private var hasStartedSetupLoad = false
+#if DEBUG
+    @State private var calibrationModel: DebugIdentityCalibrationModel
+#endif
 
     init(
         setupModel: DeviceSetupModel,
@@ -194,11 +213,23 @@ private struct LiveCompositionRootView: View {
     ) {
         _setupModel = State(initialValue: setupModel)
         _simulationModel = StateObject(wrappedValue: simulationModel)
+#if DEBUG
+        _calibrationModel = State(
+            initialValue: AppIdentityCalibrationComposition.makeModel()
+        )
+#endif
     }
 
     var body: some View {
         AppRootView(setupModel: setupModel) {
+#if DEBUG
+            ContentView(
+                simulationModel: simulationModel,
+                calibrationModel: calibrationModel
+            )
+#else
             ContentView(simulationModel: simulationModel)
+#endif
         }
         .task {
             guard !hasStartedSetupLoad else { return }

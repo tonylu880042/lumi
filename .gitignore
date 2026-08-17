@@ -12,3 +12,18 @@ DerivedData/
 node_modules/
 coverage/
 Broker/dist/
+
+# Generated face-model artifacts stay outside Git until release distribution is approved.
+*.mlpackage/
+*.mlmodelc/
+__pycache__/
+*.pyc
+
+# 40A App-distributed Core ML packages are intentionally eligible for tracking
+# after checksum/provenance review; generated packages elsewhere stay ignored.
+!App/LumiApp/Resources/
+!App/LumiApp/Resources/Models/
+!App/LumiApp/Resources/Models/SFace.mlpackage/
+!App/LumiApp/Resources/Models/SFace.mlpackage/**
+!App/LumiApp/Resources/Models/YuNet.mlpackage/
+!App/LumiApp/Resources/Models/YuNet.mlpackage/**

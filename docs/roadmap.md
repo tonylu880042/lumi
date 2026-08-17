@@ -544,7 +544,7 @@ A simulated visitor can trigger greeting, speak naturally, interrupt Lumi, recei
 
 ## 7. Phase 3 — Mock Member Data + Tool Calling
 
-**Status: Planned**
+**Status: In progress — SFace foundation implemented; camera/pilot validation pending**
 
 Goal: allow Lumi to answer member-specific exercise questions before integrating the real Curves backend.
 
@@ -624,13 +624,31 @@ A person approaching left/center/right causes Lumi to orient approximately towar
 
 ## 9. Milestone 3 — Member Identity Recognition
 
-**Status: Planned**
+**Status: In progress — 42A DEBUG physical calibration and Simulator
+photo-import fallback implemented; physical-iPad validation pending**
 
 > **Apple Vision / Core ML member recognition begins here.**
 
 Goal: use the iPad camera to determine whether the current visitor is a registered Curves member.
 
 This milestone must use the existing `IdentityRecognitionPort`; Domain/Application must not be redesigned to accommodate Vision.
+
+The 41A checkpoint now supplies a DEBUG-only, manually gated physical
+calibration path using the real front-camera, Vision, YuNet, SFace, exact
+cosine gallery, and a dedicated SQLite calibration database. It exposes raw
+top-1/top-2 scores and margin for measurement; it does not make a production
+known/unknown decision or replace `IdentityRecognitionPort`.
+
+The 42A checkpoint adds a DEBUG-only Simulator fallback: a single transient
+JPEG/PNG/HEIC URL from SwiftUI `fileImporter` enters the same Vision → YuNet →
+SFace → SQLite gate without requesting camera permission or starting the
+camera. Infrastructure validates the source UTI and one image, applies EXIF
+orientation, and emits an owned upright/non-mirrored top-left BGRA8 frame with
+a 64-byte padded stride; ImageIO downsamples to a maximum edge of 2048 as a
+memory bound only. Enrollment stores only the embedding; return import ranks
+the full gallery and never saves photos. URLs, images, and decoded data are
+never persisted or logged, and Release builds omit the tool. Physical-iPad
+quality and production recognition policy remain pending.
 
 ### I0 — Identity Port Validation
 Verify:
@@ -701,7 +719,14 @@ Core ML
 Embedding Vector
 ```
 
-The exact model must be selected and documented before implementation. Domain must never depend on vector dimensions or Core ML types.
+ADR-0010 selects OpenCV Zoo SFace as the primary model and Intel
+`face-reidentification-retail-0095` as the challenger. The pinned SFace ONNX →
+Core ML conversion PoC passes its numerical parity gate. The approved SFace and
+YuNet packages are present under App resources, Xcode compiles them into bundled
+`.mlmodelc` resources, and 41A/42A load them lazily after an explicit DEBUG
+camera start or first photo import. Physical-iPad quality/performance,
+validation data, thresholds, and the production recognition route remain gates.
+Domain must never depend on vector dimensions or Core ML types.
 
 ### I6 — Member Matching
 
@@ -722,6 +747,10 @@ Possible measures:
 - Euclidean distance
 
 Final choice must be documented.
+
+The initial exact cosine matcher and model-version isolation are implemented.
+At the target upper bound of 800 members × 5 samples, no vector database is
+planned unless physical-iPad measurements require one.
 
 ### I7 — Confidence / Unknown Policy
 
