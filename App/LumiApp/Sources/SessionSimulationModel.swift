@@ -132,11 +132,18 @@ final class SessionSimulationModel: ObservableObject {
     private let mapper: AvatarStateMapper
     private let eventMapper: AvatarEventCommandMapper
 
+    nonisolated static let debugKnownMemberID: MemberID = {
+        do {
+            return try MemberID(rawValue: "simulator-known-visitor")
+        } catch {
+            preconditionFailure("Simulator known identity constants must remain valid")
+        }
+    }()
+
     private static let debugKnownResult: RecognitionResult = {
         do {
-            let memberID = try MemberID(rawValue: "simulator-known-visitor")
             let confidence = try RecognitionConfidence(value: 1.0)
-            return .known(memberID: memberID, confidence: confidence)
+            return .known(memberID: debugKnownMemberID, confidence: confidence)
         } catch {
             preconditionFailure("Simulator known identity constants must remain valid")
         }

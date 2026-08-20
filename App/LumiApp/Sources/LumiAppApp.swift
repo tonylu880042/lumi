@@ -94,18 +94,49 @@ struct AppCompositionFactory {
                 endpointURL: brokerEndpoint,
                 store: store
             )
-            let voice = OpenAIRealtimeAdapter(
-                configuration: OpenAIRealtimeConfiguration(),
-                clientSecretSource: source,
-                transportFactory: OpenAIWebRTCTransportFactory()
+            let voiceConfiguration: OpenAIRealtimeConfiguration
+            let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
+            let enablesWeeklySummaryTool: Bool
+#if DEBUG
+            let baseConfiguration = OpenAIRealtimeConfiguration()
+            let repository = try DebugMemberFixture.makeRepository()
+            voiceConfiguration = OpenAIRealtimeConfiguration(
+                model: baseConfiguration.model,
+                voice: baseConfiguration.voice,
+                instructions: baseConfiguration.instructions
+                    + "\n"
+                    + DebugMemberFixture.promptAddition
             )
+            enablesWeeklySummaryTool = true
+#else
+            voiceConfiguration = OpenAIRealtimeConfiguration()
+            enablesWeeklySummaryTool = false
+#endif
+            let voice = OpenAIRealtimeAdapter(
+                configuration: voiceConfiguration,
+                clientSecretSource: source,
+                transportFactory: OpenAIWebRTCTransportFactory(),
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool
+            )
+
+#if DEBUG
+            voiceToolCallConfiguration = VoiceToolCallSessionConfiguration(
+                port: voice,
+                weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                    repository: repository
+                )
+            )
+#else
+            voiceToolCallConfiguration = nil
+#endif
 
             let hardware = MockHardwareControlPort()
             let identity = MockIdentityRecognitionAdapter()
             let coordinator = AssistantSessionCoordinator(
                 hardware: hardware,
                 identity: identity,
-                voice: voice
+                voice: voice,
+                voiceToolCallConfiguration: voiceToolCallConfiguration
             )
             let simulationModel = SessionSimulationModel(
                 coordinator: coordinator,
