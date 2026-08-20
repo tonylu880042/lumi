@@ -15,6 +15,20 @@ struct OpenAIRealtimeEventMapperTests {
         acceptsSendable(mappedEvent)
     }
 
+    @Test("tool calls are provider-neutral values without raw provider metadata")
+    func toolCallProviderEventIsStableAndRedacted() async {
+        let toolCall = VoiceToolCall(
+            callID: "opaque-call-id",
+            kind: .getMemberWeeklySummary
+        )
+        let providerEvent = OpenAIRealtimeProviderEvent.toolCall(toolCall)
+
+        #expect(providerEvent == .toolCall(toolCall))
+        #expect(String(describing: providerEvent).contains("raw-provider-name") == false)
+        #expect(String(describing: providerEvent).contains("raw-provider-arguments") == false)
+        acceptsSendable(providerEvent)
+    }
+
     @Test("session readiness is exposed separately from voice events")
     func sessionCreatedMapsToReadinessMarker() async {
         let mapper = OpenAIRealtimeEventMapper()
@@ -78,6 +92,17 @@ struct OpenAIRealtimeEventMapperTests {
 
         #expect(await mapper.map(.error) == [.voice(.failure)])
         #expect(await mapper.map(.responseFailed) == [.voice(.failure)])
+    }
+
+    @Test("tool calls stay on the tool boundary and do not become voice lifecycle events")
+    func toolCallsAreNotVoiceEvents() async {
+        let mapper = OpenAIRealtimeEventMapper()
+        let toolCall = VoiceToolCall(
+            callID: "opaque-call-id",
+            kind: .getMemberWeeklySummary
+        )
+
+        #expect(await mapper.map(.toolCall(toolCall)).isEmpty)
     }
 }
 

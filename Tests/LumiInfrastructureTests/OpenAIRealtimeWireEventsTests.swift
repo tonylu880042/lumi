@@ -1,4 +1,5 @@
 import Foundation
+import LumiApplication
 @testable import LumiInfrastructure
 import Testing
 
@@ -39,6 +40,82 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(turnDetection["silence_duration_ms"] == nil)
     }
 
+    @Test("session.update default keeps the existing no-tools JSON behavior")
+    func sessionUpdateDefaultsToNoTools() throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            voice: "marin",
+            instructions: "instructions"
+        )
+
+        let defaultData = try OpenAIRealtimeWireEncoder.sessionUpdate(
+            for: configuration
+        )
+        let explicitlyDisabledData = try OpenAIRealtimeWireEncoder.sessionUpdate(
+            for: configuration,
+            enablesWeeklySummaryTool: false
+        )
+        let session = try object(
+            try jsonObject(defaultData),
+            at: "session"
+        )
+
+        #expect(defaultData == explicitlyDisabledData)
+        #expect(
+            String(data: defaultData, encoding: .utf8)
+                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":true,"interrupt_response":true,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","type":"realtime"},"type":"session.update"}"#
+        )
+        #expect(session["tools"] == nil)
+        #expect(session["tool_choice"] == nil)
+    }
+
+    @Test("enabled session.update carries exactly one empty-argument weekly tool")
+    func sessionUpdateDeclaresOnlyWeeklySummaryTool() throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            voice: "marin",
+            instructions: "instructions"
+        )
+
+        let root = try jsonObject(
+            try OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesWeeklySummaryTool: true
+            )
+        )
+        let session = try object(root, at: "session")
+        guard let tools = session["tools"] as? [[String: Any]], tools.count == 1 else {
+            Issue.record("Expected one weekly summary function tool")
+            return
+        }
+        let tool = tools[0]
+        let parameters = try object(tool, at: "parameters")
+        guard let properties = parameters["properties"] as? [String: Any] else {
+            Issue.record("Expected an object-valued empty properties schema")
+            return
+        }
+        guard let required = parameters["required"] as? [Any] else {
+            Issue.record("Expected an array-valued empty required schema")
+            return
+        }
+
+        #expect(tool["type"] as? String == "function")
+        #expect(tool["name"] as? String == "get_member_weekly_summary")
+        #expect(tool["description"] as? String == "Return the member's weekly exercise summary.")
+        #expect(parameters["type"] as? String == "object")
+        #expect(properties.isEmpty)
+        #expect(required.isEmpty)
+        #expect(parameters["additionalProperties"] as? Bool == false)
+        #expect(session["tool_choice"] as? String == "auto")
+
+        let serialized = String(
+            data: try OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesWeeklySummaryTool: true
+            ),
+            encoding: .utf8
+        )
+        #expect(serialized?.contains("member_id") == false)
+    }
+
     @Test("response.create is the minimal event and caller can preserve order")
     func responseCreateCanFollowSessionUpdate() throws {
         let configuration = OpenAIRealtimeConfiguration(
@@ -55,6 +132,34 @@ struct OpenAIRealtimeWireEventsTests {
             "response.create",
         ])
         #expect(events[1].count == 1)
+    }
+
+    @Test("function call output encodes exact result JSON and opaque call ID")
+    func functionCallOutputUsesExactResultPayload() throws {
+        let result = VoiceToolResult(
+            callID: "  opaque-call-id  ",
+            payload: .failure(.invalidArguments)
+        )
+
+        let data = try OpenAIRealtimeWireEncoder.functionCallOutput(for: result)
+        let root = try jsonObject(data)
+        let item = try object(root, at: "item")
+
+        #expect(root.keys.sorted() == ["item", "type"])
+        #expect(root["type"] as? String == "conversation.item.create")
+        #expect(item.keys.sorted() == ["call_id", "output", "type"])
+        #expect(item["type"] as? String == "function_call_output")
+        #expect(item["call_id"] as? String == result.callID)
+        #expect(item["output"] as? String == #"{"error":"invalid_arguments"}"#)
+
+        let serialized = String(data: data, encoding: .utf8) ?? ""
+        #expect(
+            serialized
+                == #"{"item":{"call_id":"  opaque-call-id  ","output":"{\"error\":\"invalid_arguments\"}","type":"function_call_output"},"type":"conversation.item.create"}"#
+        )
+        #expect(serialized.contains("member_id") == false)
+        #expect(serialized.contains("raw-provider-arguments") == false)
+        #expect(serialized.contains("get_member_weekly_summary") == false)
     }
 
     @Test("approved server events map to provider lifecycle events")
@@ -108,6 +213,198 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(incomplete == .responseFailed)
         #expect(cancelled == nil)
         #expect(completed == nil)
+    }
+
+    @Test("finalized function calls map only exact empty arguments")
+    func finalizedFunctionCallArgumentsDecodeMatrix() throws {
+        let preservedCallID = "  opaque-call-id  "
+        let valid = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.done",
+                "call_id": preservedCallID,
+                "name": "get_member_weekly_summary",
+                "arguments": "{}",
+            ])
+        )
+        #expect(
+            valid == .toolCall(
+                VoiceToolCall(
+                    callID: preservedCallID,
+                    kind: .getMemberWeeklySummary
+                )
+            )
+        )
+
+        for (index, arguments) in ["{ }", "\n { \n } \t"].enumerated() {
+            let formattedEmptyObject = OpenAIRealtimeWireDecoder.decode(
+                try jsonData([
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "formatted-empty-arguments-\(index)",
+                    "name": "get_member_weekly_summary",
+                    "arguments": arguments,
+                ])
+            )
+            #expect(
+                formattedEmptyObject == .toolCall(
+                    VoiceToolCall(
+                        callID: "formatted-empty-arguments-\(index)",
+                        kind: .getMemberWeeklySummary
+                    )
+                )
+            )
+        }
+
+        let unsupported = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.done",
+                "call_id": "unsupported-call",
+                "name": "other_tool",
+                "arguments": "not-json",
+            ])
+        )
+        #expect(
+            unsupported == .toolCall(
+                VoiceToolCall(callID: "unsupported-call", kind: .unsupported)
+            )
+        )
+
+        let invalidArguments: [[String: Any]] = [
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "missing-arguments",
+                "name": "get_member_weekly_summary",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "non-string-arguments",
+                "name": "get_member_weekly_summary",
+                "arguments": 42,
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "malformed-arguments",
+                "name": "get_member_weekly_summary",
+                "arguments": "{bad",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "non-object-arguments",
+                "name": "get_member_weekly_summary",
+                "arguments": "[]",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "nonempty-object-arguments",
+                "name": "get_member_weekly_summary",
+                "arguments": #"{"member_id":"M-001"}"#,
+            ],
+        ]
+
+        for fixture in invalidArguments {
+            let callID = fixture["call_id"] as? String ?? ""
+            #expect(
+                OpenAIRealtimeWireDecoder.decode(try jsonData(fixture))
+                    == .toolCall(
+                        VoiceToolCall(callID: callID, kind: .invalidArguments)
+                    )
+            )
+        }
+    }
+
+    @Test("invalid names and call IDs fail closed without becoming voice failures")
+    func invalidFunctionCallIdentityDecodeMatrix() throws {
+        let invalidNames: [[String: Any]] = [
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "missing-name",
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "non-string-name",
+                "name": 42,
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "empty-name",
+                "name": "",
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "whitespace-name",
+                "name": " \n",
+                "arguments": "{}",
+            ],
+        ]
+
+        for fixture in invalidNames {
+            let callID = fixture["call_id"] as? String ?? ""
+            #expect(
+                OpenAIRealtimeWireDecoder.decode(try jsonData(fixture))
+                    == .toolCall(
+                        VoiceToolCall(callID: callID, kind: .invalidArguments)
+                    )
+            )
+        }
+
+        let invalidCallIDs: [[String: Any]] = [
+            [
+                "type": "response.function_call_arguments.done",
+                "name": "get_member_weekly_summary",
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": 42,
+                "name": "get_member_weekly_summary",
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "",
+                "name": "get_member_weekly_summary",
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": " \n",
+                "name": "get_member_weekly_summary",
+                "arguments": "{}",
+            ],
+        ]
+
+        for fixture in invalidCallIDs {
+            #expect(
+                OpenAIRealtimeWireDecoder.decode(try jsonData(fixture)) == nil
+            )
+        }
+    }
+
+    @Test("argument deltas and other provider events never produce tool calls")
+    func partialFunctionCallEventsRemainIgnored() throws {
+        let delta = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.delta",
+                "call_id": "partial-call",
+                "name": "get_member_weekly_summary",
+                "delta": #"{"member_id":"M-001"}"#,
+            ])
+        )
+        let other = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.output_text.done",
+                "call_id": "other-call",
+                "name": "get_member_weekly_summary",
+                "arguments": "{}",
+            ])
+        )
+
+        #expect(delta == .unknown("response.function_call_arguments.delta"))
+        #expect(other == .unknown("response.output_text.done"))
+        #expect(String(describing: delta).contains("M-001") == false)
+        #expect(String(describing: other).contains("M-001") == false)
     }
 
     @Test("well-formed future events preserve only their type")

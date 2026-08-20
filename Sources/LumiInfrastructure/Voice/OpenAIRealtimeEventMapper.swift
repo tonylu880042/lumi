@@ -12,6 +12,7 @@ public enum OpenAIRealtimeProviderEvent: Equatable, Sendable {
     case outputAudioStopped
     case outputAudioCleared
     case responseFailed
+    case toolCall(VoiceToolCall)
     case error
     case unknown(String)
 }
@@ -63,6 +64,9 @@ actor OpenAIRealtimeEventMapper {
 
         case .responseFailed, .error:
             return [.voice(.failure)]
+
+        case .toolCall:
+            return []
 
         case .unknown:
             return []
