@@ -2,7 +2,7 @@
 
 > File: `roadmap.md`
 > Status: Active
-> Last updated: 2026-08-12
+> Last updated: 2026-08-20
 > Development principles: Clean Architecture + TDD + Ask-if-Unclear
 
 ## 1. Roadmap Goal
@@ -544,7 +544,8 @@ A simulated visitor can trigger greeting, speak naturally, interrupt Lumi, recei
 
 ## 7. Phase 3 — Mock Member Data + Tool Calling
 
-**Status: In progress — SFace foundation implemented; camera/pilot validation pending**
+**Status: Automated Debug-Live implementation complete; physical iPad and real
+Curves data validation pending**
 
 Goal: allow Lumi to answer member-specific exercise questions before integrating the real Curves backend.
 
@@ -554,6 +555,53 @@ Implement support for:
 - recent exercise summary
 - today's goal
 - activity total / MET-minutes where applicable
+
+### Completed implementation slice
+
+The first validated slice intentionally narrows the Phase 3 surface to one
+weekly-summary tool:
+
+- `get_member_weekly_summary` is exposed as a no-argument Realtime function
+  with an empty, closed parameter object.
+- Only a known local session registers the tool. The Application router binds
+  the locally retained `MemberID`; OpenAI receives neither the ID nor any
+  member identity field.
+- Unknown/visitor sessions do not register the tool and cannot load member
+  data. Tool calls are routed serially and return deterministic JSON or fixed
+  redacted error codes.
+- `Debug-Live` uses one fixed synthetic `MockMemberRepository` record. The
+  Debug-Live instructions require the spoken answer to begin with
+  「以下是開發測試資料」 so fixture data cannot be mistaken for Curves
+  production data.
+- `LumiApp` Release and `LumiApp-Live` Release-Live do not enable the mock
+  member tool. The generic mock repository has no default records.
+
+The current synthetic fixture is intentionally stable for manual validation:
+
+| Field | Debug-Live value |
+| --- | --- |
+| Display name | `Lumi 開發測試會員` |
+| Visits this week | `2` |
+| Activity total | `580.5` MET-minutes |
+| Last workout | `2026-08-18T02:30:00.000Z` |
+| Today completed | `false` |
+
+Automated evidence for this slice includes the focused package
+runner/coordinator/mock gate (52/52), Debug and Debug-Live fixture/composition
+tests, and unsigned generic Simulator builds for Mock Debug, Mock Release,
+Debug-Live, and Release-Live. The exact `swift test` and `swift test --parallel`
+runs reached build and visible passing suites (including 4/4 snapshots), but
+the known `swiftpm-testing-helper` lifecycle hang required interruption; they
+are not recorded as clean full-suite passes or full-suite counts.
+
+### Deferred boundary
+
+Replacing the synthetic repository with a real `CurvesMemberAPIRepository` is
+not part of this slice. It remains blocked on the verified API endpoint and
+authentication flow, face/member identity mapping, profile and weekly-summary
+schema, time-zone/week-boundary semantics, privacy/consent rules, error and
+rate-limit behavior, and offline/cache policy. Those details belong to
+Milestone 4 and must not be inferred from the Debug-Live fixture.
 
 Example:
 
@@ -573,7 +621,10 @@ Lumi:
 Only the minimum required member context may be provided to the LLM.
 
 ### Exit Criteria
-Mock known members can ask supported questions and receive deterministic answers grounded in mock data.
+Mock known members can ask the supported weekly-summary question and receive a
+deterministic answer grounded in Debug-Live data. Unknown/visitor sessions
+cannot query member data. Physical iPad voice validation and the real Curves
+adapter remain explicit follow-up gates.
 
 ## 8. Milestone 2 — Smart Rotation Base
 

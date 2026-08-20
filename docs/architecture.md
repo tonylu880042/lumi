@@ -2,7 +2,7 @@
 
 > File: `docs/architecture.md`
 > Status: Active Architecture Baseline
-> Last updated: 2026-08-10
+> Last updated: 2026-08-20
 > Applies to: iPad App, Identity Recognition, Realtime Voice, Member Data, Smart Rotation Base
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 
@@ -735,6 +735,11 @@ Person leaves / idle timeout
 
 Do not keep the Realtime session open for all store operating hours.
 
+For the current Phase 3 slice, the voice adapter advertises member tools only
+when the session context is `returningMember`. The provider-facing voice
+context remains generic; it carries no `MemberID`, display name, confidence, or
+member profile.
+
 ---
 
 # 12. Tool Calling Architecture
@@ -791,6 +796,41 @@ This ensures:
 - testability
 - no uncontrolled side effects
 
+## 12.1 Current Phase 3 weekly-summary contract
+
+The implemented first tool is the no-argument function
+`get_member_weekly_summary`. Its provider schema has an empty object for
+parameters and rejects additional properties. The provider therefore asks for
+the summary without receiving or supplying a `MemberID`.
+
+The local Application path is session-bound:
+
+```text
+known(MemberID)
+↓
+AssistantSessionCoordinator
+↓
+VoiceToolCallSessionRunner
+↓
+session-scoped VoiceToolCallRouter(MemberID)
+↓
+GetMemberWeeklySummaryUseCase
+↓
+MemberRepository
+```
+
+The `MemberID` is retained only inside the local session-scoped router and is
+never serialized into the tool schema, tool arguments, tool result, broker
+request, or OpenAI instructions. Results are deterministic JSON containing
+`visits_this_week`, `activity_met_minutes`, `last_workout_at`, and
+`today_completed`; repository and validation failures cross the tool boundary
+as fixed error codes without provider or member details.
+
+The coordinator prepares the tool runner only for a known local member session.
+Unknown/visitor sessions do not register a tool stream and cannot query member
+data. Tool calls are processed serially, and a completed opaque provider call
+ID is idempotent within that session.
+
 ---
 
 # 13. Member Data Architecture
@@ -803,11 +843,27 @@ Phase 1:
 MockMemberRepository
 ```
 
-Production:
+Current Phase 3 Debug-Live:
+
+```text
+fixed synthetic MockMemberRepository
+```
+
+The Debug-Live fixture contains one synthetic member record for deterministic
+conversation validation. Its prompt addition requires the assistant to say
+「以下是開發測試資料」 before presenting fixture-backed answers. The generic
+infrastructure repository has no built-in sample records.
+
+Production / real integration:
 
 ```text
 CurvesMemberAPIRepository
 ```
+
+The real Curves adapter remains deferred until the endpoint, authentication,
+identity mapping, response schema, time-zone/week-boundary, privacy, error,
+and offline/cache contracts are provided and approved. Release and
+Release-Live compositions do not enable the mock member tool.
 
 Flow:
 
@@ -982,7 +1038,9 @@ Conceptually:
 
 ```text
 LumiApp
-├─ Mock / Real MemberRepository
+├─ Debug-Live: synthetic MockMemberRepository (DEBUG only)
+├─ Release / Release-Live: no mock member tool
+├─ future: CurvesMemberAPIRepository after contract approval
 ├─ Mock / Vision IdentityRecognitionPort
 ├─ Mock / OpenAI VoiceSessionPort
 ├─ Mock / Edge HardwareControlPort
