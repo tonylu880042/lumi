@@ -1043,6 +1043,228 @@ struct AssistantSessionCoordinatorTests {
         #expect(await waitUntil { await coordinator.state == .listening })
         #expect(await voice.eventUpdatesCallCount == 1)
     }
+
+    @Test("known voice startup registers tools before start and sends the exact member result")
+    func knownVoiceStartupRegistersAndRunsToolSession() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort()
+        let repository = RecordingToolRepository(summary: makeToolSummary(visits: 7))
+        let memberID = try MemberID(rawValue: "M-known-tool")
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort,
+                weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                    repository: repository
+                )
+            )
+        )
+        let confidence = try RecognitionConfidence(value: 0.98)
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(memberID: memberID, confidence: confidence)
+        )
+
+        let start = Task { try await coordinator.startVoiceSession() }
+        #expect(await waitUntil { await voice.waitingForStart })
+        #expect(await toolPort.toolCallUpdatesCallCount == 1)
+
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+
+        let call = VoiceToolCall(
+            callID: "weekly-summary",
+            kind: .getMemberWeeklySummary
+        )
+        await toolPort.emit(call)
+        await toolPort.waitUntilSentCount(1)
+        #expect(await repository.weeklySummaryRequests == [memberID])
+        #expect(await toolPort.sentResults.first?.callID == call.callID)
+        #expect(
+            await toolPort.firstSentJSON
+                == #"{"activity_met_minutes":120,"last_workout_at":null,"today_completed":true,"visits_this_week":7}"#
+        )
+
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("unknown voice sessions do not register the tool stream")
+    func unknownVoiceDoesNotRegisterTools() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort()
+        let repository = RecordingToolRepository(summary: makeToolSummary(visits: 1))
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort,
+                weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                    repository: repository
+                )
+            )
+        )
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .unknown
+        )
+
+        let start = Task { try await coordinator.startVoiceSession() }
+        #expect(await waitUntil { await voice.waitingForStart })
+        #expect(await toolPort.toolCallUpdatesCallCount == 0)
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("runner send failures set retry without changing the assistant state")
+    func toolRunnerFailureSetsRetryWithoutChangingState() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort(sendError: .sendFailed)
+        let repository = RecordingToolRepository(summary: makeToolSummary(visits: 2))
+        let memberID = try MemberID(rawValue: "M-tool-failure")
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort,
+                weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                    repository: repository
+                )
+            )
+        )
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.91)
+            )
+        )
+        let start = Task { try await coordinator.startVoiceSession() }
+        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+
+        await toolPort.emit(
+            VoiceToolCall(callID: "send-failure", kind: .getMemberWeeklySummary)
+        )
+        await toolPort.waitUntilSendAttempt()
+        #expect(await waitUntil { await coordinator.voiceRequiresRetry })
+        #expect(await coordinator.state == .speaking)
+        #expect(await voice.stopCallCount == 0)
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("ending cancels a suspended tool route before voice stop and sends nothing late")
+    func endingCancelsToolRunnerBeforeVoiceStop() async throws {
+        let log = TestCallLog()
+        let hardware = TestHardware(log: log)
+        let identity = TestIdentity()
+        let voice = TestVoice(log: log)
+        let toolPort = TestVoiceToolCallPort()
+        let repository = CancellableToolRepository(log: log)
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort,
+                weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                    repository: repository
+                )
+            )
+        )
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(
+                memberID: try MemberID(rawValue: "M-tool-end"),
+                confidence: try RecognitionConfidence(value: 0.92)
+            )
+        )
+        let start = Task { try await coordinator.startVoiceSession() }
+        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+        await toolPort.emit(
+            VoiceToolCall(callID: "suspended-route", kind: .getMemberWeeklySummary)
+        )
+        await repository.waitUntilRequested()
+
+        await hardware.holdReturnHome()
+        let end = Task { try await coordinator.endSession() }
+        await repository.waitUntilCancelled()
+        #expect(await waitUntil { await hardware.hasPendingReturnHome })
+        #expect(await repository.wasCancelled)
+        #expect(await log.entries == [.toolRouteCancelled, .voiceStop, .returnHome])
+
+        await repository.succeed(with: makeToolSummary(visits: 9))
+        await hardware.completeReturnHome()
+        #expect(try await end.value == .idle)
+        await Task.yield()
+        #expect(await toolPort.sentResults.isEmpty)
+        #expect(await coordinator.voiceRequiresRetry == false)
+    }
+
+    @Test("voice startup failure does not launch a registered tool runner")
+    func voiceStartupFailureDoesNotLaunchToolRunner() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort()
+        let repository = RecordingToolRepository(summary: makeToolSummary(visits: 3))
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort,
+                weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                    repository: repository
+                )
+            )
+        )
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(
+                memberID: try MemberID(rawValue: "M-start-failure"),
+                confidence: try RecognitionConfidence(value: 0.9)
+            )
+        )
+        let start = Task { try await coordinator.startVoiceSession() }
+        #expect(await waitUntil { await voice.waitingForStart })
+        #expect(await toolPort.toolCallUpdatesCallCount == 1)
+        await voice.failStart(with: TestVoiceError.startFailed)
+        await #expect(throws: TestVoiceError.startFailed) {
+            try await start.value
+        }
+
+        await toolPort.emit(
+            VoiceToolCall(callID: "no-runner", kind: .getMemberWeeklySummary)
+        )
+        await Task.yield()
+        #expect(await repository.weeklySummaryRequests.isEmpty)
+        #expect(await toolPort.sentResults.isEmpty)
+        #expect(await coordinator.voiceRequiresRetry)
+    }
 }
 
 private func enterRecognizing(
@@ -1114,6 +1336,7 @@ private enum TestCall: Equatable, Sendable {
     case voiceStop
     case hardwareStop
     case returnHome
+    case toolRouteCancelled
 }
 
 private actor TestCallLog {
@@ -1406,4 +1629,196 @@ private actor TestVoice: VoiceSessionPort {
     private func removeSubscriber(id: UInt64) {
         subscribers.removeValue(forKey: id)
     }
+}
+
+private func makeToolSummary(visits: Int) -> ExerciseSummary {
+    ExerciseSummary(
+        visitsThisWeek: visits,
+        activityMETMinutes: 120,
+        lastWorkoutAt: nil,
+        todayCompleted: true
+    )
+}
+
+private enum TestToolCallPortError: Error, Equatable, Sendable {
+    case sendFailed
+}
+
+private actor TestVoiceToolCallPort: VoiceToolCallPort {
+    private let stream: AsyncStream<VoiceToolCall>
+    private let continuation: AsyncStream<VoiceToolCall>.Continuation
+    private let sendError: TestToolCallPortError?
+    private var sendAttemptWaiters: [CheckedContinuation<Void, Never>] = []
+    private var sentCountWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    private(set) var toolCallUpdatesCallCount = 0
+    private(set) var sendCallCount = 0
+    private(set) var sentResults: [VoiceToolResult] = []
+
+    var firstSentJSON: String? {
+        guard let result = sentResults.first else { return nil }
+        return String(data: result.jsonData(), encoding: .utf8)
+    }
+
+    init(sendError: TestToolCallPortError? = nil) {
+        let pair = AsyncStream<VoiceToolCall>.makeStream(
+            of: VoiceToolCall.self,
+            bufferingPolicy: .unbounded
+        )
+        stream = pair.stream
+        continuation = pair.continuation
+        self.sendError = sendError
+    }
+
+    func toolCallUpdates() async -> AsyncStream<VoiceToolCall> {
+        toolCallUpdatesCallCount += 1
+        return stream
+    }
+
+    func sendToolResult(_ result: VoiceToolResult) async throws {
+        sendCallCount += 1
+        let attemptWaiters = sendAttemptWaiters
+        sendAttemptWaiters.removeAll()
+        for waiter in attemptWaiters {
+            waiter.resume()
+        }
+        try Task.checkCancellation()
+        if let sendError {
+            throw sendError
+        }
+        sentResults.append(result)
+        let readyWaiters = sentCountWaiters
+            .filter { $0.key <= sentResults.count }
+            .flatMap(\.value)
+        sentCountWaiters = sentCountWaiters.filter { $0.key > sentResults.count }
+        for waiter in readyWaiters {
+            waiter.resume()
+        }
+    }
+
+    func emit(_ call: VoiceToolCall) {
+        continuation.yield(call)
+    }
+
+    func finish() {
+        continuation.finish()
+    }
+
+    func waitUntilSendAttempt() async {
+        if sendCallCount > 0 { return }
+        await withCheckedContinuation { continuation in
+            sendAttemptWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilSentCount(_ count: Int) async {
+        if sentResults.count >= count { return }
+        await withCheckedContinuation { continuation in
+            sentCountWaiters[count, default: []].append(continuation)
+        }
+    }
+
+    deinit {
+        continuation.finish()
+    }
+}
+
+private actor RecordingToolRepository: MemberRepository {
+    private let summary: ExerciseSummary
+    private(set) var weeklySummaryRequests: [MemberID] = []
+
+    init(summary: ExerciseSummary) {
+        self.summary = summary
+    }
+
+    func profile(for id: MemberID) async throws -> Member {
+        throw ToolRepositoryError.profileUnsupported
+    }
+
+    func weeklySummary(for id: MemberID) async throws -> ExerciseSummary {
+        weeklySummaryRequests.append(id)
+        return summary
+    }
+}
+
+private actor CancellableToolRepository: MemberRepository {
+    private let log: TestCallLog
+    private var pending: CheckedContinuation<ExerciseSummary, any Error>?
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var weeklySummaryRequests: [MemberID] = []
+    private(set) var wasCancelled = false
+    private var cancellationCompleted = false
+
+    var hasPendingRequest: Bool {
+        pending != nil
+    }
+
+    init(log: TestCallLog) {
+        self.log = log
+    }
+
+    func profile(for id: MemberID) async throws -> Member {
+        throw ToolRepositoryError.profileUnsupported
+    }
+
+    func weeklySummary(for id: MemberID) async throws -> ExerciseSummary {
+        weeklySummaryRequests.append(id)
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<ExerciseSummary, any Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending = continuation
+            }
+        }, onCancel: {
+            Task { await self.cancelPending() }
+        })
+    }
+
+    func waitUntilRequested() async {
+        if weeklySummaryRequests.isEmpty {
+            await withCheckedContinuation { continuation in
+                requestWaiters.append(continuation)
+            }
+        }
+    }
+
+    func waitUntilCancelled() async {
+        if cancellationCompleted { return }
+        await withCheckedContinuation { continuation in
+            cancellationWaiters.append(continuation)
+        }
+    }
+
+    func succeed(with summary: ExerciseSummary) {
+        pending?.resume(returning: summary)
+        pending = nil
+    }
+
+    private func cancelPending() async {
+        guard let pending else { return }
+        self.pending = nil
+        wasCancelled = true
+        await log.append(.toolRouteCancelled)
+        pending.resume(throwing: CancellationError())
+        cancellationCompleted = true
+        let waiters = cancellationWaiters
+        cancellationWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
+private enum ToolRepositoryError: Error, Equatable, Sendable {
+    case profileUnsupported
 }

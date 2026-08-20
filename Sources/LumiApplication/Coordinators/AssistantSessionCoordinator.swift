@@ -7,11 +7,31 @@ public enum AssistantSessionCoordinatorError: Error, Equatable, Sendable {
     case endSessionInProgress
 }
 
+/// Application dependencies for the optional member-aware voice tool session.
+public struct VoiceToolCallSessionConfiguration: Sendable {
+    public let port: any VoiceToolCallPort
+    public let weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+
+    public init(
+        port: any VoiceToolCallPort,
+        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+    ) {
+        self.port = port
+        self.weeklySummaryUseCase = weeklySummaryUseCase
+    }
+}
+
+private struct VoiceStartPreparation: Sendable {
+    let events: AsyncStream<VoiceSessionEvent>
+    let toolRunner: VoiceToolCallSessionRunner?
+}
+
 /// Owns the active Phase 1 assistant session state and coordinates orientation.
 public actor AssistantSessionCoordinator {
     private let hardware: any HardwareControlPort
     private let identity: any IdentityRecognitionPort
     private let voice: any VoiceSessionPort
+    private let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
     private let reducer: AssistantStateReducer
 
     public private(set) var state: AssistantState
@@ -27,23 +47,26 @@ public actor AssistantSessionCoordinator {
     private var identityRecognitionInProgress = false
     private var voiceSessionStartInProgress = false
     private var voiceEventConsumerTask: Task<Void, Never>?
+    private var voiceToolCallRunnerTask: Task<Void, Never>?
     private var sessionGeneration: UInt64 = 0
     private var ending = false
     private var orientationOperation: Task<Void, Error>?
     private var orientationOperationGeneration: UInt64?
     private var identityOperation: Task<RecognitionResult, Error>?
     private var identityOperationGeneration: UInt64?
-    private var voiceStartOperation: Task<AsyncStream<VoiceSessionEvent>, Error>?
+    private var voiceStartOperation: Task<VoiceStartPreparation, Error>?
     private var voiceStartOperationGeneration: UInt64?
 
     public init(
         hardware: any HardwareControlPort,
         identity: any IdentityRecognitionPort,
-        voice: any VoiceSessionPort
+        voice: any VoiceSessionPort,
+        voiceToolCallConfiguration: VoiceToolCallSessionConfiguration? = nil
     ) {
         self.hardware = hardware
         self.identity = identity
         self.voice = voice
+        self.voiceToolCallConfiguration = voiceToolCallConfiguration
         self.reducer = AssistantStateReducer()
         self.state = .idle
         self.recognitionResult = nil
@@ -256,20 +279,35 @@ public actor AssistantSessionCoordinator {
         let generation = sessionGeneration
 
         let context: VoiceContext
+        let memberID: MemberID?
         switch recognitionResult {
-        case .known:
+        case let .known(knownMemberID, _):
             context = .returningMember
+            memberID = knownMemberID
         case .unknown:
             context = .visitor
+            memberID = nil
         }
 
         let voice = voice
-        let operation = Task<AsyncStream<VoiceSessionEvent>, Error> {
+        let toolConfiguration = voiceToolCallConfiguration
+        let operation = Task<VoiceStartPreparation, Error> {
             try Task.checkCancellation()
             let events = await voice.eventUpdates()
             try Task.checkCancellation()
+            let toolRunner: VoiceToolCallSessionRunner?
+            if let toolConfiguration, let memberID {
+                toolRunner = await VoiceToolCallSessionRunner.prepare(
+                    port: toolConfiguration.port,
+                    memberID: memberID,
+                    weeklySummaryUseCase: toolConfiguration.weeklySummaryUseCase
+                )
+            } else {
+                toolRunner = nil
+            }
+            try Task.checkCancellation()
             try await voice.start(context: context)
-            return events
+            return VoiceStartPreparation(events: events, toolRunner: toolRunner)
         }
         voiceStartOperation = operation
         voiceStartOperationGeneration = generation
@@ -277,7 +315,7 @@ public actor AssistantSessionCoordinator {
 
         do {
             try Task.checkCancellation()
-            let events = try await withTaskCancellationHandler(operation: {
+            let preparation = try await withTaskCancellationHandler(operation: {
                 try await operation.value
             }, onCancel: {
                 operation.cancel()
@@ -289,7 +327,10 @@ public actor AssistantSessionCoordinator {
 
             _ = try transition(.voiceSessionReady)
             voiceRequiresRetry = false
-            startVoiceEventConsumer(events, generation: generation)
+            startVoiceEventConsumer(preparation.events, generation: generation)
+            if let toolRunner = preparation.toolRunner {
+                startVoiceToolCallRunner(toolRunner, generation: generation)
+            }
             return state
         } catch {
             if generation != sessionGeneration || ending {
@@ -329,6 +370,13 @@ public actor AssistantSessionCoordinator {
         cancelPendingOperations()
         voiceEventConsumerTask?.cancel()
         voiceEventConsumerTask = nil
+
+        let toolRunnerTask = voiceToolCallRunnerTask
+        voiceToolCallRunnerTask = nil
+        toolRunnerTask?.cancel()
+        if let toolRunnerTask {
+            await toolRunnerTask.value
+        }
 
         // Voice is always stopped for an accepted end, even for states that did
         // not currently have a live voice session.
@@ -450,6 +498,31 @@ public actor AssistantSessionCoordinator {
         }
     }
 
+    private func startVoiceToolCallRunner(
+        _ runner: VoiceToolCallSessionRunner,
+        generation: UInt64
+    ) {
+        voiceToolCallRunnerTask = Task { [weak self] in
+            do {
+                try await runner.run()
+            } catch {
+                await self?.consumeVoiceToolCallRunnerError(
+                    error,
+                    generation: generation
+                )
+            }
+        }
+    }
+
+    private func consumeVoiceToolCallRunnerError(
+        _ error: any Error,
+        generation: UInt64
+    ) {
+        guard generation == sessionGeneration, !ending else { return }
+        guard !(error is CancellationError), !Task.isCancelled else { return }
+        voiceRequiresRetry = true
+    }
+
     private func consumeVoiceEvent(
         _ event: VoiceSessionEvent,
         generation: UInt64
@@ -510,6 +583,7 @@ public actor AssistantSessionCoordinator {
 
     deinit {
         voiceEventConsumerTask?.cancel()
+        voiceToolCallRunnerTask?.cancel()
         for continuation in subscribers.values {
             continuation.finish()
         }
