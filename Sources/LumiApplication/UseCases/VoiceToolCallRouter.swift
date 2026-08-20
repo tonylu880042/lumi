@@ -1,4 +1,5 @@
 import Foundation
+import LumiDomain
 
 /// Routes normalized voice calls to Application use cases for one voice
 /// session.
@@ -9,10 +10,15 @@ import Foundation
 /// invoke this method serially; concurrent in-flight call coalescing is
 /// intentionally deferred to the stream runner.
 public actor VoiceToolCallRouter {
+    private let memberID: MemberID
     private let weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
     private var completedCalls: [String: CompletedCall] = [:]
 
-    public init(weeklySummaryUseCase: GetMemberWeeklySummaryUseCase) {
+    public init(
+        memberID: MemberID,
+        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+    ) {
+        self.memberID = memberID
         self.weeklySummaryUseCase = weeklySummaryUseCase
     }
 
@@ -37,7 +43,7 @@ public actor VoiceToolCallRouter {
 
         let payload: VoiceToolResultPayload
         switch call.kind {
-        case let .getMemberWeeklySummary(memberID):
+        case .getMemberWeeklySummary:
             do {
                 let summary = try await weeklySummaryUseCase.execute(for: memberID)
                 try Task.checkCancellation()

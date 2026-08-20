@@ -1,10 +1,10 @@
 import Foundation
-import LumiDomain
 
 /// The provider-neutral tool operation requested by a voice session.
 public enum VoiceToolCallKind: Equatable, Sendable {
-    /// Requests the existing weekly-summary Application use case.
-    case getMemberWeeklySummary(memberID: MemberID)
+    /// Requests the existing weekly-summary Application use case for the
+    /// member bound to the current voice session.
+    case getMemberWeeklySummary
 
     /// Represents a provider tool name that Lumi does not support.
     case unsupported

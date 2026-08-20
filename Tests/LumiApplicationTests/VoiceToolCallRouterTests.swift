@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Voice tool-call router")
 struct VoiceToolCallRouterTests {
-    @Test("routes a known weekly-summary call with an exact member ID")
+    @Test("routes a known weekly-summary call with the router's exact bound member ID")
     func routesKnownWeeklySummaryCall() async throws {
         let memberID = try MemberID(rawValue: "  M-001/exact  ")
         let repository = RecordingMemberRepository(
@@ -17,13 +17,14 @@ struct VoiceToolCallRouterTests {
             )
         )
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
         )
         let call = VoiceToolCall(
             callID: "weekly-summary-call",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
 
         let result = try await router.result(for: call)
@@ -38,6 +39,50 @@ struct VoiceToolCallRouterTests {
         acceptsSendable(result)
     }
 
+    @Test("separate session routers route only their own bound member IDs")
+    func separateRoutersUseTheirOwnBoundMemberIDs() async throws {
+        let firstMemberID = try MemberID(rawValue: "M-bound-first")
+        let secondMemberID = try MemberID(rawValue: "M-bound-second")
+        let repository = RecordingMemberRepository(
+            summary: ExerciseSummary(
+                visitsThisWeek: 1,
+                activityMETMinutes: nil,
+                lastWorkoutAt: nil,
+                todayCompleted: true
+            )
+        )
+        let firstRouter = VoiceToolCallRouter(
+            memberID: firstMemberID,
+            weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                repository: repository
+            )
+        )
+        let secondRouter = VoiceToolCallRouter(
+            memberID: secondMemberID,
+            weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
+                repository: repository
+            )
+        )
+
+        _ = try await firstRouter.result(
+            for: VoiceToolCall(
+                callID: "first-session-call",
+                kind: .getMemberWeeklySummary
+            )
+        )
+        _ = try await secondRouter.result(
+            for: VoiceToolCall(
+                callID: "second-session-call",
+                kind: .getMemberWeeklySummary
+            )
+        )
+
+        #expect(
+            await repository.weeklySummaryRequests
+                == [firstMemberID, secondMemberID]
+        )
+    }
+
     @Test("maps unsupported and invalid argument calls to fixed failures")
     func mapsUnsupportedAndInvalidArguments() async throws {
         let repository = RecordingMemberRepository(
@@ -49,6 +94,7 @@ struct VoiceToolCallRouterTests {
             )
         )
         let router = VoiceToolCallRouter(
+            memberID: try MemberID(rawValue: "M-unsupported"),
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
@@ -77,6 +123,7 @@ struct VoiceToolCallRouterTests {
         let memberID = try MemberID(rawValue: "M-generic")
         let repository = RecordingMemberRepository(error: .generic)
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
@@ -85,7 +132,7 @@ struct VoiceToolCallRouterTests {
         let result = try await router.result(
             for: VoiceToolCall(
                 callID: "generic-error",
-                kind: .getMemberWeeklySummary(memberID: memberID)
+                kind: .getMemberWeeklySummary
             )
         )
 
@@ -106,6 +153,7 @@ struct VoiceToolCallRouterTests {
             )
         )
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
@@ -114,7 +162,7 @@ struct VoiceToolCallRouterTests {
         let result = try await router.result(
             for: VoiceToolCall(
                 callID: "invalid-data",
-                kind: .getMemberWeeklySummary(memberID: memberID)
+                kind: .getMemberWeeklySummary
             )
         )
 
@@ -133,13 +181,14 @@ struct VoiceToolCallRouterTests {
             )
         )
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
         )
         let call = VoiceToolCall(
             callID: "cached-call",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
 
         let first = try await router.result(for: call)
@@ -161,13 +210,14 @@ struct VoiceToolCallRouterTests {
             )
         )
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
         )
         let original = VoiceToolCall(
             callID: "same-call-id",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
         let conflicting = VoiceToolCall(
             callID: original.callID,
@@ -196,13 +246,14 @@ struct VoiceToolCallRouterTests {
             )
         )
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
         )
         let call = VoiceToolCall(
             callID: "pre-cancel-call",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
         let task = Task { () throws -> VoiceToolResult in
             withUnsafeCurrentTask { $0?.cancel() }
@@ -222,13 +273,14 @@ struct VoiceToolCallRouterTests {
         let memberID = try MemberID(rawValue: "M-suspended-cancel")
         let repository = GatedMemberRepository()
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
         )
         let call = VoiceToolCall(
             callID: "suspended-cancel-call",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
         let task = Task { () throws -> VoiceToolResult in
             try await router.result(for: call)
@@ -258,13 +310,14 @@ struct VoiceToolCallRouterTests {
         let memberID = try MemberID(rawValue: "M-success-cancel")
         let repository = GatedMemberRepository()
         let router = VoiceToolCallRouter(
+            memberID: memberID,
             weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                 repository: repository
             )
         )
         let call = VoiceToolCall(
             callID: "success-cancel-call",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
         let task = Task { () throws -> VoiceToolResult in
             try await router.result(for: call)

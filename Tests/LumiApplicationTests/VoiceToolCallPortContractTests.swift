@@ -5,21 +5,31 @@ import Testing
 
 @Suite("Voice tool-call port contract")
 struct VoiceToolCallPortContractTests {
-    @Test("known tool calls preserve opaque call IDs and exact MemberIDs")
+    @Test("known tool calls preserve opaque call IDs without carrying a MemberID")
     func knownToolCallPreservesOpaqueValues() throws {
-        let memberID = try MemberID(rawValue: "  M-001/exact  ")
         let call = VoiceToolCall(
             callID: "opaque-call-id",
-            kind: .getMemberWeeklySummary(memberID: memberID)
+            kind: .getMemberWeeklySummary
         )
 
         #expect(call.callID == "opaque-call-id")
-        #expect(
-            call.kind == .getMemberWeeklySummary(memberID: memberID)
-        )
+        #expect(call.kind == .getMemberWeeklySummary)
         #expect(call == call)
         acceptsSendable(call)
         acceptsSendable(call.kind)
+    }
+
+    @Test("known tool calls carry no member ID or raw provider arguments")
+    func knownToolCallHasNoMemberIDOrRawArguments() {
+        let call = VoiceToolCall(
+            callID: "opaque-call-id",
+            kind: .getMemberWeeklySummary
+        )
+        let kindMirror = Mirror(reflecting: call.kind)
+
+        #expect(kindMirror.children.isEmpty)
+        #expect(!String(describing: call.kind).contains("member-secret-marker"))
+        #expect(!String(describing: call.kind).contains("raw-provider-arguments"))
     }
 
     @Test("unsupported and invalid argument calls remain provider-neutral values")
