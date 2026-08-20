@@ -2,7 +2,7 @@
 
 > File: `roadmap.md`
 > Status: Active
-> Last updated: 2026-08-20
+> Last updated: 2026-08-21
 > Development principles: Clean Architecture + TDD + Ask-if-Unclear
 
 ## 1. Roadmap Goal
@@ -544,8 +544,8 @@ A simulated visitor can trigger greeting, speak naturally, interrupt Lumi, recei
 
 ## 7. Phase 3 — Mock Member Data + Tool Calling
 
-**Status: Automated Debug-Live implementation complete; physical iPad and real
-Curves data validation pending**
+**Status: Automated Debug-Live implementation complete; physical voice quality,
+physical iPad validation, and real Curves data validation pending**
 
 Goal: allow Lumi to answer member-specific exercise questions before integrating the real Curves backend.
 
@@ -576,6 +576,27 @@ weekly-summary tool:
 - `LumiApp` Release and `LumiApp-Live` Release-Live do not enable the mock
   member tool. The generic mock repository has no default records.
 
+### Completed conversation-direction slice (43A)
+
+The voice session can be focused before startup with one payload-free,
+provider-neutral direction:
+
+- `general`, `preWorkoutReminder`, and `postWorkoutReview` apply to both known
+  members and unknown visitors.
+- Only the per-session Realtime instructions change; general adds no direction
+  text, and the pre-workout/post-workout text is fixed and does not contain a
+  `MemberID`, name, confidence, embedding, photo, or other member payload.
+- A direction does not force a tool call. The weekly-summary member tool remains
+  known-session-only and on-demand; unknown/visitor sessions have no private
+  member data path.
+- The Debug-Live UI labels are exactly `一般`, `運動前提醒`, and `運動後
+  review`. The picker is compiled/displayed only for `DEBUG && LUMI_LIVE`;
+  Mock Debug, Release, and Release-Live use `general` without the picker.
+- The picker is selectable only before voice startup, remains selected after a
+  retryable startup failure, and resets to `general` after confirmed return to
+  `idle`. Direction choice is neither persisted nor telemetered.
+- The broker request/body and device authentication flow remain unchanged.
+
 The current synthetic fixture is intentionally stable for manual validation:
 
 | Field | Debug-Live value |
@@ -593,6 +614,15 @@ Debug-Live, and Release-Live. The exact `swift test` and `swift test --parallel`
 runs reached build and visible passing suites (including 4/4 snapshots), but
 the known `swiftpm-testing-helper` lifecycle hang required interruption; they
 are not recorded as clean full-suite passes or full-suite counts.
+
+43A evidence also includes the Slice 1 RED contract failure followed by the
+focused package gate (80/80) and `swift build`, then the Slice 2 Debug RED
+(`xcodebuild` exit 65) followed by focused Debug and Debug-Live tests. The
+focused Debug summary was 13 tests in 2 suites; both focused configurations
+passed. Full App gates passed 63/63 for `LumiApp` Debug and 63/63 for
+`LumiApp-Live` Debug-Live, and all four unsigned generic Simulator builds
+completed with exit 0. These automated results do not replace a physical
+microphone/voice-quality check.
 
 ### Deferred boundary
 
@@ -623,8 +653,10 @@ Only the minimum required member context may be provided to the LLM.
 ### Exit Criteria
 Mock known members can ask the supported weekly-summary question and receive a
 deterministic answer grounded in Debug-Live data. Unknown/visitor sessions
-cannot query member data. Physical iPad voice validation and the real Curves
-adapter remain explicit follow-up gates.
+cannot query member data. Physical iPad microphone/voice-quality validation and
+the real Curves adapter remain explicit follow-up gates; the adapter is blocked
+on the verified Curves endpoint, authentication, identity mapping, schema,
+privacy, error, rate-limit, and offline/cache contracts.
 
 ## 8. Milestone 2 — Smart Rotation Base
 

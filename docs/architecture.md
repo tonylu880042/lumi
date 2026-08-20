@@ -2,7 +2,7 @@
 
 > File: `docs/architecture.md`
 > Status: Active Architecture Baseline
-> Last updated: 2026-08-20
+> Last updated: 2026-08-21
 > Applies to: iPad App, Identity Recognition, Realtime Voice, Member Data, Smart Rotation Base
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 
@@ -360,8 +360,18 @@ cross this port.
 ### Voice
 
 ```swift
+enum VoiceConversationDirection {
+    case general
+    case preWorkoutReminder
+    case postWorkoutReview
+}
+
 protocol VoiceSessionPort: Sendable {
     func start(context: VoiceContext) async throws
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection
+    ) async throws
     func eventUpdates() async -> AsyncStream<VoiceSessionEvent>
     func stop() async
 }
@@ -375,6 +385,12 @@ failure leaves the semantic state unchanged so its legal action can be retried.
 it carries no member identity, confidence, or private profile data. `ToolResult`
 and `sendToolResult(_:)` are introduced with Phase 3 tool calling, not ordinary
 conversation.
+
+`VoiceConversationDirection` is a provider-neutral, payload-free focus for one
+voice session. It carries no member ID, name, confidence, embedding, photo, or
+exercise data. The legacy `start(context:)` contract remains equivalent to
+`.general`; the direction-aware overload is used when the App explicitly sets
+the session focus.
 
 ### Hardware
 
@@ -739,6 +755,27 @@ For the current Phase 3 slice, the voice adapter advertises member tools only
 when the session context is `returningMember`. The provider-facing voice
 context remains generic; it carries no `MemberID`, display name, confidence, or
 member profile.
+
+### 11.2 Conversation Direction
+
+The App may select one direction before a voice session starts:
+
+| App label | Provider-neutral direction | Session behavior |
+| --- | --- | --- |
+| `一般` | `general` | Keep the base session instructions unchanged. |
+| `運動前提醒` | `preWorkoutReminder` | Append the fixed pre-workout reminder instructions for this session. |
+| `運動後 review` | `postWorkoutReview` | Append the fixed post-workout review instructions for this session. |
+
+Only the per-session Realtime instructions change. The broker request, request
+body, device authorization, and authentication flow do not change. A direction
+does not force a tool call: member tools remain known-session-only and
+on-demand, while an unknown/visitor session has no private member data path.
+
+The Debug-Live picker is compiled and displayed only under
+`DEBUG && LUMI_LIVE`. Mock Debug, Release, and Release-Live have no direction
+picker and use `general`. The selected direction is disabled after startup;
+startup failure leaves it available for retry, and confirmed return to `idle`
+resets it to `general`. Direction choice has no telemetry and is not persisted.
 
 ---
 
