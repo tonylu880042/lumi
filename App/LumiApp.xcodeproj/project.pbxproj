@@ -18,6 +18,7 @@
 		1A22EA0BFB7D48A49EAC0366 /* SFace-Apache-2.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 786C8AFB946C4BB29D870171 /* SFace-Apache-2.0.txt */; };
 		27CF6F96E315422FB360853D /* YuNet-MIT.txt in Resources */ = {isa = PBXBuildFile; fileRef = E31519F015374DE680A9EC49 /* YuNet-MIT.txt */; };
 		A3796F30E108414FAFF825E5 /* ModelProvenance.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F7A4B8D2E94B54A5A6C1F8 /* ModelProvenance.json */; };
+		A7B8C9D0E1F2031425364758 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B8C9D0E1F203142536475869 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +30,7 @@
 		786C8AFB946C4BB29D870171 /* SFace-Apache-2.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = SFace-Apache-2.0.txt; path = SFace-Apache-2.0.txt; sourceTree = "<group>"; };
 		E31519F015374DE680A9EC49 /* YuNet-MIT.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = YuNet-MIT.txt; path = YuNet-MIT.txt; sourceTree = "<group>"; };
 		C0F7A4B8D2E94B54A5A6C1F8 /* ModelProvenance.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = ModelProvenance.json; path = ModelProvenance.json; sourceTree = "<group>"; };
+		B8C9D0E1F203142536475869 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -82,6 +84,7 @@
 			isa = PBXGroup;
 			children = (
 				B3E4F5678901234567890123 /* Models */,
+				B8C9D0E1F203142536475869 /* Assets.xcassets */,
 			);
 			path = LumiApp/Resources;
 			sourceTree = "<group>";
@@ -210,6 +213,7 @@
 				1A22EA0BFB7D48A49EAC0366 /* SFace-Apache-2.0.txt in Resources */,
 				27CF6F96E315422FB360853D /* YuNet-MIT.txt in Resources */,
 				A3796F30E108414FAFF825E5 /* ModelProvenance.json in Resources */,
+				A7B8C9D0E1F2031425364758 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -479,6 +483,7 @@
 		0DBF20BC45AC86E5152D8235 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -505,6 +510,7 @@
 		E34F1C2BBC4356A9D88A9317 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -530,6 +536,7 @@
 		F6E6D7A3B9A04152A3B4C5D6 /* Debug-Live */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -560,6 +567,7 @@
 		F6E6D7A4B9A04152A3B4C5D6 /* Release-Live */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
