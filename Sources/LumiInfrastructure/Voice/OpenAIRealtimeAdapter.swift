@@ -49,8 +49,18 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
         self.supportsWeeklySummaryTool = enablesWeeklySummaryTool
     }
 
-    /// Returns after the provider emits `session.created`.
+    /// Returns after the provider emits `session.created` using the general
+    /// conversation direction.
     public func start(context: VoiceContext) async throws {
+        try await start(context: context, direction: .general)
+    }
+
+    /// Returns after the provider emits `session.created` using the selected
+    /// provider-neutral conversation direction.
+    public func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection
+    ) async throws {
         switch phase {
         case .starting:
             throw OpenAIRealtimeAdapterError.startInProgress
@@ -69,7 +79,10 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
 
         let readiness = AsyncThrowingStream<Void, any Error>.makeStream()
         startContinuation = readiness.continuation
-        let sessionConfiguration = configuration(for: context)
+        let sessionConfiguration = configuration(
+            for: context,
+            direction: direction
+        )
         worker = Task { [weak self] in
             await self?.runSession(
                 generation: acceptedGeneration,
@@ -473,7 +486,8 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
     }
 
     private func configuration(
-        for context: VoiceContext
+        for context: VoiceContext,
+        direction: VoiceConversationDirection
     ) -> OpenAIRealtimeConfiguration {
         let greetingInstruction: String
         switch context {
@@ -488,10 +502,22 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
             """
         }
 
+        var instructions = configuration.instructions + "\n" + greetingInstruction
+        switch direction {
+        case .general:
+            break
+        case .preWorkoutReminder:
+            instructions += "\n" +
+                "本次對話方向是運動前提醒。主動給予簡短、溫柔的運動前提醒；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+        case .postWorkoutReview:
+            instructions += "\n" +
+                "本次對話方向是運動後 review。主動用簡短、正向的問題引導使用者回顧本次運動；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+        }
+
         return OpenAIRealtimeConfiguration(
             model: configuration.model,
             voice: configuration.voice,
-            instructions: configuration.instructions + "\n" + greetingInstruction
+            instructions: instructions
         )
     }
 }

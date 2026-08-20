@@ -13,6 +13,7 @@ public enum MockVoiceSessionError: Error, Equatable, Sendable {
 /// wall-clock timing or provider payloads are involved.
 public actor MockVoiceSessionPort: VoiceSessionPort {
     public private(set) var startContexts: [VoiceContext] = []
+    public private(set) var startDirections: [VoiceConversationDirection] = []
     public private(set) var startCallCount = 0
     public private(set) var stopCallCount = 0
     public private(set) var isActive = false
@@ -35,10 +36,18 @@ public actor MockVoiceSessionPort: VoiceSessionPort {
     public init() {}
 
     public func start(context: VoiceContext) async throws {
+        try await start(context: context, direction: .general)
+    }
+
+    public func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection
+    ) async throws {
         let requestID = nextStartID
         nextStartID &+= 1
         startCallCount += 1
         startContexts.append(context)
+        startDirections.append(direction)
 
         try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation {

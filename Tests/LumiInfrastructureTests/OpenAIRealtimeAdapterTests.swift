@@ -119,7 +119,113 @@ struct OpenAIRealtimeAdapterTests {
         #expect(configurations[0].voice == "marin")
         #expect(configurations[0].instructions.contains("歡迎回來"))
         #expect(configurations[0].instructions.contains("不要說出姓名"))
+        #expect(configurations[0].instructions.contains("運動前提醒") == false)
+        #expect(configurations[0].instructions.contains("運動後 review") == false)
 
+        await adapter.stop()
+    }
+
+    @Test("direction instructions are session-scoped and contain no identity data")
+    func directionInstructionsAreSessionScopedAndPrivacySafe() async throws {
+        let cases: [(VoiceConversationDirection, String)] = [
+            (
+                .general,
+                ""
+            ),
+            (
+                .preWorkoutReminder,
+                "本次對話方向是運動前提醒。主動給予簡短、溫柔的運動前提醒；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+            ),
+            (
+                .postWorkoutReview,
+                "本次對話方向是運動後 review。主動用簡短、正向的問題引導使用者回顧本次運動；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+            ),
+        ]
+
+        for (direction, expectedInstruction) in cases {
+            let source = TestClientSecretSource(
+                secrets: [try makeSecret("direction-secret")]
+            )
+            let transport = TestRealtimeTransport()
+            let adapter = makeAdapter(
+                source: source,
+                factory: TestRealtimeTransportFactory(transports: [transport]),
+                enablesWeeklySummaryTool: true
+            )
+
+            let start = Task {
+                try await adapter.start(
+                    context: .returningMember,
+                    direction: direction
+                )
+            }
+            #expect(await waitUntil { await transport.connectCallCount == 1 })
+            await transport.emit(.sessionCreated)
+            try await start.value
+
+            let configurations = await source.receivedConfigurations
+            #expect(configurations.count == 1)
+            if expectedInstruction.isEmpty {
+                #expect(configurations[0].instructions.contains("運動前提醒") == false)
+                #expect(configurations[0].instructions.contains("運動後 review") == false)
+            } else {
+                #expect(configurations[0].instructions.contains(expectedInstruction))
+            }
+
+            for marker in [
+                "M-member-id-marker",
+                "member-name-marker",
+                "confidence-marker",
+                "embedding-marker",
+                "photo-marker",
+            ] {
+                #expect(configurations[0].instructions.contains(marker) == false)
+            }
+
+            await adapter.stop()
+        }
+    }
+
+    @Test("reconnect preserves the selected direction instructions")
+    func reconnectPreservesSelectedDirection() async throws {
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("direction-first-secret"),
+            try makeSecret("direction-reconnect-secret"),
+        ])
+        let firstTransport = TestRealtimeTransport()
+        let secondTransport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(
+                transports: [firstTransport, secondTransport]
+            )
+        )
+
+        let start = Task {
+            try await adapter.start(
+                context: .visitor,
+                direction: .preWorkoutReminder
+            )
+        }
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.emit(.sessionCreated)
+        try await start.value
+
+        await firstTransport.finishUnexpectedly()
+        #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+
+        let configurations = await source.receivedConfigurations
+        #expect(configurations.count == 2)
+        for configuration in configurations {
+            #expect(
+                configuration.instructions.contains(
+                    "本次對話方向是運動前提醒。主動給予簡短、溫柔的運動前提醒；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+                )
+            )
+            #expect(configuration.instructions.contains("運動後 review") == false)
+        }
+
+        await secondTransport.emit(.sessionCreated)
         await adapter.stop()
     }
 
@@ -411,7 +517,12 @@ struct OpenAIRealtimeAdapterTests {
         )
         let toolUpdates = await adapter.toolCallUpdates()
         let call = VoiceToolCall(callID: "visitor-call", kind: .getMemberWeeklySummary)
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task {
+            try await adapter.start(
+                context: .visitor,
+                direction: .postWorkoutReview
+            )
+        }
 
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         #expect(await transport.connectionToolFlags == [false])

@@ -54,6 +54,7 @@ struct MockVoiceSessionPortTests {
         #expect(await waitUntil { await voice.hasPendingStart })
         #expect(await voice.startCallCount == 1)
         #expect(await voice.startContexts == [.returningMember])
+        #expect(await voice.startDirections == [.general])
         await Task.yield()
         #expect(await outcome.didSucceed == false)
         #expect(await outcome.errorDescription == nil)
@@ -65,6 +66,28 @@ struct MockVoiceSessionPortTests {
         #expect(await outcome.errorDescription == nil)
         #expect(await voice.isActive)
         #expect(await voice.hasPendingStart == false)
+    }
+
+    @Test("direction-aware start records focus without an identity payload")
+    func directionAwareStartRecordsFocus() async throws {
+        let voice = MockVoiceSessionPort()
+        let request = Task {
+            try await voice.start(
+                context: .visitor,
+                direction: .postWorkoutReview
+            )
+        }
+
+        #expect(await waitUntil { await voice.hasPendingStart })
+        #expect(await voice.startContexts == [.visitor])
+        #expect(await voice.startDirections == [.postWorkoutReview])
+        #expect(
+            Mirror(reflecting: VoiceConversationDirection.postWorkoutReview)
+                .children.isEmpty
+        )
+
+        await voice.completeStart()
+        try await request.value
     }
 
     @Test("start failure is injected without provider error details")

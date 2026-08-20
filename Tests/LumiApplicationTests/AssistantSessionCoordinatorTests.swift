@@ -711,6 +711,7 @@ struct AssistantSessionCoordinatorTests {
         let knownStart = Task { try await knownCoordinator.startVoiceSession() }
         #expect(await waitUntil { await knownVoice.waitingForStart })
         #expect(await knownVoice.startContexts == [.returningMember])
+        #expect(await knownVoice.startDirections == [.general])
         await knownVoice.completeStart()
         #expect(try await knownStart.value == .speaking)
 
@@ -732,6 +733,70 @@ struct AssistantSessionCoordinatorTests {
         let unknownStart = Task { try await unknownCoordinator.startVoiceSession() }
         #expect(await waitUntil { await unknownVoice.waitingForStart })
         #expect(await unknownVoice.startContexts == [.visitor])
+        #expect(await unknownVoice.startDirections == [.general])
+        await unknownVoice.completeStart()
+        #expect(try await unknownStart.value == .speaking)
+    }
+
+    @Test("passes explicit directions for known and unknown visitors without identity payload")
+    func startsVoiceWithExplicitDirections() async throws {
+        let knownHardware = TestHardware()
+        let knownIdentity = TestIdentity()
+        let knownVoice = TestVoice()
+        let knownCoordinator = AssistantSessionCoordinator(
+            hardware: knownHardware,
+            identity: knownIdentity,
+            voice: knownVoice
+        )
+        let memberID = try MemberID(rawValue: "M-direction-known")
+        try await enterGreeting(
+            coordinator: knownCoordinator,
+            hardware: knownHardware,
+            identity: knownIdentity,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.94)
+            )
+        )
+
+        let knownStart = Task {
+            try await knownCoordinator.startVoiceSession(
+                direction: .preWorkoutReminder
+            )
+        }
+        #expect(await waitUntil { await knownVoice.waitingForStart })
+        #expect(await knownVoice.startContexts == [.returningMember])
+        #expect(await knownVoice.startDirections == [.preWorkoutReminder])
+        #expect(
+            String(reflecting: VoiceConversationDirection.preWorkoutReminder)
+                .contains(memberID.rawValue) == false
+        )
+        await knownVoice.completeStart()
+        #expect(try await knownStart.value == .speaking)
+
+        let unknownHardware = TestHardware()
+        let unknownIdentity = TestIdentity()
+        let unknownVoice = TestVoice()
+        let unknownCoordinator = AssistantSessionCoordinator(
+            hardware: unknownHardware,
+            identity: unknownIdentity,
+            voice: unknownVoice
+        )
+        try await enterGreeting(
+            coordinator: unknownCoordinator,
+            hardware: unknownHardware,
+            identity: unknownIdentity,
+            result: .unknown
+        )
+
+        let unknownStart = Task {
+            try await unknownCoordinator.startVoiceSession(
+                direction: .postWorkoutReview
+            )
+        }
+        #expect(await waitUntil { await unknownVoice.waitingForStart })
+        #expect(await unknownVoice.startContexts == [.visitor])
+        #expect(await unknownVoice.startDirections == [.postWorkoutReview])
         await unknownVoice.completeStart()
         #expect(try await unknownStart.value == .speaking)
     }
@@ -1119,7 +1184,9 @@ struct AssistantSessionCoordinatorTests {
             result: .unknown
         )
 
-        let start = Task { try await coordinator.startVoiceSession() }
+        let start = Task {
+            try await coordinator.startVoiceSession(direction: .postWorkoutReview)
+        }
         #expect(await waitUntil { await voice.waitingForStart })
         #expect(await toolPort.toolCallUpdatesCallCount == 0)
         await voice.completeStart()
@@ -1513,6 +1580,7 @@ private enum TestVoiceError: Error, Equatable, Sendable {
 
 private actor TestVoice: VoiceSessionPort {
     private(set) var startContexts: [VoiceContext] = []
+    private(set) var startDirections: [VoiceConversationDirection] = []
     private(set) var startCallCount = 0
     private(set) var eventUpdatesCallCount = 0
     private(set) var stopCallCount = 0
@@ -1539,10 +1607,18 @@ private actor TestVoice: VoiceSessionPort {
     }
 
     func start(context: VoiceContext) async throws {
+        try await start(context: context, direction: .general)
+    }
+
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection
+    ) async throws {
         let requestID = nextStartID
         nextStartID &+= 1
         startCallCount += 1
         startContexts.append(context)
+        startDirections.append(direction)
 
         try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation {

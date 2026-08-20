@@ -255,7 +255,9 @@ public actor AssistantSessionCoordinator {
     /// readiness or lifecycle event can be lost. The coordinator remains the
     /// sole consumer and owns every resulting state transition.
     @discardableResult
-    public func startVoiceSession() async throws -> AssistantState {
+    public func startVoiceSession(
+        direction: VoiceConversationDirection = .general
+    ) async throws -> AssistantState {
         guard !ending else {
             throw AssistantSessionCoordinatorError.endSessionInProgress
         }
@@ -306,7 +308,7 @@ public actor AssistantSessionCoordinator {
                 toolRunner = nil
             }
             try Task.checkCancellation()
-            try await voice.start(context: context)
+            try await voice.start(context: context, direction: direction)
             return VoiceStartPreparation(events: events, toolRunner: toolRunner)
         }
         voiceStartOperation = operation
