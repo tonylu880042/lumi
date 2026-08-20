@@ -59,7 +59,7 @@ struct OpenAIRealtimeAdapterTests {
         let observer = await observe(adapter: adapter, recorder: recorder)
         let toolUpdates = await adapter.toolCallUpdates()
 
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await transport.emit(.sessionCreated)
         try await start.value
@@ -385,7 +385,7 @@ struct OpenAIRealtimeAdapterTests {
         )
         let toolUpdates = await adapter.toolCallUpdates()
         var iterator = toolUpdates.makeAsyncIterator()
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         let early = VoiceToolCall(callID: "early-call", kind: .unsupported)
         let ready = VoiceToolCall(callID: "ready-call", kind: .getMemberWeeklySummary)
         #expect(await waitUntil { await transport.connectCallCount == 1 })
@@ -400,6 +400,41 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await iterator.next() == nil)
     }
 
+    @Test("enabled capability stays disabled for visitor sessions")
+    func enabledCapabilityStaysDisabledForVisitorSessions() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-visitor-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let toolUpdates = await adapter.toolCallUpdates()
+        let call = VoiceToolCall(callID: "visitor-call", kind: .getMemberWeeklySummary)
+        let start = Task { try await adapter.start(context: .visitor) }
+
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        #expect(await transport.connectionToolFlags == [false])
+        await transport.emit(.toolCall(call))
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await transport.emit(.toolCall(call))
+
+        await #expect(throws: OpenAIRealtimeAdapterError.toolTransportUnavailable) {
+            try await adapter.sendToolResult(
+                VoiceToolResult(
+                    callID: call.callID,
+                    payload: .failure(.invalidArguments)
+                )
+            )
+        }
+
+        await adapter.stop()
+        var iterator = toolUpdates.makeAsyncIterator()
+        #expect(await iterator.next() == nil)
+        #expect(await transport.sentData.isEmpty)
+    }
+
     @Test("tool subscribers are independent and each receive the normalized call")
     func toolSubscribersAreIndependent() async throws {
         let source = TestClientSecretSource(secrets: [try makeSecret("tool-subscriber-secret")])
@@ -411,7 +446,7 @@ struct OpenAIRealtimeAdapterTests {
         )
         var first = (await adapter.toolCallUpdates()).makeAsyncIterator()
         var second = (await adapter.toolCallUpdates()).makeAsyncIterator()
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         let call = VoiceToolCall(callID: "subscriber-call", kind: .invalidArguments)
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await transport.emit(.sessionCreated)
@@ -439,7 +474,7 @@ struct OpenAIRealtimeAdapterTests {
             enablesWeeklySummaryTool: true
         )
         var iterator = (await adapter.toolCallUpdates()).makeAsyncIterator()
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         let firstCall = VoiceToolCall(callID: "first-call", kind: .getMemberWeeklySummary)
         let staleCall = VoiceToolCall(callID: "stale-call", kind: .unsupported)
         let secondCall = VoiceToolCall(callID: "second-call", kind: .getMemberWeeklySummary)
@@ -448,6 +483,7 @@ struct OpenAIRealtimeAdapterTests {
             payload: .failure(.invalidArguments)
         )
         #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        #expect(await firstTransport.connectionToolFlags == [true])
         await firstTransport.emit(.sessionCreated)
         try await start.value
         await firstTransport.emit(.toolCall(firstCall))
@@ -491,7 +527,7 @@ struct OpenAIRealtimeAdapterTests {
             callID: "stale-tool-call",
             payload: .failure(.invalidArguments)
         )
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
         await firstTransport.emit(.sessionCreated)
         try await start.value
@@ -530,7 +566,7 @@ struct OpenAIRealtimeAdapterTests {
             enablesWeeklySummaryTool: true
         )
         let toolUpdates = await adapter.toolCallUpdates()
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
         await firstTransport.finishUnexpectedly()
         #expect(await waitUntil { await retryTransport.connectCallCount == 1 })
@@ -553,7 +589,7 @@ struct OpenAIRealtimeAdapterTests {
             enablesWeeklySummaryTool: true
         )
         let toolUpdates = await adapter.toolCallUpdates()
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         start.cancel()
 
@@ -577,7 +613,7 @@ struct OpenAIRealtimeAdapterTests {
             callID: "opaque-call-id",
             payload: .failure(.unsupportedTool)
         )
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await #expect(throws: OpenAIRealtimeAdapterError.toolTransportUnavailable) {
             try await adapter.sendToolResult(result)
@@ -610,7 +646,7 @@ struct OpenAIRealtimeAdapterTests {
             callID: marker,
             payload: .failure(.invalidArguments)
         )
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await transport.emit(.sessionCreated)
         try await start.value
@@ -642,7 +678,7 @@ struct OpenAIRealtimeAdapterTests {
             callID: "second-failure-call",
             payload: .failure(.invalidArguments)
         )
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await transport.emit(.sessionCreated)
         try await start.value
@@ -670,7 +706,7 @@ struct OpenAIRealtimeAdapterTests {
             callID: "between-cancel-call",
             payload: .failure(.invalidArguments)
         )
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await transport.emit(.sessionCreated)
         try await start.value
@@ -699,7 +735,7 @@ struct OpenAIRealtimeAdapterTests {
             callID: "after-cancel-call",
             payload: .failure(.unsupportedTool)
         )
-        let start = Task { try await adapter.start(context: .visitor) }
+        let start = Task { try await adapter.start(context: .returningMember) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
         await transport.emit(.sessionCreated)
         try await start.value
