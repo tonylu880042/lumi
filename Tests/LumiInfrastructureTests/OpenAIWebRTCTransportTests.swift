@@ -408,6 +408,166 @@ struct OpenAIWebRTCTransportTests {
         ])
     }
 
+    @Test("enabled initial handshake sends the tool schema then greeting")
+    func enabledInitialHandshakeSendsToolSchemaAndGreeting() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker"
+        )
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .initial,
+            enablesWeeklySummaryTool: true
+        )
+
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesWeeklySummaryTool: true
+            ),
+            try OpenAIRealtimeWireEncoder.responseCreate(),
+        ])
+    }
+
+    @Test("enabled reconnect handshake sends the tool schema without greeting")
+    func enabledReconnectHandshakeSendsToolSchemaWithoutGreeting() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker"
+        )
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .reconnect,
+            enablesWeeklySummaryTool: true
+        )
+
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesWeeklySummaryTool: true
+            ),
+        ])
+    }
+
+    @Test("send forwards exact data only after the session handshake")
+    func sendForwardsExactDataAfterHandshake() async throws {
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+        let payload = Data("exact-tool-result-payload".utf8)
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .reconnect
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+
+        try await transport.send(payload)
+
+        #expect(await peer.sentData.last == payload)
+    }
+
+    @Test("send before readiness and after close fail without ending the event stream")
+    func sendLifecycleGuardsAreRedactedAndNonTerminal() async throws {
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+        let payload = Data("early-tool-result-payload".utf8)
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .reconnect
+        )
+        await #expect(throws: OpenAIWebRTCTransportError.dataChannelUnavailable) {
+            try await transport.send(payload)
+        }
+        #expect(await peer.sentData.isEmpty)
+
+        await transport.close()
+        await #expect(throws: OpenAIWebRTCTransportError.closed) {
+            try await transport.send(payload)
+        }
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test("send failures map to redacted transport errors without closing")
+    func sendFailureIsRedactedAndNonTerminal() async throws {
+        let marker = "provider-sensitive-send-marker"
+        let peer = RecordingPeerDriver(
+            sendError: OpenAIRealtimePeerDriverError.dataSendFailed,
+            failSendOn: 3
+        )
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+
+        let error = await thrownTransportError {
+            try await transport.send(Data(marker.utf8))
+        }
+        #expect(error == .peerFailure)
+        assertRedacted(error, markers: [marker])
+        #expect(await peer.closeCallCount == 0)
+    }
+
+    @Test("send cancellation preserves CancellationError and does not close")
+    func sendCancellationPreservesCancellation() async throws {
+        let peer = RecordingPeerDriver(blockSend: true, blockSendOn: 3)
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+
+        let sendTask = Task {
+            try await transport.send(Data("cancel-me".utf8))
+        }
+        #expect(await waitUntil { await peer.sendStarted })
+        sendTask.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await sendTask.value
+        }
+        #expect(await peer.sendCancellationCount == 1)
+        #expect(await peer.closeCallCount == 0)
+    }
+
     @Test("duplicate session.created does not resend client events or readiness")
     func duplicateSessionCreatedIsIgnored() async throws {
         let peer = RecordingPeerDriver()
@@ -839,6 +999,7 @@ private actor RecordingPeerDriver: OpenAIRealtimePeerDriver {
     private let sendError: (any Error)?
     private let failSendOn: Int?
     private let blockSend: Bool
+    private let blockSendOn: Int?
     private let eventStream: AsyncStream<Data>
     private let eventContinuation: AsyncStream<Data>.Continuation
     private var sendCallCount = 0
@@ -851,7 +1012,8 @@ private actor RecordingPeerDriver: OpenAIRealtimePeerDriver {
         answerError: (any Error)? = nil,
         sendError: (any Error)? = nil,
         failSendOn: Int? = nil,
-        blockSend: Bool = false
+        blockSend: Bool = false,
+        blockSendOn: Int? = nil
     ) {
         self.trace = trace
         self.offer = offer
@@ -861,6 +1023,7 @@ private actor RecordingPeerDriver: OpenAIRealtimePeerDriver {
         self.sendError = sendError
         self.failSendOn = failSendOn ?? (sendError == nil ? nil : 1)
         self.blockSend = blockSend
+        self.blockSendOn = blockSendOn
         let stream = AsyncStream<Data>.makeStream(
             of: Data.self,
             bufferingPolicy: .unbounded
@@ -890,7 +1053,7 @@ private actor RecordingPeerDriver: OpenAIRealtimePeerDriver {
 
     func send(_ data: Data) async throws {
         sendCallCount += 1
-        if blockSend {
+        if blockSend && (blockSendOn == nil || blockSendOn == sendCallCount) {
             sendStarted = true
             try await withTaskCancellationHandler(operation: {
                 try await withCheckedThrowingContinuation { continuation in

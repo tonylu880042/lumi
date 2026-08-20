@@ -126,7 +126,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     func connect(
         clientSecret: OpenAIRealtimeClientSecret,
         configuration: OpenAIRealtimeConfiguration,
-        purpose: OpenAIRealtimeConnectionPurpose
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool = false
     ) async throws {
         guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
         guard lifecycle == .idle else {
@@ -200,7 +201,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                 peerEvents,
                 generation: acceptedGeneration,
                 configuration: configuration,
-                purpose: purpose
+                purpose: purpose,
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool
             )
             lifecycle = .connected
         } catch {
@@ -232,11 +234,32 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         eventContinuation.finish()
     }
 
+    func send(_ data: Data) async throws {
+        guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
+        guard lifecycle == .connected, sessionCreatedHandled else {
+            throw OpenAIWebRTCTransportError.dataChannelUnavailable
+        }
+
+        let acceptedGeneration = generation
+        do {
+            try await awaitCancellable {
+                try await self.peerDriver.send(data)
+            }
+            try ensureActive(acceptedGeneration)
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw map(error)
+        }
+    }
+
     private func startPeerEventConsumer(
         _ peerEvents: AsyncStream<Data>,
         generation acceptedGeneration: UInt64,
         configuration: OpenAIRealtimeConfiguration,
-        purpose: OpenAIRealtimeConnectionPurpose
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool
     ) {
         let task = Task { [weak self] in
             var iterator = peerEvents.makeAsyncIterator()
@@ -246,7 +269,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                     data,
                     generation: acceptedGeneration,
                     configuration: configuration,
-                    purpose: purpose
+                    purpose: purpose,
+                    enablesWeeklySummaryTool: enablesWeeklySummaryTool
                 )
             }
 
@@ -260,7 +284,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         _ data: Data,
         generation acceptedGeneration: UInt64,
         configuration: OpenAIRealtimeConfiguration,
-        purpose: OpenAIRealtimeConnectionPurpose
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool
     ) async {
         guard isGenerationActive(acceptedGeneration), !Task.isCancelled else {
             return
@@ -278,7 +303,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
 
         do {
             let update = try OpenAIRealtimeWireEncoder.sessionUpdate(
-                for: configuration
+                for: configuration,
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool
             )
             try await awaitCancellable {
                 try await self.peerDriver.send(update)

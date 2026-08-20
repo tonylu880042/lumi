@@ -393,12 +393,15 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
     func connect(
         clientSecret _: OpenAIRealtimeClientSecret,
         configuration _: OpenAIRealtimeConfiguration,
-        purpose: OpenAIRealtimeConnectionPurpose
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool _: Bool
     ) async throws {
         connectCallCount += 1
         connectionPurposes.append(purpose)
         if let connectError { throw connectError }
     }
+
+    func send(_: Data) async throws {}
 
     func eventUpdates() -> AsyncStream<OpenAIRealtimeProviderEvent> {
         let pair = AsyncStream<OpenAIRealtimeProviderEvent>.makeStream(
@@ -427,10 +430,13 @@ private actor ExhaustedRealtimeTransport: OpenAIRealtimeTransport {
     func connect(
         clientSecret _: OpenAIRealtimeClientSecret,
         configuration _: OpenAIRealtimeConfiguration,
-        purpose _: OpenAIRealtimeConnectionPurpose
+        purpose _: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool _: Bool
     ) async throws {
         throw TestTransportError.exhaustedTransports
     }
+
+    func send(_: Data) async throws {}
 
     func eventUpdates() -> AsyncStream<OpenAIRealtimeProviderEvent> {
         AsyncStream { continuation in continuation.finish() }

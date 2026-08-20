@@ -1,3 +1,5 @@
+import Foundation
+
 /// A provider-specific seam for the WebRTC Realtime transport.
 ///
 /// A concrete WebRTC implementation belongs in Infrastructure and is injected
@@ -13,7 +15,8 @@ public protocol OpenAIRealtimeTransport: Sendable {
     func connect(
         clientSecret: OpenAIRealtimeClientSecret,
         configuration: OpenAIRealtimeConfiguration,
-        purpose: OpenAIRealtimeConnectionPurpose
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool
     ) async throws
 
     /// Returns the provider event stream for this transport instance.
@@ -24,6 +27,25 @@ public protocol OpenAIRealtimeTransport: Sendable {
 
     /// Cleanly closes the underlying WebRTC connection.
     func close() async
+
+    /// Sends one already-encoded client event over the active data channel.
+    func send(_ data: Data) async throws
+}
+
+public extension OpenAIRealtimeTransport {
+    /// Connects without enabling application tools.
+    func connect(
+        clientSecret: OpenAIRealtimeClientSecret,
+        configuration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose
+    ) async throws {
+        try await connect(
+            clientSecret: clientSecret,
+            configuration: configuration,
+            purpose: purpose,
+            enablesWeeklySummaryTool: false
+        )
+    }
 }
 
 /// Creates one fresh transport for every initial connection or retry.
