@@ -56,6 +56,37 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
+    /// App-owned, payload-free focus for the next voice conversation.
+    enum ConversationDirectionChoice: String, CaseIterable, Identifiable, Equatable {
+        case general
+        case preWorkoutReminder
+        case postWorkoutReview
+
+        var id: Self { self }
+
+        var label: String {
+            switch self {
+            case .general:
+                "一般"
+            case .preWorkoutReminder:
+                "運動前提醒"
+            case .postWorkoutReview:
+                "運動後 review"
+            }
+        }
+
+        var applicationDirection: VoiceConversationDirection {
+            switch self {
+            case .general:
+                .general
+            case .preWorkoutReminder:
+                .preWorkoutReminder
+            case .postWorkoutReview:
+                .postWorkoutReview
+            }
+        }
+    }
+
     /// App-only copy context for the two end-session Simulator actions. This
     /// never crosses the coordinator or Application boundary.
     enum EndSessionCause: Equatable {
@@ -432,19 +463,22 @@ final class SessionSimulationModel: ObservableObject {
     /// Starts the voice session. In Mock mode, the optional controls keep the
     /// deterministic readiness boundary explicit; Live mode simply awaits the
     /// coordinator's provider-owned startup.
-    func startVoiceSession() {
+    func startVoiceSession(
+        direction: ConversationDirectionChoice = .general
+    ) {
         guard canStartVoiceSession else { return }
         let operationID = beginAction(.startingVoice)
 
         let coordinator = coordinator
         let authorizationRegistrationTask = authorizationRegistrationTask
         let controls = voiceSimulationControls
+        let applicationDirection = direction.applicationDirection
         actionTask = Task { [weak self] in
             _ = await authorizationRegistrationTask?.value
 
             if let controls {
                 let startTask = Task {
-                    try await coordinator.startVoiceSession()
+                    try await coordinator.startVoiceSession(direction: applicationDirection)
                 }
 
                 do {
@@ -536,7 +570,7 @@ final class SessionSimulationModel: ObservableObject {
             }
 
             do {
-                _ = try await coordinator.startVoiceSession()
+                _ = try await coordinator.startVoiceSession(direction: applicationDirection)
                 guard !Task.isCancelled else {
                     self?.finishAction(operationID)
                     return

@@ -120,6 +120,7 @@ struct SimulatorControlsView: View {
     @Binding private var controlsMode: SimulatorControlMode
     @Binding private var direction: PresenceDirection
     @Binding private var identityChoice: SessionSimulationModel.VisitorIdentityChoice
+    @Binding private var conversationDirectionChoice: SessionSimulationModel.ConversationDirectionChoice
     @Binding private var tuningSelection: Int
     @Binding private var eventSelection: Int
     @Binding private var triggeredEvent: AvatarEventCommand?
@@ -135,6 +136,7 @@ struct SimulatorControlsView: View {
         controlsMode: Binding<SimulatorControlMode>,
         direction: Binding<PresenceDirection>,
         identityChoice: Binding<SessionSimulationModel.VisitorIdentityChoice>,
+        conversationDirectionChoice: Binding<SessionSimulationModel.ConversationDirectionChoice>,
         tuningSelection: Binding<Int>,
         eventSelection: Binding<Int>,
         triggeredEvent: Binding<AvatarEventCommand?>,
@@ -147,6 +149,7 @@ struct SimulatorControlsView: View {
         self._controlsMode = controlsMode
         self._direction = direction
         self._identityChoice = identityChoice
+        self._conversationDirectionChoice = conversationDirectionChoice
         self._tuningSelection = tuningSelection
         self._eventSelection = eventSelection
         self._triggeredEvent = triggeredEvent
@@ -277,6 +280,18 @@ struct SimulatorControlsView: View {
             .accessibilityLabel("確認訪客身分")
             .accessibilityHint("完成選定的模擬身分結果")
 
+#if DEBUG && LUMI_LIVE
+            Picker("對話方向", selection: $conversationDirectionChoice) {
+                ForEach(SessionSimulationModel.ConversationDirectionChoice.allCases) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!simulationModel.canStartVoiceSession)
+            .accessibilityLabel("對話方向")
+            .accessibilityHint("選擇下一次語音互動的方向")
+#endif
+
             ForEach(SimulatorControlCatalog.voiceControls(for: simulationModel)) { control in
                 voiceControlButton(control)
             }
@@ -343,7 +358,7 @@ struct SimulatorControlsView: View {
         switch control {
         case .startVoice:
             Button(control.label) {
-                simulationModel.startVoiceSession()
+                simulationModel.startVoiceSession(direction: conversationDirectionChoice)
             }
             .buttonStyle(.borderedProminent)
             .disabled(!simulationModel.canStartVoiceSession)

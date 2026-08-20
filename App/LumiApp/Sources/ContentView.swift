@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var controlsMode: SimulatorControlMode = .session
     @State private var direction: PresenceDirection = .center
     @State private var identityChoice: SessionSimulationModel.VisitorIdentityChoice = .unknown
+    @State private var conversationDirectionChoice: SessionSimulationModel.ConversationDirectionChoice = .general
     @State private var tuningSelection = 0
     @State private var eventSelection = 0
     @State private var triggeredEvent: AvatarEventCommand?
@@ -84,6 +85,7 @@ struct ContentView: View {
                     controlsMode: $controlsMode,
                     direction: $direction,
                     identityChoice: $identityChoice,
+                    conversationDirectionChoice: $conversationDirectionChoice,
                     tuningSelection: $tuningSelection,
                     eventSelection: $eventSelection,
                     triggeredEvent: $triggeredEvent,
@@ -134,6 +136,7 @@ struct ContentView: View {
             // Session controls and immediately cancels its played Event.
             direction = .center
             identityChoice = .unknown
+            conversationDirectionChoice = .general
             sessionTriggeredEvent = nil
             if controlsMode == .session {
                 sessionCancelEvent = true

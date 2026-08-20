@@ -7,6 +7,94 @@ import Testing
 @MainActor
 @Suite("Session simulation dual-mode wrapper", .serialized)
 struct SessionSimulationModelTests {
+    @Test("Conversation direction choices are payload-free and use the product labels")
+    func conversationDirectionChoicesArePayloadFreeAndLabelled() {
+        let choices = SessionSimulationModel.ConversationDirectionChoice.allCases
+
+        #expect(choices == [
+            .general,
+            .preWorkoutReminder,
+            .postWorkoutReview
+        ])
+        #expect(choices.map(\.label) == ["一般", "運動前提醒", "運動後 review"])
+
+        for choice in choices {
+            #expect(Mirror(reflecting: choice).children.isEmpty)
+        }
+    }
+
+    @Test("Selected direction reaches voice startup for an unknown visitor")
+    func selectedDirectionReachesVoiceStartupForUnknownVisitor() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = MockIdentityRecognitionAdapter()
+        let voice = MockVoiceSessionPort()
+        let controlsRecorder = MockControlsRecorder(voice: voice)
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voiceSimulationControls: controlsRecorder.controls()
+        )
+
+        try await moveToGreeting(model: model, hardware: hardware)
+        #expect(model.canStartVoiceSession)
+
+        model.startVoiceSession(direction: .postWorkoutReview)
+        try #require(await controlsRecorder.waitForCompleteStartCall())
+        #expect(await voice.startContexts == [.visitor])
+        #expect(await voice.startDirections == [.postWorkoutReview])
+        #expect(model.canStartVoiceSession == false)
+
+        await controlsRecorder.allowCompleteStart()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+    }
+
+    @Test("Failed direction startup remains retryable with the selected direction")
+    func failedDirectionStartupRetainsRetryChoice() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = MockIdentityRecognitionAdapter()
+        let voice = MockVoiceSessionPort()
+        let controlsRecorder = MockControlsRecorder(voice: voice)
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voiceSimulationControls: controlsRecorder.controls()
+        )
+
+        try await moveToGreeting(model: model, hardware: hardware)
+        model.startVoiceSession(direction: .preWorkoutReminder)
+        try #require(await controlsRecorder.waitForCompleteStartCall())
+        await voice.failStart(with: TestVoiceFailure.injected)
+        await controlsRecorder.allowCompleteStart()
+
+        try #require(await waitUntilCurrent {
+            model.errorMessage == "語音啟動失敗，請再試一次。"
+        })
+        #expect(model.canStartVoiceSession)
+
+        await controlsRecorder.resetCompleteStartGate()
+        model.startVoiceSession(direction: .preWorkoutReminder)
+        try #require(await controlsRecorder.waitForCompleteStartCall())
+        await controlsRecorder.allowCompleteStart()
+
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        #expect(await voice.startDirections == [
+            .preWorkoutReminder,
+            .preWorkoutReminder
+        ])
+    }
+
     @Test("Mock mode keeps explicit readiness and injected event controls")
     func mockModeKeepsReadinessAndEvents() async throws {
         let hardware = MockHardwareControlPort()
