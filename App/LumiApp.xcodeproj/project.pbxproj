@@ -546,7 +546,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				LUMI_BROKER_ENDPOINT = "";
+				LUMI_BROKER_ENDPOINT = "https://curves-lumi-realtime-preview.vercel.app/api/realtime/client-secret";
 				LUMI_BROKER_ENVIRONMENT = preview;
 				PRODUCT_BUNDLE_IDENTIFIER = com.curves.lumi.live;
 				PRODUCT_NAME = "$(TARGET_NAME)";

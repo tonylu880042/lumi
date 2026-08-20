@@ -8,6 +8,8 @@ import LumiPresentation
 @Suite("App runtime composition")
 struct AppCompositionTests {
     private let previewEndpoint = "https://preview-broker.example.test/api/realtime/client-secret"
+    private let deployedPreviewEndpoint =
+        "https://curves-lumi-realtime-preview.vercel.app/api/realtime/client-secret"
 
     @Test("Invalid Live composition is unavailable before the builder runs")
     @MainActor
@@ -165,12 +167,55 @@ struct AppCompositionTests {
         #expect(firstModel !== secondModel)
     }
 
+    @Test("Debug-Live build setting selects the public Preview broker")
+    func debugLiveBuildSettingUsesPublicPreviewBroker() throws {
+        let settings = try #require(appBuildSettings(named: "Debug-Live"))
+
+        #expect(
+            settings.contains(
+                "LUMI_BROKER_ENDPOINT = \"\(deployedPreviewEndpoint)\";"
+            )
+        )
+        #expect(settings.contains("LUMI_BROKER_ENVIRONMENT = preview;"))
+
+        let descriptor = try AppRuntimeConfiguration.descriptor(
+            isLive: true,
+            brokerEndpoint: deployedPreviewEndpoint,
+            brokerEnvironment: "preview"
+        )
+        #expect(
+            descriptor == .live(
+                environment: .preview,
+                brokerEndpoint: URL(string: deployedPreviewEndpoint)!
+            )
+        )
+    }
+
+    @Test("Release-Live remains disconnected from Preview and Production")
+    func releaseLiveBuildSettingRemainsUnconfigured() throws {
+        let settings = try #require(appBuildSettings(named: "Release-Live"))
+
+        #expect(settings.contains("LUMI_BROKER_ENDPOINT = \"\";"))
+        #expect(settings.contains("LUMI_BROKER_ENVIRONMENT = production;"))
+        #expect(!settings.contains(deployedPreviewEndpoint))
+    }
+
     @Test("Compiled descriptor follows the selected build mode")
     func compiledDescriptorFollowsBuildMode() throws {
         #if LUMI_LIVE
+        #if DEBUG
+        #expect(
+            try AppRuntimeConfiguration.descriptor()
+                == .live(
+                    environment: .preview,
+                    brokerEndpoint: URL(string: deployedPreviewEndpoint)!
+                )
+        )
+        #else
         #expect(throws: AppRuntimeConfigurationError.missingBrokerEndpoint) {
             try AppRuntimeConfiguration.descriptor()
         }
+        #endif
         #else
         #expect(try AppRuntimeConfiguration.descriptor() == .mock)
         #endif
@@ -179,10 +224,22 @@ struct AppCompositionTests {
     @Test("Compiled composition plan follows the selected build mode")
     func compiledCompositionPlanFollowsBuildMode() {
         #if LUMI_LIVE
+        #if DEBUG
         #expect(
             AppRuntimeConfiguration.compositionPlan()
-                == .unavailable(message: AppRuntimeConfiguration.liveUnavailableMessage)
+                == .live(
+                    environment: .preview,
+                    brokerEndpoint: URL(string: deployedPreviewEndpoint)!
+                )
         )
+        #else
+        #expect(
+            AppRuntimeConfiguration.compositionPlan()
+                == .unavailable(
+                    message: AppRuntimeConfiguration.liveUnavailableMessage
+                )
+        )
+        #endif
         #else
         #expect(AppRuntimeConfiguration.compositionPlan() == .mock)
         #endif
@@ -309,6 +366,43 @@ struct AppCompositionTests {
                 brokerEnvironment: "staging"
             )
         }
+    }
+
+    private func appBuildSettings(named configuration: String) -> String? {
+        let projectURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("LumiApp.xcodeproj/project.pbxproj")
+
+        guard let project = try? String(contentsOf: projectURL, encoding: .utf8) else {
+            return nil
+        }
+
+        let nameMarker = "name = \"\(configuration)\";"
+        let appMarker = "INFOPLIST_FILE = LumiApp/Info-Live.plist;"
+        var searchStart = project.startIndex
+
+        while let nameRange = project.range(
+            of: nameMarker,
+            range: searchStart ..< project.endIndex
+        ) {
+            guard let settingsRange = project.range(
+                of: "buildSettings = {",
+                options: .backwards,
+                range: project.startIndex ..< nameRange.lowerBound
+            ) else {
+                searchStart = nameRange.upperBound
+                continue
+            }
+
+            let candidate = String(project[settingsRange.lowerBound ..< nameRange.upperBound])
+            if candidate.contains(appMarker) {
+                return candidate
+            }
+            searchStart = nameRange.upperBound
+        }
+
+        return nil
     }
 }
 
