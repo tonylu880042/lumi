@@ -1,6 +1,6 @@
 import Foundation
 import LumiApplication
-import LumiInfrastructure
+@testable import LumiInfrastructure
 import Testing
 
 @Suite("OpenAI Realtime adapter")
@@ -26,6 +26,7 @@ struct OpenAIRealtimeAdapterTests {
         try await start.value
         #expect(await completion.isCompleted)
         #expect(await transport.connectionPurposes == [.initial])
+        #expect(await transport.connectionToolFlags == [false])
 
         await transport.emit(.outputAudioStarted)
         await transport.emit(.inputAudioSpeechStarted)
@@ -56,6 +57,7 @@ struct OpenAIRealtimeAdapterTests {
         )
         let recorder = EventRecorder()
         let observer = await observe(adapter: adapter, recorder: recorder)
+        let toolUpdates = await adapter.toolCallUpdates()
 
         let start = Task { try await adapter.start(context: .visitor) }
         #expect(await waitUntil { await transport.connectCallCount == 1 })
@@ -65,6 +67,8 @@ struct OpenAIRealtimeAdapterTests {
         await adapter.stop()
         await adapter.stop()
         await observer.value
+        var toolIterator = toolUpdates.makeAsyncIterator()
+        #expect(await toolIterator.next() == nil)
 
         #expect(await transport.closeCallCount == 1)
         #expect(await recorder.events.isEmpty)
@@ -135,6 +139,7 @@ struct OpenAIRealtimeAdapterTests {
         let adapter = makeAdapter(source: source, factory: factory)
         let recorder = EventRecorder()
         let observer = await observe(adapter: adapter, recorder: recorder)
+        let toolUpdates = await adapter.toolCallUpdates()
 
         let start = Task { try await adapter.start(context: .visitor) }
         #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
@@ -169,6 +174,8 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await factory.makeCallCount == 2)
 
         await observer.value
+        var toolIterator = toolUpdates.makeAsyncIterator()
+        #expect(await toolIterator.next() == nil)
 
         let freshRecorder = EventRecorder()
         let freshObserver = await observe(adapter: adapter, recorder: freshRecorder)
@@ -200,6 +207,7 @@ struct OpenAIRealtimeAdapterTests {
         let adapter = makeAdapter(source: source, factory: factory)
         let recorder = EventRecorder()
         let observer = await observe(adapter: adapter, recorder: recorder)
+        let toolUpdates = await adapter.toolCallUpdates()
 
         let start = Task { try await adapter.start(context: .visitor) }
         #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
@@ -214,6 +222,8 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await factory.makeCallCount == 2)
         #expect(await recorder.events == [.failure])
         await observer.value
+        var toolIterator = toolUpdates.makeAsyncIterator()
+        #expect(await toolIterator.next() == nil)
 
         let freshRecorder = EventRecorder()
         let freshObserver = await observe(adapter: adapter, recorder: freshRecorder)
@@ -247,6 +257,7 @@ struct OpenAIRealtimeAdapterTests {
         )
         let recorder = EventRecorder()
         let observer = await observe(adapter: adapter, recorder: recorder)
+        let toolUpdates = await adapter.toolCallUpdates()
 
         let start = Task { try await adapter.start(context: .visitor) }
         #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
@@ -259,6 +270,8 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await recorder.events == [.authorizationRequired])
         #expect(await factory.makeCallCount == 1)
         await observer.value
+        var toolIterator = toolUpdates.makeAsyncIterator()
+        #expect(await toolIterator.next() == nil)
 
         let freshObserver = await observe(adapter: adapter, recorder: EventRecorder())
         let freshStart = Task { try await adapter.start(context: .visitor) }
@@ -329,6 +342,380 @@ struct OpenAIRealtimeAdapterTests {
 
         await adapter.stop()
     }
+
+    @Test("default tool mode drops provider calls and never sends results")
+    func defaultToolModeDropsCallsAndResults() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-default-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport])
+        )
+        let toolUpdates = await adapter.toolCallUpdates()
+        let start = Task { try await adapter.start(context: .visitor) }
+        let call = VoiceToolCall(callID: "default-call", kind: .getMemberWeeklySummary)
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.toolCall(call))
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await transport.emit(.toolCall(call))
+
+        await #expect(throws: OpenAIRealtimeAdapterError.toolTransportUnavailable) {
+            try await adapter.sendToolResult(
+                VoiceToolResult(
+                    callID: call.callID,
+                    payload: .failure(.invalidArguments)
+                )
+            )
+        }
+        await adapter.stop()
+        var iterator = toolUpdates.makeAsyncIterator()
+        #expect(await iterator.next() == nil)
+        #expect(await transport.sentData.isEmpty)
+    }
+
+    @Test("enabled initial mode publishes only post-ready tool calls")
+    func enabledInitialModePublishesPostReadyCalls() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-initial-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let toolUpdates = await adapter.toolCallUpdates()
+        var iterator = toolUpdates.makeAsyncIterator()
+        let start = Task { try await adapter.start(context: .visitor) }
+        let early = VoiceToolCall(callID: "early-call", kind: .unsupported)
+        let ready = VoiceToolCall(callID: "ready-call", kind: .getMemberWeeklySummary)
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        #expect(await transport.connectionToolFlags == [true])
+        await transport.emit(.toolCall(early))
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await transport.emit(.toolCall(ready))
+
+        #expect(await iterator.next() == ready)
+        await adapter.stop()
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test("tool subscribers are independent and each receive the normalized call")
+    func toolSubscribersAreIndependent() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-subscriber-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        var first = (await adapter.toolCallUpdates()).makeAsyncIterator()
+        var second = (await adapter.toolCallUpdates()).makeAsyncIterator()
+        let start = Task { try await adapter.start(context: .visitor) }
+        let call = VoiceToolCall(callID: "subscriber-call", kind: .invalidArguments)
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await transport.emit(.toolCall(call))
+
+        #expect(await first.next() == call)
+        #expect(await second.next() == call)
+        await adapter.stop()
+        #expect(await first.next() == nil)
+        #expect(await second.next() == nil)
+    }
+
+    @Test("reconnect preserves tool subscribers but drops calls until fresh readiness")
+    func reconnectPreservesToolSubscribersAndReadiness() async throws {
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("tool-first-secret"),
+            try makeSecret("tool-reconnect-secret"),
+        ])
+        let firstTransport = TestRealtimeTransport()
+        let secondTransport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [firstTransport, secondTransport]),
+            enablesWeeklySummaryTool: true
+        )
+        var iterator = (await adapter.toolCallUpdates()).makeAsyncIterator()
+        let start = Task { try await adapter.start(context: .visitor) }
+        let firstCall = VoiceToolCall(callID: "first-call", kind: .getMemberWeeklySummary)
+        let staleCall = VoiceToolCall(callID: "stale-call", kind: .unsupported)
+        let secondCall = VoiceToolCall(callID: "second-call", kind: .getMemberWeeklySummary)
+        let result = VoiceToolResult(
+            callID: secondCall.callID,
+            payload: .failure(.invalidArguments)
+        )
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.emit(.sessionCreated)
+        try await start.value
+        await firstTransport.emit(.toolCall(firstCall))
+        #expect(await iterator.next() == firstCall)
+
+        await firstTransport.finishUnexpectedly()
+        #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+        #expect(await secondTransport.connectionToolFlags == [true])
+        await secondTransport.emit(.toolCall(staleCall))
+        await #expect(throws: OpenAIRealtimeAdapterError.toolTransportUnavailable) {
+            try await adapter.sendToolResult(result)
+        }
+
+        await secondTransport.emit(.sessionCreated)
+        await secondTransport.emit(.toolCall(secondCall))
+        #expect(await iterator.next() == secondCall)
+        try await adapter.sendToolResult(result)
+        #expect(await secondTransport.sentData == [
+            try OpenAIRealtimeWireEncoder.functionCallOutput(for: result),
+            try OpenAIRealtimeWireEncoder.responseCreate(),
+        ])
+
+        await secondTransport.finishUnexpectedly()
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test("stale tool result cannot continue after reconnect")
+    func staleToolResultCannotContinueAfterReconnect() async throws {
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("tool-race-first-secret"),
+            try makeSecret("tool-race-reconnect-secret"),
+        ])
+        let firstTransport = TestRealtimeTransport(blockSendOn: 1)
+        let secondTransport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [firstTransport, secondTransport]),
+            enablesWeeklySummaryTool: true
+        )
+        let result = VoiceToolResult(
+            callID: "stale-tool-call",
+            payload: .failure(.invalidArguments)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.emit(.sessionCreated)
+        try await start.value
+
+        let sendTask = Task { try await adapter.sendToolResult(result) }
+        await firstTransport.waitUntilSendStarted()
+
+        await firstTransport.finishUnexpectedly()
+        #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+        await secondTransport.emit(.sessionCreated)
+        await firstTransport.releaseSend()
+
+        let error = await thrownAdapterError {
+            try await sendTask.value
+        }
+        #expect(error == .toolResultSendFailed)
+        #expect(await firstTransport.sentData == [
+            try OpenAIRealtimeWireEncoder.functionCallOutput(for: result),
+        ])
+        #expect(await secondTransport.sentData.isEmpty)
+
+        await adapter.stop()
+    }
+
+    @Test("startup terminal failure finishes tool subscribers")
+    func startupTerminalFailureFinishesToolSubscribers() async throws {
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("tool-startup-first-secret"),
+            try makeSecret("tool-startup-retry-secret"),
+        ])
+        let firstTransport = TestRealtimeTransport()
+        let retryTransport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [firstTransport, retryTransport]),
+            enablesWeeklySummaryTool: true
+        )
+        let toolUpdates = await adapter.toolCallUpdates()
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.finishUnexpectedly()
+        #expect(await waitUntil { await retryTransport.connectCallCount == 1 })
+        await retryTransport.finishUnexpectedly()
+
+        await #expect(throws: OpenAIRealtimeAdapterError.connectionEndedBeforeReady) {
+            try await start.value
+        }
+        var iterator = toolUpdates.makeAsyncIterator()
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test("startup cancellation finishes tool subscribers")
+    func startupCancellationFinishesToolSubscribers() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-cancel-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let toolUpdates = await adapter.toolCallUpdates()
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        start.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await start.value
+        }
+        var iterator = toolUpdates.makeAsyncIterator()
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test("sendToolResult requires readiness and sends exact output then response order")
+    func sendToolResultRequiresReadinessAndUsesExactOrder() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-send-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let result = VoiceToolResult(
+            callID: "opaque-call-id",
+            payload: .failure(.unsupportedTool)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await #expect(throws: OpenAIRealtimeAdapterError.toolTransportUnavailable) {
+            try await adapter.sendToolResult(result)
+        }
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        try await adapter.sendToolResult(result)
+        #expect(await transport.sentData == [
+            try OpenAIRealtimeWireEncoder.functionCallOutput(for: result),
+            try OpenAIRealtimeWireEncoder.responseCreate(),
+        ])
+        await adapter.stop()
+    }
+
+    @Test("first tool result send failure is fixed, redacted, and does not send response")
+    func firstToolResultSendFailureIsRedactedAndNonRetrying() async throws {
+        let marker = "opaque-call-sensitive-marker"
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-first-failure-secret")])
+        let transport = TestRealtimeTransport(
+            sendError: TestTransportError.sendFailed,
+            failSendOn: 1
+        )
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let result = VoiceToolResult(
+            callID: marker,
+            payload: .failure(.invalidArguments)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        let error = await thrownAdapterError {
+            try await adapter.sendToolResult(result)
+        }
+        #expect(error == .toolResultSendFailed)
+        assertAdapterErrorRedacted(error, markers: [marker, "sendFailed"])
+        #expect(await transport.sendCallCount == 1)
+        #expect(await transport.sentData.isEmpty)
+        #expect(await transport.closeCallCount == 0)
+        await adapter.stop()
+    }
+
+    @Test("second tool result send failure does not retry the first output")
+    func secondToolResultSendFailureDoesNotRetry() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-second-failure-secret")])
+        let transport = TestRealtimeTransport(
+            sendError: TestTransportError.sendFailed,
+            failSendOn: 2
+        )
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let result = VoiceToolResult(
+            callID: "second-failure-call",
+            payload: .failure(.invalidArguments)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        await #expect(throws: OpenAIRealtimeAdapterError.toolResultSendFailed) {
+            try await adapter.sendToolResult(result)
+        }
+        #expect(await transport.sendCallCount == 2)
+        #expect(await transport.sentData == [
+            try OpenAIRealtimeWireEncoder.functionCallOutput(for: result),
+        ])
+        await adapter.stop()
+    }
+
+    @Test("cancellation between tool result sends preserves cancellation and skips response")
+    func cancellationBetweenToolResultSendsPreservesCancellation() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-between-cancel-secret")])
+        let transport = TestRealtimeTransport(blockSendOn: 1)
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let result = VoiceToolResult(
+            callID: "between-cancel-call",
+            payload: .failure(.invalidArguments)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        let sendTask = Task { try await adapter.sendToolResult(result) }
+        await transport.waitUntilSendStarted()
+        sendTask.cancel()
+        await transport.releaseSend()
+        await #expect(throws: CancellationError.self) {
+            try await sendTask.value
+        }
+        #expect(await transport.sendCallCount == 1)
+        await adapter.stop()
+    }
+
+    @Test("successful second tool result send wins after cancellation")
+    func successfulSecondToolResultSendWinsAfterCancellation() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("tool-after-cancel-secret")])
+        let transport = TestRealtimeTransport(blockSendOn: 2)
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true
+        )
+        let result = VoiceToolResult(
+            callID: "after-cancel-call",
+            payload: .failure(.unsupportedTool)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        let sendTask = Task { try await adapter.sendToolResult(result) }
+        await transport.waitUntilSendStarted()
+        #expect(await transport.sendCallCount == 2)
+        sendTask.cancel()
+        await transport.releaseSend()
+        try await sendTask.value
+        #expect(await transport.sentData == [
+            try OpenAIRealtimeWireEncoder.functionCallOutput(for: result),
+            try OpenAIRealtimeWireEncoder.responseCreate(),
+        ])
+        await adapter.stop()
+    }
 }
 
 private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
@@ -381,27 +768,72 @@ private actor TestRealtimeTransportFactory: OpenAIRealtimeTransportFactory {
 
 private actor TestRealtimeTransport: OpenAIRealtimeTransport {
     private let connectError: (any Error)?
+    private let sendError: (any Error)?
+    private let failSendOn: Int?
+    private let blockSendOn: Int?
     private(set) var connectCallCount = 0
     private(set) var connectionPurposes: [OpenAIRealtimeConnectionPurpose] = []
+    private(set) var connectionToolFlags: [Bool] = []
     private(set) var closeCallCount = 0
+    private(set) var sendCallCount = 0
+    private(set) var sendStarted = false
+    private(set) var sentData: [Data] = []
     private var continuation: AsyncStream<OpenAIRealtimeProviderEvent>.Continuation?
+    private var pendingSend: CheckedContinuation<Void, Never>?
+    private var sendStartedWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(connectError: (any Error)? = nil) {
+    init(
+        connectError: (any Error)? = nil,
+        sendError: (any Error)? = nil,
+        failSendOn: Int? = nil,
+        blockSendOn: Int? = nil
+    ) {
         self.connectError = connectError
+        self.sendError = sendError
+        self.failSendOn = failSendOn ?? (sendError == nil ? nil : 1)
+        self.blockSendOn = blockSendOn
     }
 
     func connect(
         clientSecret _: OpenAIRealtimeClientSecret,
         configuration _: OpenAIRealtimeConfiguration,
         purpose: OpenAIRealtimeConnectionPurpose,
-        enablesWeeklySummaryTool _: Bool
+        enablesWeeklySummaryTool: Bool
     ) async throws {
         connectCallCount += 1
         connectionPurposes.append(purpose)
+        connectionToolFlags.append(enablesWeeklySummaryTool)
         if let connectError { throw connectError }
     }
 
-    func send(_: Data) async throws {}
+    func send(_ data: Data) async throws {
+        sendCallCount += 1
+        if blockSendOn == sendCallCount {
+            sendStarted = true
+            let waiters = sendStartedWaiters
+            sendStartedWaiters.removeAll()
+            for waiter in waiters {
+                waiter.resume()
+            }
+            await withCheckedContinuation { continuation in
+                pendingSend = continuation
+            }
+        }
+        if let sendError, failSendOn == sendCallCount { throw sendError }
+        sentData.append(data)
+    }
+
+    func releaseSend() {
+        pendingSend?.resume()
+        pendingSend = nil
+    }
+
+    func waitUntilSendStarted() async {
+        if sendStarted { return }
+        await withCheckedContinuation { continuation in
+            sendStartedWaiters.append(continuation)
+        }
+    }
 
     func eventUpdates() -> AsyncStream<OpenAIRealtimeProviderEvent> {
         let pair = AsyncStream<OpenAIRealtimeProviderEvent>.makeStream(
@@ -467,17 +899,46 @@ private enum TestTransportError: Error, Equatable, Sendable {
     case connectFailed
     case exhaustedCredentials
     case exhaustedTransports
+    case sendFailed
 }
 
 private func makeAdapter(
     source: TestClientSecretSource,
-    factory: TestRealtimeTransportFactory
+    factory: TestRealtimeTransportFactory,
+    enablesWeeklySummaryTool: Bool = false
 ) -> OpenAIRealtimeAdapter {
     OpenAIRealtimeAdapter(
         configuration: OpenAIRealtimeConfiguration(),
         clientSecretSource: source,
-        transportFactory: factory
+        transportFactory: factory,
+        enablesWeeklySummaryTool: enablesWeeklySummaryTool
     )
+}
+
+private func thrownAdapterError(
+    _ operation: () async throws -> Void
+) async -> OpenAIRealtimeAdapterError {
+    do {
+        try await operation()
+        Issue.record("Expected adapter operation to throw")
+        return .toolResultSendFailed
+    } catch let error as OpenAIRealtimeAdapterError {
+        return error
+    } catch {
+        Issue.record("Unexpected adapter error: \(error)")
+        return .toolResultSendFailed
+    }
+}
+
+private func assertAdapterErrorRedacted(
+    _ error: OpenAIRealtimeAdapterError,
+    markers: [String]
+) {
+    for diagnostic in [String(describing: error), String(reflecting: error)] {
+        for marker in markers {
+            #expect(!diagnostic.contains(marker))
+        }
+    }
 }
 
 private func makeSecret(_ value: String) throws -> OpenAIRealtimeClientSecret {

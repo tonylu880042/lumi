@@ -1,3 +1,4 @@
+import Foundation
 import LumiApplication
 
 /// Start failures owned by the Realtime adapter rather than the provider.
@@ -5,10 +6,12 @@ public enum OpenAIRealtimeAdapterError: Error, Equatable, Sendable {
     case startInProgress
     case alreadyActive
     case connectionEndedBeforeReady
+    case toolTransportUnavailable
+    case toolResultSendFailed
 }
 
 /// Maps an injected WebRTC transport into Lumi's provider-independent voice port.
-public actor OpenAIRealtimeAdapter: VoiceSessionPort {
+public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
     private enum Phase {
         case idle
         case starting
@@ -18,24 +21,31 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
     private let configuration: OpenAIRealtimeConfiguration
     private let clientSecretSource: any OpenAIRealtimeClientSecretSource
     private let transportFactory: any OpenAIRealtimeTransportFactory
+    private let enablesWeeklySummaryTool: Bool
 
     private var phase: Phase = .idle
     private var generation: UInt64 = 0
+    private var connectionAttemptToken: UInt64 = 0
+    private var readyConnectionToken: UInt64?
     private var worker: Task<Void, Never>?
     private var currentTransport: (any OpenAIRealtimeTransport)?
     private var startContinuation: AsyncThrowingStream<Void, any Error>.Continuation?
 
     private var nextSubscriberID: UInt64 = 0
     private var subscribers: [UInt64: AsyncStream<VoiceSessionEvent>.Continuation] = [:]
+    private var nextToolSubscriberID: UInt64 = 0
+    private var toolSubscribers: [UInt64: AsyncStream<VoiceToolCall>.Continuation] = [:]
 
     public init(
         configuration: OpenAIRealtimeConfiguration,
         clientSecretSource: any OpenAIRealtimeClientSecretSource,
-        transportFactory: any OpenAIRealtimeTransportFactory
+        transportFactory: any OpenAIRealtimeTransportFactory,
+        enablesWeeklySummaryTool: Bool = false
     ) {
         self.configuration = configuration
         self.clientSecretSource = clientSecretSource
         self.transportFactory = transportFactory
+        self.enablesWeeklySummaryTool = enablesWeeklySummaryTool
     }
 
     /// Returns after the provider emits `session.created`.
@@ -50,6 +60,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         }
 
         phase = .starting
+        clearToolConnectionReadiness()
         generation &+= 1
         let acceptedGeneration = generation
 
@@ -99,15 +110,71 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         return pair.stream
     }
 
+    public func toolCallUpdates() -> AsyncStream<VoiceToolCall> {
+        let subscriberID = nextToolSubscriberID
+        nextToolSubscriberID &+= 1
+        let pair = AsyncStream<VoiceToolCall>.makeStream(
+            of: VoiceToolCall.self,
+            bufferingPolicy: .unbounded
+        )
+        pair.continuation.onTermination = { @Sendable [weak self] _ in
+            Task { [weak self] in
+                await self?.removeToolSubscriber(id: subscriberID)
+            }
+        }
+        toolSubscribers[subscriberID] = pair.continuation
+        return pair.stream
+    }
+
+    public func sendToolResult(_ result: VoiceToolResult) async throws {
+        guard
+            enablesWeeklySummaryTool,
+            phase == .active,
+            let readyConnectionToken,
+            let transport = currentTransport
+        else {
+            throw OpenAIRealtimeAdapterError.toolTransportUnavailable
+        }
+
+        try Task.checkCancellation()
+
+        let functionCallOutput: Data
+        let responseCreate: Data
+        do {
+            functionCallOutput = try OpenAIRealtimeWireEncoder.functionCallOutput(
+                for: result
+            )
+            responseCreate = try OpenAIRealtimeWireEncoder.responseCreate()
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw OpenAIRealtimeAdapterError.toolResultSendFailed
+        }
+
+        try await sendToolData(functionCallOutput, via: transport)
+        try Task.checkCancellation()
+        guard
+            phase == .active,
+            self.readyConnectionToken == readyConnectionToken
+        else {
+            throw OpenAIRealtimeAdapterError.toolResultSendFailed
+        }
+        try await sendToolData(responseCreate, via: transport)
+    }
+
     /// Stops the current session. Repeated calls do not close a transport twice.
     public func stop() async {
         guard phase != .idle || worker != nil || currentTransport != nil else {
             finishSubscribers()
+            finishToolSubscribers()
+            clearToolConnectionReadiness()
             return
         }
 
         generation &+= 1
         phase = .idle
+        clearToolConnectionReadiness()
         worker?.cancel()
         worker = nil
         finishStart(throwing: CancellationError())
@@ -116,6 +183,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         currentTransport = nil
         await transport?.close()
         finishSubscribers()
+        finishToolSubscribers()
     }
 
     private func runSession(
@@ -137,7 +205,9 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
                 return
             case .failedBeforeReady(let error):
                 phase = .idle
+                clearToolConnectionReadiness()
                 finishStart(throwing: error)
+                finishToolSubscribers()
                 currentTransport = nil
                 worker = nil
                 return
@@ -145,9 +215,11 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
                 guard retryCount == 0 else {
                     if phase == .starting {
                         phase = .idle
+                        clearToolConnectionReadiness()
                         finishStart(
                             throwing: OpenAIRealtimeAdapterError.connectionEndedBeforeReady
                         )
+                        finishToolSubscribers()
                         currentTransport = nil
                         worker = nil
                     } else {
@@ -161,8 +233,10 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
                 return
             case .authorizationRequired:
                 phase = .idle
+                clearToolConnectionReadiness()
                 publish(.authorizationRequired)
                 finishSubscribers()
+                finishToolSubscribers()
                 currentTransport = nil
                 worker = nil
                 return
@@ -184,6 +258,9 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         purpose: OpenAIRealtimeConnectionPurpose
     ) async -> ConnectionOutcome {
         let wasStarting = phase == .starting
+        connectionAttemptToken &+= 1
+        let acceptedConnectionToken = connectionAttemptToken
+        clearToolConnectionReadiness()
 
         do {
             let secret = try await clientSecretSource.clientSecret(
@@ -204,7 +281,8 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
             try await transport.connect(
                 clientSecret: secret,
                 configuration: sessionConfiguration,
-                purpose: purpose
+                purpose: purpose,
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool
             )
             guard acceptedGeneration == generation, !Task.isCancelled else {
                 await transport.close()
@@ -218,10 +296,19 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
                     return .stopped
                 }
 
+                if case .toolCall(let call) = providerEvent,
+                   enablesWeeklySummaryTool,
+                   readyConnectionToken == acceptedConnectionToken,
+                   phase == .active
+                {
+                    publishToolCall(call)
+                }
+
                 for mappedEvent in await mapper.map(providerEvent) {
                     switch mappedEvent {
                     case .ready:
                         connectionReady = true
+                        readyConnectionToken = acceptedConnectionToken
                         if phase == .starting {
                             phase = .active
                             finishStartSuccessfully()
@@ -229,6 +316,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
                     case .voice(let event):
                         guard connectionReady else {
                             if event == .failure {
+                                clearToolConnectionReadiness()
                                 await transport.close()
                                 currentTransport = nil
                                 if wasStarting {
@@ -249,6 +337,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
             guard acceptedGeneration == generation, !Task.isCancelled else {
                 return .stopped
             }
+            clearToolConnectionReadiness()
             await transport.close()
             currentTransport = nil
             return .unexpectedEnd
@@ -258,6 +347,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
             }
             let transport = currentTransport
             currentTransport = nil
+            clearToolConnectionReadiness()
             await transport?.close()
             if wasStarting {
                 return .failedBeforeReady(error)
@@ -274,6 +364,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         guard acceptedGeneration == generation, phase == .starting else { return }
         generation &+= 1
         phase = .idle
+        clearToolConnectionReadiness()
         worker?.cancel()
         worker = nil
         finishStart(throwing: CancellationError())
@@ -281,6 +372,11 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         let transport = currentTransport
         currentTransport = nil
         await transport?.close()
+        finishToolSubscribers()
+    }
+
+    private func clearToolConnectionReadiness() {
+        readyConnectionToken = nil
     }
 
     private func finishStartSuccessfully() {
@@ -308,10 +404,24 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         }
     }
 
+    private func publishToolCall(_ call: VoiceToolCall) {
+        var terminated: [UInt64] = []
+        for (id, continuation) in toolSubscribers {
+            if case .terminated = continuation.yield(call) {
+                terminated.append(id)
+            }
+        }
+        for id in terminated {
+            toolSubscribers.removeValue(forKey: id)
+        }
+    }
+
     private func finishTerminalFailure() {
         phase = .idle
+        clearToolConnectionReadiness()
         publish(.failure)
         finishSubscribers()
+        finishToolSubscribers()
         currentTransport = nil
         worker = nil
     }
@@ -324,8 +434,34 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort {
         }
     }
 
+    private func finishToolSubscribers() {
+        let continuations = Array(toolSubscribers.values)
+        toolSubscribers.removeAll()
+        for continuation in continuations {
+            continuation.finish()
+        }
+    }
+
     private func removeSubscriber(id subscriberID: UInt64) {
         subscribers.removeValue(forKey: subscriberID)
+    }
+
+    private func removeToolSubscriber(id subscriberID: UInt64) {
+        toolSubscribers.removeValue(forKey: subscriberID)
+    }
+
+    private func sendToolData(
+        _ data: Data,
+        via transport: any OpenAIRealtimeTransport
+    ) async throws {
+        do {
+            try await transport.send(data)
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw OpenAIRealtimeAdapterError.toolResultSendFailed
+        }
     }
 
     private func configuration(
