@@ -194,6 +194,63 @@ struct AppDebugIdentityCalibrationCompositionTests {
         ))
     }
 
+    @Test("fresh Application Support is prepared one directory at a time")
+    func freshApplicationSupportIsPreparedWithoutCreatingDatabaseFile() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent(
+                "lumi-debug-calibration-fresh-container-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? fileManager.removeItem(at: root) }
+
+        try fileManager.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        let libraryURL = root.appendingPathComponent("Library", isDirectory: true)
+        try fileManager.createDirectory(
+            at: libraryURL,
+            withIntermediateDirectories: false
+        )
+        let applicationSupportURL = libraryURL
+            .appendingPathComponent("Application Support", isDirectory: true)
+        #expect(!fileManager.fileExists(atPath: applicationSupportURL.path))
+
+        let databaseURL = try AppIdentityCalibrationComposition.prepareDatabaseURL(
+            applicationSupportURL: applicationSupportURL,
+            fileManager: fileManager
+        )
+
+        let expectedDatabaseURL = applicationSupportURL
+            .appendingPathComponent("Lumi", isDirectory: true)
+            .appendingPathComponent("IdentityCalibration.sqlite", isDirectory: false)
+        #expect(databaseURL == expectedDatabaseURL)
+        #expect(fileManager.fileExists(atPath: applicationSupportURL.path))
+        #expect(fileManager.fileExists(
+            atPath: applicationSupportURL
+                .appendingPathComponent("Lumi", isDirectory: true)
+                .path
+        ))
+        #expect(!fileManager.fileExists(atPath: databaseURL.path))
+
+        let rootEntries = try fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil
+        )
+        #expect(rootEntries.map(\.lastPathComponent) == ["Library"])
+        let libraryEntries = try fileManager.contentsOfDirectory(
+            at: libraryURL,
+            includingPropertiesForKeys: nil
+        )
+        #expect(libraryEntries.map(\.lastPathComponent) == ["Application Support"])
+        let supportEntries = try fileManager.contentsOfDirectory(
+            at: applicationSupportURL,
+            includingPropertiesForKeys: nil
+        )
+        #expect(supportEntries.map(\.lastPathComponent) == ["Lumi"])
+    }
+
     @Test("both DEBUG app configurations declare camera usage copy")
     func debugBuildSettingsDeclareCameraUsage() throws {
         let projectURL = URL(fileURLWithPath: #filePath)

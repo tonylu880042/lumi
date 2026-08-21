@@ -128,6 +128,36 @@ enum AppIdentityCalibrationComposition {
             .appendingPathComponent(databaseFileName, isDirectory: false)
     }
 
+    /// Prepares the exact local directory chain needed by the calibration DB.
+    ///
+    /// The fresh iOS container may not contain Application Support yet, so
+    /// each missing directory is created explicitly without asking Foundation
+    /// to create unrelated intermediate paths.
+    static func prepareDatabaseURL(
+        applicationSupportURL: URL,
+        fileManager: FileManager
+    ) throws -> URL {
+        if !fileManager.fileExists(atPath: applicationSupportURL.path) {
+            try fileManager.createDirectory(
+                at: applicationSupportURL,
+                withIntermediateDirectories: false
+            )
+        }
+
+        let derivedDatabaseURL = databaseURL(
+            applicationSupportURL: applicationSupportURL
+        )
+        let databaseDirectoryURL = derivedDatabaseURL.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: databaseDirectoryURL.path) {
+            try fileManager.createDirectory(
+                at: databaseDirectoryURL,
+                withIntermediateDirectories: false
+            )
+        }
+
+        return derivedDatabaseURL
+    }
+
     private static let productionLoader:
         AppIdentityCalibrationPortProxy.Loader = {
             try Task.checkCancellation()
@@ -136,22 +166,16 @@ enum AppIdentityCalibrationComposition {
             // directory. Missing model resources therefore leave no partial
             // calibration store behind.
             let resources = try AppIdentityModelResources.resolve(using: Bundle.main)
-            let applicationSupportURL = try FileManager.default.url(
+            guard let applicationSupportURL = FileManager.default.urls(
                 for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: false
-            )
-            let derivedDatabaseURL = databaseURL(
-                applicationSupportURL: applicationSupportURL
-            )
-            let databaseDirectoryURL = derivedDatabaseURL.deletingLastPathComponent()
-            if !FileManager.default.fileExists(atPath: databaseDirectoryURL.path) {
-                try FileManager.default.createDirectory(
-                    at: databaseDirectoryURL,
-                    withIntermediateDirectories: false
-                )
+                in: .userDomainMask
+            ).first else {
+                throw IdentityCalibrationError.failed
             }
+            let derivedDatabaseURL = try prepareDatabaseURL(
+                applicationSupportURL: applicationSupportURL,
+                fileManager: .default
+            )
 
             return try await CoreMLIdentityCalibrationFactory.load(
                 sFaceModelURL: resources.sFaceModelURL,
