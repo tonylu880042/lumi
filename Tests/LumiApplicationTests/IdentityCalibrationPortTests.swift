@@ -74,6 +74,22 @@ struct IdentityCalibrationPortTests {
         await port.stopCamera()
     }
 
+    @Test("photo payload owns encoded bytes and supports transient Data captures")
+    func photoPayloadContractIsUsable() async throws {
+        let payload = IdentityCalibrationPhoto(data: Data([0x01, 0x02, 0x03]))
+        let port: any IdentityCalibrationPort = RecordingCalibrationPort()
+        let memberID = try MemberID(rawValue: "temporary-data-photo")
+
+        #expect(payload.data == Data([0x01, 0x02, 0x03]))
+        acceptsSendable(payload)
+        _ = try await port.captureEnrollmentPhoto(
+            for: memberID,
+            from: payload,
+            at: Date(timeIntervalSince1970: 102)
+        )
+        _ = try await port.captureReturnVisitPhoto(from: payload)
+    }
+
     private func acceptsSendable<T: Sendable>(_ value: T) {
         _ = value
     }
@@ -108,10 +124,28 @@ private actor RecordingCalibrationPort: IdentityCalibrationPort {
         return .noUsableFace
     }
 
+    func captureEnrollmentPhoto(
+        for memberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult {
+        _ = memberID
+        _ = photo
+        _ = createdAt
+        return .noUsableFace
+    }
+
     func captureReturnVisitPhoto(
         from imageURL: URL
     ) async throws -> IdentityCalibrationReturnResult {
         _ = imageURL
+        return .noUsableFace
+    }
+
+    func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult {
+        _ = photo
         return .noUsableFace
     }
 

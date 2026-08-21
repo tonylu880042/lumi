@@ -205,10 +205,11 @@ public final class DebugIdentityCalibrationModel {
     }
 
     /// Imports one transient enrollment image for the selected temporary ID.
-    /// The URL is forwarded only for this operation and is never retained by
-    /// the Presentation model. Photo capture is allowed while the camera is
-    /// stopped or ready and restores that prior state after completion.
-    public func captureEnrollmentPhoto(from imageURL: URL) async {
+    /// The encoded bytes are wrapped at this boundary for Application and are
+    /// never retained by the Presentation model. Photo capture is allowed
+    /// while the camera is stopped or ready and restores that prior state
+    /// after completion.
+    public func captureEnrollmentPhoto(from data: Data) async {
         guard !operationInFlight, canCapturePhoto,
               let selectedMemberID,
               let memberID = try? MemberID(rawValue: selectedMemberID)
@@ -223,9 +224,10 @@ public final class DebugIdentityCalibrationModel {
 
         do {
             try Task.checkCancellation()
+            let photo = IdentityCalibrationPhoto(data: data)
             let result = try await port.captureEnrollmentPhoto(
                 for: memberID,
-                from: imageURL,
+                from: photo,
                 at: Date()
             )
             switch result {
@@ -277,8 +279,9 @@ public final class DebugIdentityCalibrationModel {
 
     /// Imports one transient return-visit image and maps score-only evidence
     /// for the complete temporary gallery. No selected member is required;
-    /// the URL is not retained by this model.
-    public func captureReturnVisitPhoto(from imageURL: URL) async {
+    /// the encoded bytes are wrapped at this boundary and not retained by the
+    /// model.
+    public func captureReturnVisitPhoto(from data: Data) async {
         guard !operationInFlight, canCapturePhoto else { return }
 
         let stateBeforeCapture = state
@@ -291,7 +294,8 @@ public final class DebugIdentityCalibrationModel {
 
         do {
             try Task.checkCancellation()
-            let result = try await port.captureReturnVisitPhoto(from: imageURL)
+            let photo = IdentityCalibrationPhoto(data: data)
+            let result = try await port.captureReturnVisitPhoto(from: photo)
             switch result {
             case .noUsableFace:
                 state = stopRequested ? .stopped : stateBeforeCapture

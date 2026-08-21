@@ -164,25 +164,42 @@ struct DebugIdentityCalibrationModelTests {
         #expect(await port.enrollmentMemberIDs == [member])
     }
 
-    @Test("photo enrollment from stopped forwards the selected ID and URL")
+    @Test("photo enrollment from stopped forwards the selected ID and Data")
     func photoEnrollmentFromStoppedForwardsSelection() async throws {
         let port = RecordingIdentityCalibrationPort()
         let member = try MemberID(rawValue: "temporary-photo")
-        let imageURL = URL(fileURLWithPath: "/tmp/photo-enrollment.png")
+        let data = Data([0xA1, 0x01])
         await port.seedCount(2, for: member)
         let model = DebugIdentityCalibrationModel(port: port)
         model.memberIDInput = member.rawValue
         await model.selectTemporaryMember()
 
-        await model.captureEnrollmentPhoto(from: imageURL)
+        await model.captureEnrollmentPhoto(from: data)
 
         #expect(model.state == .stopped)
         #expect(model.selectedSampleCount == 3)
         #expect(model.statusMessage == nil)
         #expect(await port.photoEnrollmentMemberIDs == [member])
-        #expect(await port.photoEnrollmentURLs == [imageURL])
+        #expect(await port.photoEnrollmentPhotos == [IdentityCalibrationPhoto(data: data)])
         #expect(await port.photoEnrollmentDates.count == 1)
         #expect(await port.sampleCountCalls == [member])
+    }
+
+    @Test("photo enrollment from stopped forwards the selected Data payload")
+    func photoEnrollmentFromStoppedForwardsDataPayload() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        let member = try MemberID(rawValue: "temporary-data-photo")
+        let data = Data([0x01, 0x02])
+        await port.seedCount(2, for: member)
+        let model = DebugIdentityCalibrationModel(port: port)
+        model.memberIDInput = member.rawValue
+        await model.selectTemporaryMember()
+
+        await model.captureEnrollmentPhoto(from: data)
+
+        #expect(model.state == .stopped)
+        #expect(model.selectedSampleCount == 3)
+        #expect(await port.photoEnrollmentPhotos == [IdentityCalibrationPhoto(data: data)])
     }
 
     @Test("photo enrollment no-face preserves count and restores ready")
@@ -196,9 +213,7 @@ struct DebugIdentityCalibrationModelTests {
         model.memberIDInput = member.rawValue
         await model.selectTemporaryMember()
 
-        await model.captureEnrollmentPhoto(
-            from: URL(fileURLWithPath: "/tmp/no-face.heic")
-        )
+        await model.captureEnrollmentPhoto(from: Data([0xA2, 0x02]))
 
         #expect(model.state == .ready)
         #expect(model.selectedSampleCount == 2)
@@ -216,9 +231,7 @@ struct DebugIdentityCalibrationModelTests {
         model.memberIDInput = member.rawValue
         await model.selectTemporaryMember()
 
-        await model.captureEnrollmentPhoto(
-            from: URL(fileURLWithPath: "/tmp/failure.jpg")
-        )
+        await model.captureEnrollmentPhoto(from: Data([0xA3, 0x03]))
 
         #expect(model.state == .ready)
         #expect(model.selectedSampleCount == 2)
@@ -242,9 +255,9 @@ struct DebugIdentityCalibrationModelTests {
             )
         ))))
         let model = DebugIdentityCalibrationModel(port: port)
-        let imageURL = URL(fileURLWithPath: "/tmp/photo-return.jpg")
+        let data = Data([0xB1, 0x01])
 
-        await model.captureReturnVisitPhoto(from: imageURL)
+        await model.captureReturnVisitPhoto(from: data)
 
         #expect(model.state == .stopped)
         #expect(model.selectedMemberID == nil)
@@ -252,7 +265,7 @@ struct DebugIdentityCalibrationModelTests {
         #expect(model.scoreEvidence?.top1?.memberID == memberA.rawValue)
         #expect(model.scoreEvidence?.top2?.memberID == memberB.rawValue)
         #expect(abs((model.scoreEvidence?.margin ?? 0) - 0.15) < 0.000_001)
-        #expect(await port.photoReturnURLs == [imageURL])
+        #expect(await port.photoReturnPhotos == [IdentityCalibrationPhoto(data: data)])
         #expect(await port.returnCallCount == 0)
     }
 
@@ -274,9 +287,9 @@ struct DebugIdentityCalibrationModelTests {
         #expect(model.scoreEvidence != nil)
 
         await port.setPhotoReturnSuspended(true)
-        let imageURL = URL(fileURLWithPath: "/tmp/photo-return.png")
+        let data = Data([0xB2, 0x02])
         let capture = Task { @MainActor in
-            await model.captureReturnVisitPhoto(from: imageURL)
+            await model.captureReturnVisitPhoto(from: data)
         }
         await port.waitForPhotoReturnStart()
 
@@ -304,7 +317,7 @@ struct DebugIdentityCalibrationModelTests {
 
         let capture = Task { @MainActor in
             await model.captureEnrollmentPhoto(
-                from: URL(fileURLWithPath: "/tmp/stop-race-enrollment.jpg")
+                from: Data([0xA4, 0x04])
             )
         }
         await port.waitForPhotoEnrollmentStart()
@@ -338,7 +351,7 @@ struct DebugIdentityCalibrationModelTests {
 
         let capture = Task { @MainActor in
             await model.captureReturnVisitPhoto(
-                from: URL(fileURLWithPath: "/tmp/stop-race-return.jpg")
+                from: Data([0xB3, 0x03])
             )
         }
         await port.waitForPhotoReturnStart()
@@ -364,12 +377,10 @@ struct DebugIdentityCalibrationModelTests {
         let port = RecordingIdentityCalibrationPort()
         let model = DebugIdentityCalibrationModel(port: port)
 
-        await model.captureEnrollmentPhoto(
-            from: URL(fileURLWithPath: "/tmp/no-member.png")
-        )
+        await model.captureEnrollmentPhoto(from: Data([0xA5, 0x05]))
 
         #expect(model.state == .stopped)
-        #expect(await port.photoEnrollmentURLs.isEmpty)
+        #expect(await port.photoEnrollmentPhotos.isEmpty)
     }
 
     @Test("photo and camera captures share the one-operation guard")
@@ -384,7 +395,7 @@ struct DebugIdentityCalibrationModelTests {
 
         let photo = Task { @MainActor in
             await model.captureEnrollmentPhoto(
-                from: URL(fileURLWithPath: "/tmp/in-flight.jpg")
+                from: Data([0xA6, 0x06])
             )
         }
         await port.waitForPhotoEnrollmentStart()
@@ -409,9 +420,7 @@ struct DebugIdentityCalibrationModelTests {
         model.memberIDInput = member.rawValue
         await model.selectTemporaryMember()
 
-        await model.captureEnrollmentPhoto(
-            from: URL(fileURLWithPath: "/tmp/cancel.jpg")
-        )
+        await model.captureEnrollmentPhoto(from: Data([0xA7, 0x07]))
 
         #expect(model.state == .stopped)
         #expect(model.statusMessage == nil)
@@ -429,9 +438,7 @@ struct DebugIdentityCalibrationModelTests {
         model.memberIDInput = member.rawValue
         await model.selectTemporaryMember()
 
-        await model.captureEnrollmentPhoto(
-            from: URL(fileURLWithPath: "/tmp/stopped-failure.jpg")
-        )
+        await model.captureEnrollmentPhoto(from: Data([0xA8, 0x08]))
 
         #expect(model.state == .stopped)
         #expect(model.statusMessage == DebugIdentityCalibrationModel.genericFailureMessage)
@@ -686,8 +693,10 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
     private(set) var enrollmentMemberIDs: [MemberID] = []
     private(set) var photoEnrollmentMemberIDs: [MemberID] = []
     private(set) var photoEnrollmentURLs: [URL] = []
+    private(set) var photoEnrollmentPhotos: [IdentityCalibrationPhoto] = []
     private(set) var photoEnrollmentDates: [Date] = []
     private(set) var photoReturnURLs: [URL] = []
+    private(set) var photoReturnPhotos: [IdentityCalibrationPhoto] = []
     private(set) var resetMemberIDs: [MemberID] = []
     private(set) var returnCallCount = 0
 
@@ -779,6 +788,36 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
         return result
     }
 
+    func captureEnrollmentPhoto(
+        for temporaryMemberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult {
+        _ = createdAt
+        photoEnrollmentMemberIDs.append(temporaryMemberID)
+        photoEnrollmentPhotos.append(photo)
+        photoEnrollmentDates.append(createdAt)
+        if photoEnrollmentSuspended {
+            photoEnrollmentStarted.continuation.yield(())
+            return try await withTaskCancellationHandler(operation: {
+                try await withCheckedThrowingContinuation { continuation in
+                    pendingPhotoEnrollment = continuation
+                    if Task.isCancelled {
+                        pendingPhotoEnrollment = nil
+                        continuation.resume(throwing: CancellationError())
+                    }
+                }
+            }, onCancel: {
+                Task { await self.cancelPendingPhotoEnrollment() }
+            })
+        }
+        let result = try photoEnrollmentResult.get()
+        if case .stored = result {
+            countsByMember[temporaryMemberID, default: 0] += 1
+        }
+        return result
+    }
+
     func captureReturnVisit() async throws -> IdentityCalibrationReturnResult {
         returnCallCount += 1
         return try returnResult.get()
@@ -788,6 +827,27 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
         from imageURL: URL
     ) async throws -> IdentityCalibrationReturnResult {
         photoReturnURLs.append(imageURL)
+        if photoReturnSuspended {
+            photoReturnStarted.continuation.yield(())
+            return try await withTaskCancellationHandler(operation: {
+                try await withCheckedThrowingContinuation { continuation in
+                    pendingPhotoReturn = continuation
+                    if Task.isCancelled {
+                        pendingPhotoReturn = nil
+                        continuation.resume(throwing: CancellationError())
+                    }
+                }
+            }, onCancel: {
+                Task { await self.cancelPendingPhotoReturn() }
+            })
+        }
+        return try photoReturnResult.get()
+    }
+
+    func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult {
+        photoReturnPhotos.append(photo)
         if photoReturnSuspended {
             photoReturnStarted.continuation.yield(())
             return try await withTaskCancellationHandler(operation: {

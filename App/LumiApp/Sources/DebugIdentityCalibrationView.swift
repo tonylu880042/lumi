@@ -1,8 +1,8 @@
 #if DEBUG
 
 import SwiftUI
+import PhotosUI
 import LumiPresentation
-import UniformTypeIdentifiers
 
 /// DEBUG-only surface for manually collecting temporary calibration samples.
 ///
@@ -37,23 +37,18 @@ struct DebugIdentityCalibrationView: View {
         noThresholdCopy: "僅供校準觀察",
         enrollmentPhotoLabel: "匯入 enrollment 照片",
         returnPhotoLabel: "匯入回訪照片",
-        photoTestCopy: "DEBUG 檔案測試，不代表 iPad 相機品質",
-        photoFilesGuidance: "請先把照片放到 Simulator 可存取的「檔案/iCloud Drive」",
+        photoTestCopy: "DEBUG 相簿照片測試，僅處理你選取的一張照片，不代表 iPad 相機品質",
+        photoFilesGuidance: "請從相簿選取一張照片；照片只在本次校準操作中使用",
         enrollmentPhotoAccessibilityIdentifier: "debug-identity-calibration-enrollment-photo",
         returnPhotoAccessibilityIdentifier: "debug-identity-calibration-return-photo"
     )
-
-    static let allowedPhotoContentTypes: [UTType] = [.jpeg, .png, .heic]
-
-    static let allowedPhotoTypeIdentifiers: [String] =
-        allowedPhotoContentTypes.map(\.identifier)
 
     private static let photoPickerFailureMessage = "照片匯入失敗，請再試一次"
 
     @Bindable private var model: DebugIdentityCalibrationModel
     @State private var isResetDialogPresented = false
-    @State private var isEnrollmentPhotoImporterPresented = false
-    @State private var isReturnPhotoImporterPresented = false
+    @State private var selectedEnrollmentPhotoItem: PhotosPickerItem?
+    @State private var selectedReturnPhotoItem: PhotosPickerItem?
     @State private var photoPickerFailureMessage: String?
 
     init(model: DebugIdentityCalibrationModel) {
@@ -172,23 +167,41 @@ struct DebugIdentityCalibrationView: View {
                     }
                     .disabled(!canCaptureReturn)
 
-                    Button(Self.viewIntent.enrollmentPhotoLabel) {
-                        photoPickerFailureMessage = nil
-                        isEnrollmentPhotoImporterPresented = true
+                    PhotosPicker(
+                        selection: $selectedEnrollmentPhotoItem,
+                        matching: .images,
+                        preferredItemEncoding: .current
+                    ) {
+                        Text(Self.viewIntent.enrollmentPhotoLabel)
                     }
                     .disabled(!canImportEnrollmentPhoto)
                     .accessibilityIdentifier(
                         Self.viewIntent.enrollmentPhotoAccessibilityIdentifier
                     )
-
-                    Button(Self.viewIntent.returnPhotoLabel) {
+                    .onChange(of: selectedEnrollmentPhotoItem) { _, item in
+                        guard let item else { return }
+                        selectedEnrollmentPhotoItem = nil
                         photoPickerFailureMessage = nil
-                        isReturnPhotoImporterPresented = true
+                        Task { await handleEnrollmentPhotoSelection(item) }
+                    }
+
+                    PhotosPicker(
+                        selection: $selectedReturnPhotoItem,
+                        matching: .images,
+                        preferredItemEncoding: .current
+                    ) {
+                        Text(Self.viewIntent.returnPhotoLabel)
                     }
                     .disabled(!canImportReturnPhoto)
                     .accessibilityIdentifier(
                         Self.viewIntent.returnPhotoAccessibilityIdentifier
                     )
+                    .onChange(of: selectedReturnPhotoItem) { _, item in
+                        guard let item else { return }
+                        selectedReturnPhotoItem = nil
+                        photoPickerFailureMessage = nil
+                        Task { await handleReturnPhotoSelection(item) }
+                    }
 
                     Button("重設選取 ID", role: .destructive) {
                         model.requestReset()
@@ -242,44 +255,40 @@ struct DebugIdentityCalibrationView: View {
         } message: {
             Text("只會刪除目前選取的臨時 ID 樣本。")
         }
-        .fileImporter(
-            isPresented: $isEnrollmentPhotoImporterPresented,
-            allowedContentTypes: Self.allowedPhotoContentTypes,
-            onCompletion: handleEnrollmentPhotoImport
-        )
-        .fileImporter(
-            isPresented: $isReturnPhotoImporterPresented,
-            allowedContentTypes: Self.allowedPhotoContentTypes,
-            onCompletion: handleReturnPhotoImport
-        )
         .onDisappear {
             Task { await model.stopCamera() }
         }
     }
 
-    private func handleEnrollmentPhotoImport(
-        _ result: Result<URL, Error>
-    ) {
-        switch result {
-        case let .success(imageURL):
-            photoPickerFailureMessage = nil
-            Task { await model.captureEnrollmentPhoto(from: imageURL) }
-        case .failure:
+    private func handleEnrollmentPhotoSelection(
+        _ item: PhotosPickerItem
+    ) async {
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                throw PhotoSelectionError.missingData
+            }
+            await model.captureEnrollmentPhoto(from: data)
+        } catch {
             photoPickerFailureMessage = Self.photoPickerFailureMessage
         }
     }
 
-    private func handleReturnPhotoImport(
-        _ result: Result<URL, Error>
-    ) {
-        switch result {
-        case let .success(imageURL):
-            photoPickerFailureMessage = nil
-            Task { await model.captureReturnVisitPhoto(from: imageURL) }
-        case .failure:
+    private func handleReturnPhotoSelection(
+        _ item: PhotosPickerItem
+    ) async {
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                throw PhotoSelectionError.missingData
+            }
+            await model.captureReturnVisitPhoto(from: data)
+        } catch {
             photoPickerFailureMessage = Self.photoPickerFailureMessage
         }
     }
+}
+
+private enum PhotoSelectionError: Error {
+    case missingData
 }
 
 #endif

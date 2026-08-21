@@ -61,11 +61,31 @@ actor AppIdentityCalibrationPortProxy: IdentityCalibrationPort {
         )
     }
 
+    func captureEnrollmentPhoto(
+        for temporaryMemberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult {
+        let port = try await loadPort()
+        return try await port.captureEnrollmentPhoto(
+            for: temporaryMemberID,
+            from: photo,
+            at: createdAt
+        )
+    }
+
     func captureReturnVisitPhoto(
         from imageURL: URL
     ) async throws -> IdentityCalibrationReturnResult {
         let port = try await loadPort()
         return try await port.captureReturnVisitPhoto(from: imageURL)
+    }
+
+    func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult {
+        let port = try await loadPort()
+        return try await port.captureReturnVisitPhoto(from: photo)
     }
 
     func sampleCount(for temporaryMemberID: MemberID) async throws -> Int {

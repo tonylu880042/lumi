@@ -31,6 +31,17 @@ struct SystemIdentityCalibrationSecurityScope:
 /// Infrastructure; only the owned, framework-free `CameraFrame` escapes.
 protocol IdentityCalibrationPhotoFrameSource: Sendable {
     func frame(from imageURL: URL) async throws -> CameraFrame
+
+    func frame(from photo: IdentityCalibrationPhoto) async throws -> CameraFrame
+}
+
+extension IdentityCalibrationPhotoFrameSource {
+    /// Existing URL-only sources remain source-compatible while the Data
+    /// picker path is adopted incrementally. New input fails closed.
+    func frame(from photo: IdentityCalibrationPhoto) async throws -> CameraFrame {
+        _ = photo
+        throw IdentityCalibrationError.failed
+    }
 }
 
 /// Decodes one user-selected image into the camera frame contract.
@@ -76,9 +87,37 @@ actor ImageIOIdentityCalibrationPhotoFrameDecoder:
         }
     }
 
+    func frame(from photo: IdentityCalibrationPhoto) async throws -> CameraFrame {
+        do {
+            try Task.checkCancellation()
+            guard let source = CGImageSourceCreateWithData(
+                photo.data as CFData,
+                nil
+            ) else {
+                throw IdentityCalibrationError.failed
+            }
+            let frame = try decode(source: source)
+            try Task.checkCancellation()
+            return frame
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
     private func decode(imageURL: URL) throws -> CameraFrame {
-        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
-              let sourceTypeIdentifier = CGImageSourceGetType(source),
+        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
+            throw IdentityCalibrationError.failed
+        }
+        return try decode(source: source)
+    }
+
+    private func decode(source: CGImageSource) throws -> CameraFrame {
+        guard let sourceTypeIdentifier = CGImageSourceGetType(source),
               let sourceType = UTType(sourceTypeIdentifier as String),
               Self.allowedTypes.contains(where: {
                   sourceType == $0 || sourceType.conforms(to: $0)

@@ -707,8 +707,8 @@ A person approaching left/center/right causes Lumi to orient approximately towar
 
 ## 9. Milestone 3 — Member Identity Recognition
 
-**Status: In progress — 42A DEBUG physical calibration and Simulator
-photo-import fallback implemented; physical-iPad validation pending**
+**Status: In progress — 42A DEBUG physical calibration and photo-library
+import fallback implemented; physical-iPad validation pending**
 
 > **Apple Vision / Core ML member recognition begins here.**
 
@@ -722,16 +722,18 @@ cosine gallery, and a dedicated SQLite calibration database. It exposes raw
 top-1/top-2 scores and margin for measurement; it does not make a production
 known/unknown decision or replace `IdentityRecognitionPort`.
 
-The 42A checkpoint adds a DEBUG-only Simulator fallback: a single transient
-JPEG/PNG/HEIC URL from SwiftUI `fileImporter` enters the same Vision → YuNet →
-SFace → SQLite gate without requesting camera permission or starting the
-camera. Infrastructure validates the source UTI and one image, applies EXIF
-orientation, and emits an owned upright/non-mirrored top-left BGRA8 frame with
-a 64-byte padded stride; ImageIO downsamples to a maximum edge of 2048 as a
-memory bound only. Enrollment stores only the embedding; return import ranks
-the full gallery and never saves photos. URLs, images, and decoded data are
-never persisted or logged, and Release builds omit the tool. Physical-iPad
-quality and production recognition policy remain pending.
+The 42A checkpoint adds a DEBUG-only photo-library fallback: SwiftUI
+`PhotosPicker` selects one image and loads its current representation as
+transient in-memory data. It enters the same Vision → YuNet → SFace → SQLite
+gate without requesting camera or full-library photo permission and without
+starting the camera. Infrastructure accepts only an actual JPEG/PNG/HEIC UTI
+with one image, applies EXIF orientation, and emits an owned
+upright/non-mirrored top-left BGRA8 frame with a 64-byte padded stride; ImageIO
+downsamples to a maximum edge of 2048 as a memory bound only. Enrollment stores
+only the embedding; return import ranks the full gallery and never saves
+photos. Picker items and encoded/decoded image data are never persisted or
+logged, and Release builds omit the tool. Physical-iPad quality and production
+recognition policy remain pending.
 
 ### I0 — Identity Port Validation
 Verify:

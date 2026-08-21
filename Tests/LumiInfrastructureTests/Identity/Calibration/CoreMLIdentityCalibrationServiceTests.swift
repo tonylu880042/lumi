@@ -101,6 +101,33 @@ struct CoreMLIdentityCalibrationServiceTests {
         #expect(await pipeline.callCount == 1)
     }
 
+    @Test("Data photo enrollment forwards encoded payload without starting camera")
+    func dataPhotoEnrollmentUsesPhotoSource() async throws {
+        let cameraSource = RecordingCalibrationFrameSource()
+        let photoSource = RecordingCalibrationPhotoFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: cameraSource,
+            embeddingPipeline: pipeline,
+            store: store,
+            photoFrameSource: photoSource
+        )
+        let memberID = try MemberID(rawValue: "temporary-data-photo")
+        let payload = IdentityCalibrationPhoto(data: Data([0x01, 0x02]))
+
+        #expect(try await service.captureEnrollmentPhoto(
+            for: memberID,
+            from: payload,
+            at: Date(timeIntervalSince1970: 203)
+        ) == .stored)
+        #expect(await cameraSource.startCallCount == 0)
+        #expect(await photoSource.receivedPhotos == [payload])
+        #expect(await store.savedMemberIDs == [memberID])
+    }
+
     @Test("photo enrollment no usable face never writes a sample")
     func photoEnrollmentNoUsableFaceDoesNotSave() async throws {
         let cameraSource = RecordingCalibrationFrameSource()
@@ -666,10 +693,25 @@ struct CoreMLIdentityCalibrationServiceTests {
 
 private actor RecordingCalibrationPhotoFrameSource: IdentityCalibrationPhotoFrameSource {
     private(set) var receivedURLs: [URL] = []
+    private(set) var receivedPhotos: [IdentityCalibrationPhoto] = []
     private var failure: Error?
 
     func frame(from imageURL: URL) async throws -> CameraFrame {
         receivedURLs.append(imageURL)
+        if let failure {
+            throw failure
+        }
+        return try CameraFrame(
+            bytes: Data(repeating: 0, count: 4),
+            width: 1,
+            height: 1,
+            bytesPerRow: 4,
+            orientation: .upright
+        )
+    }
+
+    func frame(from photo: IdentityCalibrationPhoto) async throws -> CameraFrame {
+        receivedPhotos.append(photo)
         if let failure {
             throw failure
         }
@@ -696,6 +738,14 @@ private actor SuspendedCalibrationPhotoFrameSource: IdentityCalibrationPhotoFram
 
     func frame(from imageURL: URL) async throws -> CameraFrame {
         _ = imageURL
+        frameRequested.continuation.yield(())
+        return try await withCheckedThrowingContinuation { continuation in
+            pending = continuation
+        }
+    }
+
+    func frame(from photo: IdentityCalibrationPhoto) async throws -> CameraFrame {
+        _ = photo
         frameRequested.continuation.yield(())
         return try await withCheckedThrowingContinuation { continuation in
             pending = continuation

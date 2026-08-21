@@ -163,6 +163,39 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
         }
     }
 
+    public func captureEnrollmentPhoto(
+        for temporaryMemberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult {
+        do {
+            try Task.checkCancellation()
+            guard createdAt.timeIntervalSinceReferenceDate.isFinite else {
+                throw IdentityCalibrationError.failed
+            }
+
+            guard let embedding = try await captureEmbedding(from: photo) else {
+                try Task.checkCancellation()
+                return .noUsableFace
+            }
+            try Task.checkCancellation()
+
+            try await store.save(
+                memberID: temporaryMemberID,
+                embedding: embedding,
+                createdAt: createdAt
+            )
+            return .stored
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
     public func captureReturnVisit() async throws -> IdentityCalibrationReturnResult {
         do {
             try Task.checkCancellation()
@@ -201,6 +234,40 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
         do {
             try Task.checkCancellation()
             guard let embedding = try await captureEmbedding(from: imageURL) else {
+                try Task.checkCancellation()
+                return .noUsableFace
+            }
+            try Task.checkCancellation()
+
+            let samples = try await store.sFaceSamples()
+            try Task.checkCancellation()
+            let evidence = try matcher.evidence(
+                for: embedding,
+                against: samples
+            )
+            try Task.checkCancellation()
+
+            return .measured(IdentityCalibrationEvidence(
+                gallerySampleCount: samples.count,
+                top1: Self.makeCandidate(from: evidence.bestCandidate),
+                top2: Self.makeCandidate(from: evidence.secondCandidate)
+            ))
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
+    public func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult {
+        do {
+            try Task.checkCancellation()
+            guard let embedding = try await captureEmbedding(from: photo) else {
                 try Task.checkCancellation()
                 return .noUsableFace
             }
@@ -281,6 +348,20 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
         defer { captureInFlight = false }
 
         let frame = try await photoFrameSource.frame(from: imageURL)
+        try Task.checkCancellation()
+        return try await embeddingPipeline.embedding(for: frame)
+    }
+
+    private func captureEmbedding(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> FaceEmbedding? {
+        guard !captureInFlight else {
+            throw IdentityCalibrationError.failed
+        }
+        captureInFlight = true
+        defer { captureInFlight = false }
+
+        let frame = try await photoFrameSource.frame(from: photo)
         try Task.checkCancellation()
         return try await embeddingPipeline.embedding(for: frame)
     }

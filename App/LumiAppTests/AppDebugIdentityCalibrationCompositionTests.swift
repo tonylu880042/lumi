@@ -5,7 +5,6 @@ import LumiApplication
 import LumiDomain
 import LumiPresentation
 import Testing
-import UniformTypeIdentifiers
 @testable import LumiApp
 
 @Suite("DEBUG identity calibration App composition")
@@ -91,6 +90,29 @@ struct AppDebugIdentityCalibrationCompositionTests {
         #expect(await fake.photoReturnURLs == [returnURL])
     }
 
+    @Test("Data photo operations lazily load once and forward exact transient values")
+    func dataPhotoOperationsLoadOnceAndForward() async throws {
+        let recorder = DebugCalibrationLoaderRecorder()
+        let fake = RecordingDebugIdentityCalibrationPort()
+        await recorder.setPort(fake)
+        let proxy = AppIdentityCalibrationPortProxy {
+            try await recorder.load()
+        }
+        let memberID = try MemberID(rawValue: "temporary-data-photo")
+        let payload = IdentityCalibrationPhoto(data: Data([0x01, 0x02]))
+
+        #expect(try await proxy.captureEnrollmentPhoto(
+            for: memberID,
+            from: payload,
+            at: Date(timeIntervalSince1970: 125)
+        ) == .stored)
+        #expect(try await proxy.captureReturnVisitPhoto(from: payload) == .noUsableFace)
+
+        #expect(await recorder.loadCallCount == 1)
+        #expect(await fake.photoEnrollmentPhotos == [payload])
+        #expect(await fake.photoReturnPhotos == [payload])
+    }
+
     @Test("photo loader failure is redacted by the Presentation model")
     @MainActor
     func photoLoaderFailureIsRedactedByModel() async throws {
@@ -98,9 +120,7 @@ struct AppDebugIdentityCalibrationCompositionTests {
             throw DebugCalibrationMarkerError.marker
         }
 
-        await model.captureReturnVisitPhoto(
-            from: URL(fileURLWithPath: "/tmp/loader-failure.jpg")
-        )
+        await model.captureReturnVisitPhoto(from: Data([0xF1, 0x01]))
 
         #expect(model.state == .stopped)
         #expect(model.statusMessage == DebugIdentityCalibrationModel.genericFailureMessage)
@@ -282,15 +302,33 @@ struct AppDebugIdentityCalibrationCompositionTests {
         #expect(DebugIdentityCalibrationView.viewIntent.noThresholdCopy == "僅供校準觀察")
         #expect(DebugIdentityCalibrationView.viewIntent.enrollmentPhotoLabel == "匯入 enrollment 照片")
         #expect(DebugIdentityCalibrationView.viewIntent.returnPhotoLabel == "匯入回訪照片")
-        #expect(DebugIdentityCalibrationView.viewIntent.photoTestCopy == "DEBUG 檔案測試，不代表 iPad 相機品質")
-        #expect(DebugIdentityCalibrationView.viewIntent.photoFilesGuidance == "請先把照片放到 Simulator 可存取的「檔案/iCloud Drive」")
+        #expect(DebugIdentityCalibrationView.viewIntent.photoTestCopy == "DEBUG 相簿照片測試，僅處理你選取的一張照片，不代表 iPad 相機品質")
+        #expect(DebugIdentityCalibrationView.viewIntent.photoFilesGuidance == "請從相簿選取一張照片；照片只在本次校準操作中使用")
         #expect(DebugIdentityCalibrationView.viewIntent.enrollmentPhotoAccessibilityIdentifier == "debug-identity-calibration-enrollment-photo")
         #expect(DebugIdentityCalibrationView.viewIntent.returnPhotoAccessibilityIdentifier == "debug-identity-calibration-return-photo")
-        #expect(DebugIdentityCalibrationView.allowedPhotoTypeIdentifiers == [
-            UTType.jpeg.identifier,
-            UTType.png.identifier,
-            UTType.heic.identifier
-        ])
+    }
+
+    @Test("debug calibration view uses the PhotosPicker Data contract")
+    func debugCalibrationViewUsesPhotosPickerDataContract() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("LumiApp/Sources/DebugIdentityCalibrationView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("import PhotosUI"))
+        #expect(source.contains("PhotosPicker("))
+        #expect(source.contains("matching: .images"))
+        #expect(source.contains("preferredItemEncoding: .current"))
+        #expect(source.contains("loadTransferable(type: Data.self)"))
+        #expect(source.contains("captureEnrollmentPhoto"))
+        #expect(source.contains("captureReturnVisitPhoto"))
+        #expect(source.contains("from: data"))
+        #expect(source.contains("fileImporter") == false)
+        #expect(source.contains("import LumiApplication") == false)
+        #expect(source.contains("IdentityCalibrationPhoto") == false)
+        #expect(DebugIdentityCalibrationView.viewIntent.photoTestCopy.contains("相簿"))
+        #expect(DebugIdentityCalibrationView.viewIntent.photoFilesGuidance.contains("選取"))
     }
 }
 
@@ -315,8 +353,10 @@ private actor RecordingDebugIdentityCalibrationPort: IdentityCalibrationPort {
     private(set) var sampleCountCalls: [MemberID] = []
     private(set) var photoEnrollmentMemberIDs: [MemberID] = []
     private(set) var photoEnrollmentURLs: [URL] = []
+    private(set) var photoEnrollmentPhotos: [IdentityCalibrationPhoto] = []
     private(set) var photoEnrollmentDates: [Date] = []
     private(set) var photoReturnURLs: [URL] = []
+    private(set) var photoReturnPhotos: [IdentityCalibrationPhoto] = []
     private(set) var resetMemberIDs: [MemberID] = []
     private(set) var returnCallCount = 0
 
@@ -357,10 +397,28 @@ private actor RecordingDebugIdentityCalibrationPort: IdentityCalibrationPort {
         return .stored
     }
 
+    func captureEnrollmentPhoto(
+        for temporaryMemberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult {
+        photoEnrollmentMemberIDs.append(temporaryMemberID)
+        photoEnrollmentPhotos.append(photo)
+        photoEnrollmentDates.append(createdAt)
+        return .stored
+    }
+
     func captureReturnVisitPhoto(
         from imageURL: URL
     ) async throws -> IdentityCalibrationReturnResult {
         photoReturnURLs.append(imageURL)
+        return .noUsableFace
+    }
+
+    func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult {
+        photoReturnPhotos.append(photo)
         return .noUsableFace
     }
 

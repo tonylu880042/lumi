@@ -28,6 +28,19 @@ public enum IdentityCalibrationError:
     }
 }
 
+/// One transient photo selected by the DEBUG App photo picker.
+///
+/// The encoded bytes remain in memory for one operation only. Application and
+/// Infrastructure must not retain, persist, log, or expose this value after
+/// the capture call returns.
+public struct IdentityCalibrationPhoto: Equatable, Sendable {
+    public let data: Data
+
+    public init(data: Data) {
+        self.data = data
+    }
+}
+
 /// The result of one manually requested enrollment capture.
 public enum IdentityCalibrationCaptureResult: Equatable, Sendable {
     case noUsableFace
@@ -104,6 +117,14 @@ public protocol IdentityCalibrationPort: Sendable {
         at createdAt: Date
     ) async throws -> IdentityCalibrationCaptureResult
 
+    /// Imports one transient in-memory user-selected image. Implementations
+    /// must not retain or persist the encoded bytes.
+    func captureEnrollmentPhoto(
+        for temporaryMemberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult
+
     func captureReturnVisit() async throws -> IdentityCalibrationReturnResult
 
     /// Imports one transient user-selected return-visit image. No sample is
@@ -112,11 +133,41 @@ public protocol IdentityCalibrationPort: Sendable {
         from imageURL: URL
     ) async throws -> IdentityCalibrationReturnResult
 
+    /// Imports one transient in-memory return-visit image. No sample is
+    /// written; implementations must not retain or persist the bytes.
+    func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult
+
     func sampleCount(for temporaryMemberID: MemberID) async throws -> Int
 
     /// Deletes only the explicitly selected temporary member's calibration
     /// samples. The App must gate this behind an explicit confirmation.
     func reset(for temporaryMemberID: MemberID) async throws
+}
+
+public extension IdentityCalibrationPort {
+    /// Compatibility default for existing DEBUG-only port implementations.
+    /// New photo paths fail closed until the implementation opts in.
+    func captureEnrollmentPhoto(
+        for temporaryMemberID: MemberID,
+        from photo: IdentityCalibrationPhoto,
+        at createdAt: Date
+    ) async throws -> IdentityCalibrationCaptureResult {
+        _ = temporaryMemberID
+        _ = photo
+        _ = createdAt
+        throw IdentityCalibrationError.failed
+    }
+
+    /// Compatibility default for existing DEBUG-only port implementations.
+    /// New photo paths fail closed until the implementation opts in.
+    func captureReturnVisitPhoto(
+        from photo: IdentityCalibrationPhoto
+    ) async throws -> IdentityCalibrationReturnResult {
+        _ = photo
+        throw IdentityCalibrationError.failed
+    }
 }
 
 #endif

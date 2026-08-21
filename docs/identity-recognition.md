@@ -725,16 +725,24 @@ Release and Release-Live binaries contain neither `DEBUG 身份校準` nor
 workspace was removed. These are simulator and automation gates only; no
 physical iPad run is claimed.
 
-### DEBUG Simulator photo-import fallback (42A, 2026-08-17)
+### DEBUG photo-library import fallback (42A, 2026-08-17; Photos update 2026-08-21)
 
 The product owner approved 42A on 2026-08-17 as a DEBUG-only fallback for
-calibration before a physical iPad is available. Each import uses the SwiftUI
-[`fileImporter`](https://developer.apple.com/documentation/SwiftUI/View/fileImporter%28isPresented%3AallowedContentTypes%3AonCompletion%3A%29)
-single-URL overload and accepts exactly JPEG, PNG, or HEIC. The selected URL is
-transient: it crosses UI → Presentation → Application and is opened only inside
-Infrastructure. Infrastructure requires a security-scoped start and balances
-exactly one stop on every successful-scope exit; a failed scope start fails
-closed. ImageIO validates the source UTI and exactly one image, applies the
+calibration before a physical iPad is available. On 2026-08-21 the picker was
+changed from Files to SwiftUI
+[`PhotosPicker`](https://developer.apple.com/documentation/photosui/photospicker)
+so a tester can choose one image directly from Photos. The picker filters for
+images and uses the current representation; Infrastructure still accepts only
+JPEG, PNG, or HEIC after inspecting the actual source UTI. A selected
+[`PhotosPickerItem`](https://developer.apple.com/documentation/photosui/photospickeritem)
+is loaded once as transient `Data`. UI passes those bytes to Presentation;
+Presentation wraps them in the Application photo value; Infrastructure opens
+them with
+[`CGImageSourceCreateWithData`](https://developer.apple.com/documentation/imageio/cgimagesourcecreatewithdata%28_%3A_%3A%29).
+The picker grants access only to the selected item and this route does not ask
+for full-library photo authorization. The existing security-scoped URL decoder
+remains as a compatibility seam, but the DEBUG UI no longer presents Files.
+ImageIO validates the source UTI and exactly one image, applies the
 EXIF orientation via
 [`CGImagePropertyOrientation`](https://developer.apple.com/documentation/imageio/cgimagepropertyorientation),
 and creates an owned upright, non-mirrored, top-left BGRA8 `CameraFrame` with a
@@ -749,17 +757,16 @@ Photo enrollment and live-camera enrollment share the same one-operation gate
 and the same Vision → YuNet → SFace → SQLite graph. Enrollment persists only
 the embedding; return-photo import ranks the full temporary gallery and never
 saves. The flow never requests camera permission or starts the camera, and it
-does not persist or log a photo, URL, decoded data, or preview. Picker
+does not persist or log a photo, picker item, encoded/decoded data, or preview. Picker
 cancellation is a no-op; other failures are fixed/redacted and
 `CancellationError` is preserved. The entire tool is excluded from Release
 builds. It makes no physical-quality, `known`/`unknown`, threshold, or formal
 enrollment claim.
 
-#### Simulator photo-import runbook
+#### Photo-library calibration runbook
 
-1. On the Mac, use Finder **Share → Simulator** for one JPEG/PNG/HEIC, then
-   save it in the Simulator's Files app; alternatively place it in an iCloud
-   Drive location visible to the Simulator.
+1. Make the JPEG/PNG/HEIC test images available in the iPhone, iPad, or
+   Simulator Photos library.
 2. Open `DEBUG 身份校準`, enter and load a temporary member ID, then use
    `匯入 enrollment 照片` for 3–5 varied frontal/slight-angle photos.
 3. Use `匯入回訪照片` with a separate photo and record gallery count, raw
@@ -767,29 +774,26 @@ enrollment claim.
    ID only by explicitly selecting it; reset only the selected ID after
    confirmation.
 
-Apple documents the Finder-to-Simulator workflow in
-[`Sharing data with Simulator`](https://developer.apple.com/documentation/xcode/sharing-data-with-simulator).
-An Apple Developer Forums report notes that iOS 26 Simulator file sharing can
-open a shared file in Safari instead of Files
-([reported issue](https://developer.apple.com/forums/thread/787297)); this
-fallback therefore also supports iCloud Drive. It does not use the Mac camera
-and does not claim iPad camera quality. The source URL remains transient and
-the feature never stores a photo.
+The picker is the system Photos UI; cancelling it does nothing. It does not use
+the Mac camera and does not claim iPad camera quality. The picker item and
+encoded bytes remain transient, and the feature never stores a photo.
 
-Implementation/TDD evidence: the decoder passed 10/10, the Application port
-3/3, and the Infrastructure service 22/22. Presentation passed 26/26 in each
-of three consecutive runs. App composition passed 11/11 in both Debug and
-Debug-Live focused runs; full App Debug and Debug-Live targets passed 55/55
-each. Unsigned generic Simulator Debug, Release, Debug-Live, and Release-Live
-builds all exited 0, and Release binaries contain none of the DEBUG import
-labels. The exact full `swift test` gate was attempted: XCTest snapshots
-passed 4/4 and visible Swift Testing cases showed no failures, but the
-existing `swift-test`/`swiftpm-testing-helper` lifecycle hung after visible
-completion; the bounded run was interrupted with exit 130, so no clean
-full-suite pass or count is claimed. Scoped diff/whitespace checks were clean
-and the generated workspace
-was removed. These are simulator/connectivity gates only; no physical-device
-quality evidence is claimed.
+Implementation/TDD evidence was refreshed for the 2026-08-21 Photos update.
+Tests-first RED failed on the absent in-memory photo contract; a later boundary
+RED proved that UI still depended on the Application photo type before that
+construction moved into Presentation. GREEN passed Application 4/4, decoder
+11/11, Infrastructure service 23/23, Presentation 27/27, and App composition
+14/14 in both Debug and Debug-Live. The exact full `swift test` gate completed
+cleanly with 655 tests across 53 suites plus 4 XCTest snapshots. Full App Debug
+passed 69/69. The first full Debug-Live run passed 68/69 with one unrelated
+existing authorization-start timing failure; that exact test then passed and
+the immediate full Debug-Live rerun passed 69/69. The required unsigned generic
+Simulator build succeeded. A signed Debug build was installed and launched on
+the connected iPhone 15 Plus `TonyLu`; this proves deployment/connectivity only,
+not manual picker behavior or recognition quality. Scoped diff/whitespace
+checks were clean. Release exclusion evidence from the original 42A checkpoint
+remains applicable because all App picker code is inside the existing DEBUG
+boundary.
 
 ### Important Rule
 

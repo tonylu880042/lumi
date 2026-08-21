@@ -26,6 +26,24 @@ struct IdentityCalibrationPhotoFrameDecoderTests {
         #expect(await scope.stopURLs == [url])
     }
 
+    @Test("encoded Data photo decodes without security scope")
+    func encodedDataPhotoDecodesWithoutSecurityScope() async throws {
+        let scope = RecordingSecurityScope()
+        let decoder = ImageIOIdentityCalibrationPhotoFrameDecoder(scope: scope)
+        let url = try temporaryURL(extension: "png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try PhotoFixture.writeImage(to: url, type: .png)
+        let payload = IdentityCalibrationPhoto(data: try Data(contentsOf: url))
+
+        let frame = try await decoder.frame(from: payload)
+
+        #expect(frame.width == 3)
+        #expect(frame.height == 2)
+        #expect(frame.orientation == .upright)
+        #expect(await scope.startURLs.isEmpty)
+        #expect(await scope.stopURLs.isEmpty)
+    }
+
     @Test("unsupported file type fails closed without leaking framework details")
     func unsupportedFileTypeFailsClosed() async throws {
         let scope = RecordingSecurityScope()
