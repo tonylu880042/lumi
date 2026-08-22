@@ -131,6 +131,31 @@ struct AppCompositionFactory {
 #endif
 
             let hardware = MockHardwareControlPort()
+#if DEBUG
+            let identity = AppPilotIdentityRecognitionComposition.makePort()
+            let coordinator = AssistantSessionCoordinator(
+                hardware: hardware,
+                identity: identity,
+                voice: voice,
+                memberAddressResolver: { memberID in
+                    AppPilotIdentityRecognitionComposition
+                        .voiceMemberAddress(for: memberID)
+                },
+                voiceToolCallConfiguration: voiceToolCallConfiguration
+            )
+            let simulationModel = SessionSimulationModel(
+                coordinator: coordinator,
+                hardware: hardware,
+                voiceSimulationControls: nil,
+                memberAddressResolver: { memberID in
+                    AppPilotIdentityRecognitionComposition
+                        .voiceMemberAddress(for: memberID)
+                },
+                onAuthorizationRequired: {
+                    setupModel.authorizationInvalidated()
+                }
+            )
+#else
             let identity = MockIdentityRecognitionAdapter()
             let coordinator = AssistantSessionCoordinator(
                 hardware: hardware,
@@ -147,6 +172,7 @@ struct AppCompositionFactory {
                     setupModel.authorizationInvalidated()
                 }
             )
+#endif
             return .live(
                 setupModel: setupModel,
                 simulationModel: simulationModel
@@ -175,6 +201,7 @@ struct LumiAppApp: App {
     var body: some Scene {
         WindowGroup {
             destinationView
+                .modifier(AppDisplayWakeModifier())
         }
     }
 

@@ -268,7 +268,7 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let startup = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await hardware.holdReturnHome()
         let end = Task { try await coordinator.endSession() }
         #expect(await waitUntil { await hardware.hasPendingReturnHome })
@@ -709,7 +709,7 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let knownStart = Task { try await knownCoordinator.startVoiceSession() }
-        #expect(await waitUntil { await knownVoice.waitingForStart })
+        await knownVoice.waitForStartRequest()
         #expect(await knownVoice.startContexts == [.returningMember])
         #expect(await knownVoice.startDirections == [.general])
         await knownVoice.completeStart()
@@ -731,11 +731,72 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let unknownStart = Task { try await unknownCoordinator.startVoiceSession() }
-        #expect(await waitUntil { await unknownVoice.waitingForStart })
+        await unknownVoice.waitForStartRequest()
         #expect(await unknownVoice.startContexts == [.visitor])
         #expect(await unknownVoice.startDirections == [.general])
         await unknownVoice.completeStart()
         #expect(try await unknownStart.value == .speaking)
+    }
+
+    @Test("maps the approved tony identity to a spoken label at the voice boundary")
+    func startsVoiceWithApprovedTonySpokenLabel() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let memberID = try MemberID(rawValue: "tony")
+        let memberAddress = try VoiceMemberAddress(spokenLabel: "tony")
+        let debugResolver: @Sendable (MemberID) -> VoiceMemberAddress? = { candidate in
+            candidate == memberID ? memberAddress : nil
+        }
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            memberAddressResolver: debugResolver
+        )
+        let confidence = try RecognitionConfidence(value: 0.93)
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(memberID: memberID, confidence: confidence)
+        )
+
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+
+        #expect(await voice.startContexts == [.returningMember])
+        #expect(await voice.startMemberAddresses == [memberAddress])
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+    }
+
+    @Test("keeps an unlabelled known member anonymous in the voice context")
+    func startsVoiceWithoutSpokenLabelByDefault() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let memberID = try MemberID(rawValue: "unmapped-member")
+        let confidence = try RecognitionConfidence(value: 0.93)
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(memberID: memberID, confidence: confidence)
+        )
+
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+
+        #expect(await voice.startContexts == [.returningMember])
+        #expect(await voice.startMemberAddresses == [nil])
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
     }
 
     @Test("passes explicit directions for known and unknown visitors without identity payload")
@@ -764,7 +825,7 @@ struct AssistantSessionCoordinatorTests {
                 direction: .preWorkoutReminder
             )
         }
-        #expect(await waitUntil { await knownVoice.waitingForStart })
+        await knownVoice.waitForStartRequest()
         #expect(await knownVoice.startContexts == [.returningMember])
         #expect(await knownVoice.startDirections == [.preWorkoutReminder])
         #expect(
@@ -794,7 +855,7 @@ struct AssistantSessionCoordinatorTests {
                 direction: .postWorkoutReview
             )
         }
-        #expect(await waitUntil { await unknownVoice.waitingForStart })
+        await unknownVoice.waitForStartRequest()
         #expect(await unknownVoice.startContexts == [.visitor])
         #expect(await unknownVoice.startDirections == [.postWorkoutReview])
         await unknownVoice.completeStart()
@@ -821,7 +882,7 @@ struct AssistantSessionCoordinatorTests {
         #expect(await updates.next() == .greeting)
 
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         #expect(await coordinator.state == .greeting)
         await voice.emit(.userSpeechStarted)
         #expect(await coordinator.state == .greeting)
@@ -852,7 +913,7 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.failStart(with: TestVoiceError.startFailed)
         await #expect(throws: TestVoiceError.startFailed) {
             try await start.value
@@ -890,7 +951,7 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let canceled = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         canceled.cancel()
         await #expect(throws: CancellationError.self) {
             try await canceled.value
@@ -900,7 +961,7 @@ struct AssistantSessionCoordinatorTests {
         #expect(await coordinator.voiceRequiresRetry == false)
 
         let retry = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.completeStart()
         #expect(try await retry.value == .speaking)
     }
@@ -923,7 +984,7 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let first = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         do {
             _ = try await coordinator.startVoiceSession()
             Issue.record("Expected duplicate voice startup to throw")
@@ -974,7 +1035,7 @@ struct AssistantSessionCoordinatorTests {
             result: .unknown
         )
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.completeStart()
         #expect(try await start.value == .speaking)
 
@@ -1058,7 +1119,7 @@ struct AssistantSessionCoordinatorTests {
             result: .unknown
         )
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.completeStart()
         #expect(try await start.value == .speaking)
 
@@ -1099,7 +1160,7 @@ struct AssistantSessionCoordinatorTests {
             result: .unknown
         )
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.completeStart()
         #expect(try await start.value == .speaking)
         #expect(await voice.eventUpdatesCallCount == 1)
@@ -1137,7 +1198,7 @@ struct AssistantSessionCoordinatorTests {
         )
 
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         #expect(await toolPort.toolCallUpdatesCallCount == 1)
 
         await voice.completeStart()
@@ -1187,7 +1248,7 @@ struct AssistantSessionCoordinatorTests {
         let start = Task {
             try await coordinator.startVoiceSession(direction: .postWorkoutReview)
         }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         #expect(await toolPort.toolCallUpdatesCallCount == 0)
         await voice.completeStart()
         #expect(try await start.value == .speaking)
@@ -1223,7 +1284,7 @@ struct AssistantSessionCoordinatorTests {
             )
         )
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.completeStart()
         #expect(try await start.value == .speaking)
 
@@ -1266,7 +1327,7 @@ struct AssistantSessionCoordinatorTests {
             )
         )
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         await voice.completeStart()
         #expect(try await start.value == .speaking)
         await toolPort.emit(
@@ -1317,7 +1378,7 @@ struct AssistantSessionCoordinatorTests {
             )
         )
         let start = Task { try await coordinator.startVoiceSession() }
-        #expect(await waitUntil { await voice.waitingForStart })
+        await voice.waitForStartRequest()
         #expect(await toolPort.toolCallUpdatesCallCount == 1)
         await voice.failStart(with: TestVoiceError.startFailed)
         await #expect(throws: TestVoiceError.startFailed) {
@@ -1376,7 +1437,7 @@ private func enterSpeaking(
         result: result
     )
     let startup = Task { try await coordinator.startVoiceSession() }
-    #expect(await waitUntil { await voice.waitingForStart })
+    await voice.waitForStartRequest()
     await voice.completeStart()
     #expect(try await startup.value == .speaking)
 }
@@ -1581,6 +1642,7 @@ private enum TestVoiceError: Error, Equatable, Sendable {
 private actor TestVoice: VoiceSessionPort {
     private(set) var startContexts: [VoiceContext] = []
     private(set) var startDirections: [VoiceConversationDirection] = []
+    private(set) var startMemberAddresses: [VoiceMemberAddress?] = []
     private(set) var startCallCount = 0
     private(set) var eventUpdatesCallCount = 0
     private(set) var stopCallCount = 0
@@ -1594,16 +1656,13 @@ private actor TestVoice: VoiceSessionPort {
     private var nextStartID: UInt64 = 0
     private var nextSubscriberID: UInt64 = 0
     private var pendingStart: PendingStart?
+    private var startRequestWaiters: [CheckedContinuation<Void, Never>] = []
     private var subscribers: [UInt64: AsyncStream<VoiceSessionEvent>.Continuation] = [:]
     private var retiredSubscribers: [AsyncStream<VoiceSessionEvent>.Continuation] = []
     private var active = false
 
     init(log: TestCallLog? = nil) {
         self.log = log
-    }
-
-    var waitingForStart: Bool {
-        pendingStart != nil
     }
 
     func start(context: VoiceContext) async throws {
@@ -1629,10 +1688,24 @@ private actor TestVoice: VoiceSessionPort {
                 }
 
                 pendingStart = PendingStart(id: requestID, continuation: continuation)
+                let waiters = startRequestWaiters
+                startRequestWaiters.removeAll()
+                for waiter in waiters {
+                    waiter.resume()
+                }
             }
         }, onCancel: {
             Task { await self.cancelPendingStart(id: requestID) }
         })
+    }
+
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection,
+        memberAddress: VoiceMemberAddress?
+    ) async throws {
+        startMemberAddresses.append(memberAddress)
+        try await start(context: context, direction: direction)
     }
 
     func eventUpdates() async -> AsyncStream<VoiceSessionEvent> {
@@ -1669,6 +1742,17 @@ private actor TestVoice: VoiceSessionPort {
         self.pendingStart = nil
         active = true
         pendingStart.continuation.resume()
+    }
+
+    func waitForStartRequest() async {
+        if pendingStart != nil { return }
+        await withCheckedContinuation { continuation in
+            if pendingStart != nil {
+                continuation.resume()
+            } else {
+                startRequestWaiters.append(continuation)
+            }
+        }
     }
 
     func failStart(with error: any Error) {

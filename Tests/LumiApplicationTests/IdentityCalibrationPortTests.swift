@@ -90,6 +90,33 @@ struct IdentityCalibrationPortTests {
         _ = try await port.captureReturnVisitPhoto(from: payload)
     }
 
+    @Test("preview value preserves owned BGRA bytes and frame metadata")
+    func previewValuePreservesBGRABytesAndMetadata() throws {
+        let preview = IdentityCalibrationPreviewFrame(
+            bgraBytes: Data([0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0xFF]),
+            width: 2,
+            height: 1,
+            bytesPerRow: 8
+        )
+
+        #expect(preview.bgraBytes == Data([
+            0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0xFF
+        ]))
+        #expect(preview.width == 2)
+        #expect(preview.height == 1)
+        #expect(preview.bytesPerRow == 8)
+        acceptsSendable(preview)
+    }
+
+    @Test("compatibility preview stream is finished before camera start")
+    func compatibilityPreviewStreamFinishesBeforeStart() async throws {
+        let port: any IdentityCalibrationPort = RecordingCalibrationPort()
+
+        var iterator = (await port.previewFrames()).makeAsyncIterator()
+
+        #expect(await iterator.next() == nil)
+    }
+
     private func acceptsSendable<T: Sendable>(_ value: T) {
         _ = value
     }

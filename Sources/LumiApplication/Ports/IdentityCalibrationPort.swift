@@ -41,6 +41,31 @@ public struct IdentityCalibrationPhoto: Equatable, Sendable {
     }
 }
 
+/// One transient camera preview frame owned in memory by the DEBUG tool.
+///
+/// The bytes are BGRA8 with an upright, non-mirrored capture orientation. The
+/// value is an immutable transport-only snapshot with value semantics; callers
+/// must not persist, log, encode, or retain it beyond the active preview
+/// operation.
+public struct IdentityCalibrationPreviewFrame: Equatable, Sendable {
+    public let bgraBytes: Data
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+
+    public init(
+        bgraBytes: Data,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int
+    ) {
+        self.bgraBytes = bgraBytes
+        self.width = width
+        self.height = height
+        self.bytesPerRow = bytesPerRow
+    }
+}
+
 /// The result of one manually requested enrollment capture.
 public enum IdentityCalibrationCaptureResult: Equatable, Sendable {
     case noUsableFace
@@ -104,6 +129,11 @@ public protocol IdentityCalibrationPort: Sendable {
     func startCamera() async throws
     func stopCamera() async
 
+    /// Returns the current camera generation's transient preview frames.
+    /// Implementations must use a bounded newest-one stream and must return a
+    /// finished stream before start or after stop.
+    func previewFrames() async -> AsyncStream<IdentityCalibrationPreviewFrame>
+
     func captureEnrollmentSample(
         for temporaryMemberID: MemberID,
         at createdAt: Date
@@ -147,6 +177,14 @@ public protocol IdentityCalibrationPort: Sendable {
 }
 
 public extension IdentityCalibrationPort {
+    /// Compatibility default for existing DEBUG-only port implementations.
+    /// The finished stream is created immediately and never loads the camera.
+    func previewFrames() async -> AsyncStream<IdentityCalibrationPreviewFrame> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+
     /// Compatibility default for existing DEBUG-only port implementations.
     /// New photo paths fail closed until the implementation opts in.
     func captureEnrollmentPhoto(

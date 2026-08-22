@@ -35,6 +35,18 @@ struct MockHardwareControlPortTests {
         #expect(await outcome.didFail == false)
     }
 
+    @Test("an arrival signal issued before adapter registration completes the next rotation")
+    func earlyArrivalSignalIsStickyForTheNextRotation() async throws {
+        let hardware = MockHardwareControlPort()
+        let target = try RotationAngle(degrees: 12)
+
+        await hardware.completeCurrentOrNextRotation()
+        try await hardware.rotate(to: target)
+
+        #expect(await hardware.rotationTargets == [target])
+        #expect(await hardware.hasPendingRotation == false)
+    }
+
     @Test("rejects a second rotation without replacing the first continuation")
     func concurrentRotationIsRejected() async throws {
         let hardware = MockHardwareControlPort()

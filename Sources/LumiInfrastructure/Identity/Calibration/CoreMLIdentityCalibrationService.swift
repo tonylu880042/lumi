@@ -14,6 +14,17 @@ protocol IdentityCalibrationFrameSource: Sendable {
     func start() async throws
     func stop() async
     func nextFrame() async throws -> CameraFrame
+    func previewFrames() async -> AsyncStream<CameraFrame>
+}
+
+extension IdentityCalibrationFrameSource {
+    /// Compatibility default for existing DEBUG-only frame-source fakes. The
+    /// stream is finished immediately and never starts a camera or worker.
+    func previewFrames() async -> AsyncStream<CameraFrame> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
 }
 
 /// Narrow adapter seam so the concrete one-shot frame gate can be tested
@@ -91,6 +102,28 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
 
     public func stopCamera() async {
         await frameSource.stop()
+    }
+
+    /// Maps the current camera generation's transient BGRA frames into the
+    /// Application value. The bridge is bounded and has no Vision/Core ML
+    /// work; canceling the returned stream cancels the bridge task.
+    public func previewFrames() async -> AsyncStream<IdentityCalibrationPreviewFrame> {
+        let sourceStream = await frameSource.previewFrames()
+        let pair = AsyncStream<IdentityCalibrationPreviewFrame>.makeStream(
+            of: IdentityCalibrationPreviewFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let bridge = Task {
+            for await frame in sourceStream {
+                if Task.isCancelled { break }
+                _ = pair.continuation.yield(Self.makePreview(from: frame))
+            }
+            pair.continuation.finish()
+        }
+        pair.continuation.onTermination = { @Sendable _ in
+            bridge.cancel()
+        }
+        return pair.stream
     }
 
     public func captureEnrollmentSample(
@@ -373,6 +406,17 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
         return IdentityCalibrationCandidate(
             memberID: candidate.memberID,
             cosineSimilarity: candidate.cosineSimilarity
+        )
+    }
+
+    private static func makePreview(
+        from frame: CameraFrame
+    ) -> IdentityCalibrationPreviewFrame {
+        IdentityCalibrationPreviewFrame(
+            bgraBytes: frame.bytes,
+            width: frame.width,
+            height: frame.height,
+            bytesPerRow: frame.bytesPerRow
         )
     }
 }

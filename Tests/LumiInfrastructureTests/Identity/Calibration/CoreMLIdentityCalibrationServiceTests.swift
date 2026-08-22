@@ -39,6 +39,204 @@ struct CoreMLIdentityCalibrationServiceTests {
         }
     }
 
+    @Test("concrete camera source publishes the newest preview frame")
+    func concretePreviewUsesNewestFrame() async throws {
+        let adapter = BufferedCameraAdapter()
+        let source = IdentityCalibrationCameraFrameSource(adapter: adapter)
+        try await source.start()
+        let previewStream = await source.previewFrames()
+        var iterator = previewStream.makeAsyncIterator()
+
+        let first = try makeFrame(byte: 1)
+        let second = try makeFrame(byte: 2)
+        let newest = try makeFrame(byte: 3)
+
+        await adapter.send(first)
+        await source.waitForPreviewDelivery()
+        #expect(await iterator.next() == first)
+
+        await adapter.send(second)
+        await source.waitForPreviewDelivery()
+        await adapter.send(newest)
+        await source.waitForPreviewDelivery()
+        #expect(await iterator.next() == newest)
+
+        await source.stop()
+    }
+
+    @Test("preview delivery does not consume the fresh capture frame")
+    func previewDoesNotConsumeFreshCapture() async throws {
+        let adapter = BufferedCameraAdapter()
+        let source = IdentityCalibrationCameraFrameSource(adapter: adapter)
+        try await source.start()
+        let previewStream = await source.previewFrames()
+        var previewIterator = previewStream.makeAsyncIterator()
+
+        let stale = try makeFrame(byte: 4)
+        let fresh = try makeFrame(byte: 5)
+        await adapter.send(stale)
+        await source.waitForPreviewDelivery()
+        #expect(await previewIterator.next() == stale)
+
+        let capture = Task { try await source.nextFrame() }
+        await source.waitForFreshFrameRequest()
+        await adapter.send(fresh)
+        await source.waitForPreviewDelivery()
+
+        #expect(try await capture.value == fresh)
+        #expect(await previewIterator.next() == fresh)
+        await source.stop()
+    }
+
+    @Test("concrete preview stream finishes on stop and isolates restart generations")
+    func concretePreviewStopAndRestartUseIndependentGenerations() async throws {
+        let adapter = RestartableBufferedCameraAdapter()
+        let source = IdentityCalibrationCameraFrameSource(adapter: adapter)
+        try await source.start()
+        let oldStream = await source.previewFrames()
+        var oldIterator = oldStream.makeAsyncIterator()
+        let oldFrame = try makeFrame(byte: 6)
+        await adapter.send(oldFrame)
+        await source.waitForPreviewDelivery()
+        #expect(await oldIterator.next() == oldFrame)
+
+        await source.stop()
+        #expect(await oldIterator.next() == nil)
+
+        try await source.start()
+        let newStream = await source.previewFrames()
+        var newIterator = newStream.makeAsyncIterator()
+        let newFrame = try makeFrame(byte: 7)
+        await adapter.send(newFrame)
+        await source.waitForPreviewDelivery()
+
+        #expect(await oldIterator.next() == nil)
+        #expect(await newIterator.next() == newFrame)
+        await source.stop()
+    }
+
+    @Test("service maps transient camera preview without running embedding inference")
+    func serviceMapsPreviewWithoutInference() async throws {
+        let source = PreviewingCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        try await service.startCamera()
+        let previewStream = await service.previewFrames()
+        var iterator = previewStream.makeAsyncIterator()
+        let frame = try CameraFrame(
+            bytes: Data([0x11, 0x22, 0x33, 0xFF, 0x44, 0x55, 0x66, 0xFF]),
+            width: 2,
+            height: 1,
+            bytesPerRow: 8,
+            orientation: .upright
+        )
+
+        await source.sendPreview(frame)
+
+        guard let preview = await iterator.next() else {
+            Issue.record("expected one mapped preview frame")
+            return
+        }
+        #expect(preview.bgraBytes == frame.bytes)
+        #expect(preview.width == frame.width)
+        #expect(preview.height == frame.height)
+        #expect(preview.bytesPerRow == frame.bytesPerRow)
+        #expect(await pipeline.callCount == 0)
+
+        await service.stopCamera()
+    }
+
+    @Test("service preview stream finishes on stop and is independent after restart")
+    func servicePreviewStopsAndRestartsByGeneration() async throws {
+        let source = PreviewingCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        try await service.startCamera()
+        let firstStream = await service.previewFrames()
+        var firstIterator = firstStream.makeAsyncIterator()
+        await service.stopCamera()
+        #expect(await firstIterator.next() == nil)
+
+        try await service.startCamera()
+        let secondStream = await service.previewFrames()
+        var secondIterator = secondStream.makeAsyncIterator()
+        let secondFrame = try makeFrame(byte: 9)
+        await source.sendPreview(secondFrame)
+
+        guard let preview = await secondIterator.next() else {
+            Issue.record("expected preview after restart")
+            return
+        }
+        #expect(preview.bgraBytes == secondFrame.bytes)
+        await service.stopCamera()
+    }
+
+    @Test("service bridge cancels source consumption when preview consumer cancels")
+    func servicePreviewBridgeTerminatesDeterministically() async throws {
+        let source = TerminatingPreviewFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        try await service.startCamera()
+        let previewStream = await service.previewFrames()
+        let consumer = Task {
+            for await _ in previewStream {
+                if Task.isCancelled { return }
+            }
+        }
+        await source.waitForPreviewConsumer()
+
+        consumer.cancel()
+        _ = await consumer.value
+        await source.waitForPreviewConsumerTermination()
+
+        #expect(await source.previewConsumerTerminated)
+        await service.stopCamera()
+    }
+
+    @Test("service returns a finished preview stream before camera start")
+    func servicePreviewIsFinishedBeforeStart() async throws {
+        let source = RecordingCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        var iterator = (await service.previewFrames()).makeAsyncIterator()
+
+        #expect(await iterator.next() == nil)
+        #expect(await source.startCallCount == 0)
+        #expect(await pipeline.callCount == 0)
+    }
+
     @Test("one enrollment capture consumes exactly the next frame and ignores stale frames")
     func enrollmentUsesFreshFrame() async throws {
         let source = RecordingCalibrationFrameSource()
@@ -852,6 +1050,103 @@ private actor RecordingCalibrationFrameSource: IdentityCalibrationFrameSource {
     }
 }
 
+private actor PreviewingCalibrationFrameSource: IdentityCalibrationFrameSource {
+    private var streamPair = AsyncStream<CameraFrame>.makeStream(
+        of: CameraFrame.self,
+        bufferingPolicy: .bufferingNewest(1)
+    )
+    private var running = false
+
+    func start() async throws {
+        streamPair = AsyncStream<CameraFrame>.makeStream(
+            of: CameraFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        running = true
+    }
+
+    func stop() async {
+        running = false
+        streamPair.continuation.finish()
+    }
+
+    func nextFrame() async throws -> CameraFrame {
+        guard running else { throw IdentityCalibrationError.failed }
+        throw IdentityCalibrationError.failed
+    }
+
+    func previewFrames() async -> AsyncStream<CameraFrame> {
+        streamPair.stream
+    }
+
+    func sendPreview(_ frame: CameraFrame) {
+        _ = streamPair.continuation.yield(frame)
+    }
+}
+
+private actor TerminatingPreviewFrameSource: IdentityCalibrationFrameSource {
+    private var streamPair = AsyncStream<CameraFrame>.makeStream(
+        of: CameraFrame.self,
+        bufferingPolicy: .bufferingNewest(1)
+    )
+    private var running = false
+    private var previewConsumerStarted = AsyncStream<Void>.makeStream(
+        of: Void.self,
+        bufferingPolicy: .bufferingNewest(1)
+    )
+    private var previewConsumerEnded = AsyncStream<Void>.makeStream(
+        of: Void.self,
+        bufferingPolicy: .bufferingNewest(1)
+    )
+    private(set) var previewConsumerTerminated = false
+
+    func start() async throws {
+        streamPair = AsyncStream<CameraFrame>.makeStream(
+            of: CameraFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        streamPair.continuation.onTermination = { @Sendable [weak self] _ in
+            Task { [weak self] in
+                await self?.markPreviewConsumerTerminated()
+            }
+        }
+        running = true
+        previewConsumerTerminated = false
+    }
+
+    func stop() async {
+        running = false
+        streamPair.continuation.finish()
+    }
+
+    func nextFrame() async throws -> CameraFrame {
+        guard running else { throw IdentityCalibrationError.failed }
+        throw IdentityCalibrationError.failed
+    }
+
+    func previewFrames() async -> AsyncStream<CameraFrame> {
+        previewConsumerStarted.continuation.yield(())
+        return streamPair.stream
+    }
+
+    func waitForPreviewConsumer() async {
+        var iterator = previewConsumerStarted.stream.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    func waitForPreviewConsumerTermination() async {
+        if previewConsumerTerminated { return }
+        var iterator = previewConsumerEnded.stream.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    private func markPreviewConsumerTerminated() {
+        guard !previewConsumerTerminated else { return }
+        previewConsumerTerminated = true
+        previewConsumerEnded.continuation.yield(())
+    }
+}
+
 private actor BufferedCameraAdapter: IdentityCalibrationCameraAdapter {
     private var streamPair = AsyncStream<CameraFrame>.makeStream(
         of: CameraFrame.self,
@@ -859,7 +1154,34 @@ private actor BufferedCameraAdapter: IdentityCalibrationCameraAdapter {
     )
 
     func start() async throws -> AsyncStream<CameraFrame> {
-        streamPair.stream
+        streamPair = AsyncStream<CameraFrame>.makeStream(
+            of: CameraFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        return streamPair.stream
+    }
+
+    func stop() async {
+        streamPair.continuation.finish()
+    }
+
+    func send(_ frame: CameraFrame) {
+        _ = streamPair.continuation.yield(frame)
+    }
+}
+
+private actor RestartableBufferedCameraAdapter: IdentityCalibrationCameraAdapter {
+    private var streamPair = AsyncStream<CameraFrame>.makeStream(
+        of: CameraFrame.self,
+        bufferingPolicy: .bufferingNewest(1)
+    )
+
+    func start() async throws -> AsyncStream<CameraFrame> {
+        streamPair = AsyncStream<CameraFrame>.makeStream(
+            of: CameraFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        return streamPair.stream
     }
 
     func stop() async {

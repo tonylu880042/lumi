@@ -78,7 +78,7 @@ struct ContentView: View {
             )
             .id(controlsMode)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) {
+            .overlay(alignment: AppOverlayLayout.sessionControls.alignment) {
                 SimulatorControlsView(
                     simulationModel: simulationModel,
                     controlsExpanded: $controlsExpanded,

@@ -262,23 +262,33 @@ struct SimulatorControlsView: View {
             .accessibilityLabel("完成轉向")
             .accessibilityHint("確認模擬硬體已抵達目標位置")
 
-            Picker("訪客身分", selection: $identityChoice) {
-                ForEach(SessionSimulationModel.VisitorIdentityChoice.allCases) { choice in
-                    Text(choice.label).tag(choice)
+            if simulationModel.hasManualIdentityControls {
+                Picker("訪客身分", selection: $identityChoice) {
+                    ForEach(SessionSimulationModel.VisitorIdentityChoice.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
                 }
-            }
-            .pickerStyle(.segmented)
-            .disabled(!simulationModel.canResolveVisitor)
-            .accessibilityLabel("訪客身分")
-            .accessibilityHint("選擇要完成的模擬身分結果")
+                .pickerStyle(.segmented)
+                .disabled(!simulationModel.canResolveVisitor)
+                .accessibilityLabel("訪客身分")
+                .accessibilityHint("選擇要完成的模擬身分結果")
 
-            Button("確認訪客身分") {
-                simulationModel.resolveVisitor(identityChoice)
+                Button("確認訪客身分") {
+                    simulationModel.resolveVisitor(identityChoice)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!simulationModel.canResolveVisitor)
+                .accessibilityLabel("確認訪客身分")
+                .accessibilityHint("完成選定的模擬身分結果")
+            } else {
+                Button("辨識目前訪客") {
+                    simulationModel.recognizeVisitor()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!simulationModel.canResolveVisitor)
+                .accessibilityLabel("辨識目前訪客")
+                .accessibilityHint("拍攝三次新觀察並套用 44B pilot 判定")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!simulationModel.canResolveVisitor)
-            .accessibilityLabel("確認訪客身分")
-            .accessibilityHint("完成選定的模擬身分結果")
 
 #if DEBUG && LUMI_LIVE
             Picker("對話方向", selection: $conversationDirectionChoice) {

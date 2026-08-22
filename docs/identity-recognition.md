@@ -2,7 +2,7 @@
 
 > File: `identity-recognition.md`
 > Status: In implementation
-> Last updated: 2026-08-17
+> Last updated: 2026-08-22
 > Scope: Milestone 3 — Member Identity Recognition
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 > Decisions: `docs/decisions/ADR-0004-face-match-confidence-policy.md`, `docs/decisions/ADR-0005-development-scope-and-boundaries.md`, `docs/decisions/ADR-0010-sface-embedding-model.md`
@@ -679,9 +679,10 @@ saved.
 
 The tool requires explicit Start/Stop. Every capture arms the camera for
 exactly the next fresh frame; pre-arm buffered/stale frames are discarded.
-There is no warmup, timeout, preview, or image persistence, and stop or
-cancellation is fail-closed. A temporary member ID may be selected and reset
-only through explicit reset confirmation. The suggested 3–5 enrollment
+The same camera cursor also publishes a bounded newest-one transient preview,
+without changing the fresh-capture rule. There is no warmup, timeout, or image
+persistence, and stop or cancellation is fail-closed. Samples for a temporary
+member ID are deleted only through explicit reset confirmation. The suggested 3–5 enrollment
 samples is soft guidance, not a cap or automatic completion. Return captures
 rank the full temporary gallery and show raw top-1/top-2 IDs, cosine scores,
 and margin only.
@@ -695,9 +696,11 @@ recognition route.
 #### Physical iPad calibration runbook
 
 1. Install a signed Debug `LumiApp` build on the iPad.
-2. Open `DEBUG 身份校準`, tap `開始相機`, and grant camera permission.
-3. Select temporary ID `person-a`, tap `載入樣本數`, and first tap `拍攝回訪`
-   before adding samples; record the score-only evidence (if any).
+2. Open `DEBUG 身份校準`, enter temporary ID `person-a`, then tap
+   `套用並開始相機`. The tool loads that ID's sample count before starting the
+   camera; grant camera permission when requested.
+3. First tap `拍攝回訪` before adding samples and record the score-only
+   evidence (if any).
 4. Capture 3–5 varied frontal/slight-angle samples with `非正式 enrollment`.
 5. Tap `拍攝回訪`; record gallery count, top-1/top-2 temporary IDs, cosines,
    and margin.
@@ -705,9 +708,11 @@ recognition route.
    for person A and then person B; compare candidate ordering evidence only.
 7. Reset only the selected temporary ID between reruns after confirmation.
 
-There is no preview: position the subject in front of the camera, and remember
-that each button consumes the next fresh frame. Successful automation and
-simulator gates do not claim physical accuracy, quality, or threshold validity.
+The DEBUG console now shows a display-only mirrored preview while recognition
+continues to consume the original upright, non-mirrored frame. Keep the face
+inside the static guide and remember that each shutter press consumes the next
+fresh frame. Successful automation and simulator gates do not claim physical
+accuracy, quality, or threshold validity.
 
 Implementation/TDD evidence: tests-first App RED reported missing composition
 and view symbols. A later lazy-start stop-race regression also went RED when a
@@ -794,6 +799,163 @@ not manual picker behavior or recognition quality. Scoped diff/whitespace
 checks were clean. Release exclusion evidence from the original 42A checkpoint
 remains applicable because all App picker code is inside the existing DEBUG
 boundary.
+
+### DEBUG live-preview field console (selected option A, 2026-08-21)
+
+The product owner selected Google Stitch option A, “Lumi Field Identity
+Console,” on 2026-08-21. The DEBUG calibration sheet is now camera-first: a
+dark field-console surface gives the live preview visual priority, overlays a
+static face-position guide and honest camera status, and keeps enrollment or
+return mode, a manual shutter, and Photos import in a fixed bottom safe-area
+deck. A compact temporary-ID/sample-count summary remains visible while aiming.
+This dark console is a DEBUG calibration-tool decision only; it does not change
+the production Lumi avatar or establish a product-wide dark theme.
+
+The Application preview value contains only owned transient BGRA bytes and
+width/height/row-stride metadata. Infrastructure preserves a single camera
+stream iterator, publishes preview frames with `.bufferingNewest(1)`, and keeps
+the capture gate independent so a shutter press still waits for the next frame
+after it is armed. Presentation owns the preview value exposed to SwiftUI. App
+renders it as a labeled `CGImage`, aspect-fills the preview, and mirrors only
+the displayed image. The bytes sent through Vision → YuNet → SFace remain
+upright and non-mirrored. Preview frames are not persisted, logged, encoded,
+or passed to the identity domain.
+
+The console remains fully manual. The static guide does not assert that a face
+was detected or is ready; no auto-capture, recognition threshold,
+`known`/`unknown` decision, or production enrollment behavior was introduced.
+The first implementation placed the shutter below the initial viewport. Visual
+comparison against the selected Stitch reference found that P1 issue; the
+capture deck was moved to a fixed bottom safe-area inset so the shutter and
+Photos action remain visible while positioning the face. The comparison and
+decision record are in `design-qa.md`.
+
+Tests-first RED covered the absent preview DTO/stream/model/renderer and App
+proxy contracts. Focused GREEN passed Application 6/6, Infrastructure 30/30,
+Presentation 32/32, and App 21/21 in both Debug and Debug-Live after the visual
+correction. The exact full `swift test` gate passed 669 tests across 53 suites
+plus 4 XCTest snapshots. Full App Debug and Debug-Live each passed 76/76 before
+the layout-only safe-area correction; the changed App suite then passed 21/21
+in each configuration. The required unsigned generic Simulator build
+succeeded. Simulator visual QA used an iPhone 16 Plus portrait viewport and
+found no remaining P0/P1 issue. These gates do not establish physical camera
+preview quality. On 2026-08-22 a signed Debug build was installed and launched
+successfully on the connected iPhone 15 Plus `TonyLu`; that proves deployment
+and launch connectivity only. The operator must still observe the live preview
+and capture flow on-device before any physical-camera conclusion is recorded.
+
+The first physical-device report on 2026-08-22 found a blank preview and an ID
+field that was not practically reachable. Tests-first regressions reproduced
+both contracts: the renderer incorrectly treated the fourth BGRA byte as
+premultiplied alpha, and the member editor lived only in scrolled content below
+the camera. GREEN renders camera BGRA with the fourth byte skipped/opaque and
+moves the ID editor plus Apply action into the fixed capture deck. Focused App
+tests passed in Debug and Debug-Live, Simulator accessibility automation entered
+and applied `tony2`, and a new signed build was installed and launched on
+`TonyLu`. The operator still needs to confirm the corrected live image on the
+physical device.
+
+On 2026-08-22 the product owner selected Scheme A for the field-console entry:
+identity context is confirmed before camera work begins. The initial stage asks
+`這是誰？`, accepts one `會員 ID／暫時 ID`, loads that ID's existing sample
+count, and starts the camera only after `套用並開始相機` succeeds. The capture
+stage then shows the preview, mode, shutter, Photos, score evidence, and a
+compact member/sample summary; it does not repeat the ID editor. `更換會員`
+stops the camera and returns to the initial stage without deleting embeddings.
+Deletion remains the distinct, confirmed `清除目前會員樣本` action. The
+3–5-sample copy remains soft guidance and the UI no longer presents a capped
+ratio such as `6/5`.
+
+This is still a DEBUG calibration workflow. Entering a value does not create,
+bind, rename, or delete a production member account. Visual QA compared the
+old signed-device screenshot and the new same-size Simulator state; it found
+and fixed one duplicate-title P1 before recording `final result: passed` in
+`design-qa.md`. Tests-first evidence includes two Presentation regressions for
+confirm/load/start ordering and invalid-ID gating plus an App regression for
+the duplicate title. Focused GREEN passed Presentation 34/34 and App 24/24.
+
+### DEBUG-Live known/unknown pilot (44B, 2026-08-22)
+
+After a three-person physical-device calibration check produced clearly
+separated top-1/top-2 evidence in the owner's test (for example, one captured
+return visit showed top-1 `0.847634`, top-2 `0.298046`, margin `0.549588`), the
+product owner approved 44B as a **temporary Debug/Debug-Live field pilot**. This
+is not representative-store validation and does not approve a Release
+threshold.
+
+The pilot confidence policy is pure Domain code and fixes all four temporary
+gates together:
+
+- top-1 cosine similarity must be at least `0.70`;
+- top-1 minus top-2 margin must be at least `0.20`;
+- exactly three newly armed camera observations are measured;
+- at least two accepted observations must name the same `MemberID`.
+
+Boundary equality is accepted. Missing top-2 evidence fails the margin gate.
+The known confidence is the lowest accepted top-1 score among the confirming
+observations. Any low score, insufficient margin, missing face/candidate,
+inconsistent identity, or malformed evidence fails safely to public `unknown`.
+Stage failures use the existing generic error path, while `CancellationError`
+is preserved even when it races a generic source failure. Internal
+`UnknownReason` never crosses `IdentityRecognitionPort`.
+
+In Debug-Live, the session Simulator now lazily loads the same bundled
+SFace/YuNet graph and `Library/Application Support/Lumi/IdentityCalibration.sqlite`
+gallery used by the calibration tool. The operator advances the existing
+presence/rotation flow and presses `辨識目前訪客`; Mock Debug keeps its manual
+known/unknown controls. A known result produces the generic returning-member
+greeting and the existing privacy-safe `.returningMember` voice context when
+voice is started. An unknown result uses the generic visitor path. Face frames,
+embeddings, confidence scores, and raw member IDs are not sent through the
+voice context.
+
+#### Owner-approved temporary spoken address (Option A, 2026-08-22)
+
+After physical testing confirmed that the 44B pilot could distinguish the
+owner's three enrollment IDs, the owner approved a narrow **Debug-Live-only**
+exception to the preceding anonymous voice rule. When 44B returns `known`, App
+composition may convert that exact enrollment `MemberID` into
+`VoiceMemberAddress` and send only its validated `spokenLabel` directly to the
+Realtime session instructions. The accepted label is 1–32 Unicode letters or
+numbers only; separators, spaces, punctuation, control text, and long/free-form
+prompt content fail closed to an anonymous returning-member
+greeting. Unknown visitors and unmapped members remain anonymous. Release
+composition does not install this resolver.
+
+The Debug-Live session UI uses that same resolver after a known decision and
+shows `<spokenLabel>，歡迎回來～` before voice startup. This makes the local
+identity result explicit without asking OpenAI to repeat it. If resolution is
+unknown or the label fails validation, the UI never displays the enrollment
+ID; Release remains anonymous.
+
+This label is a temporary way to address the owner during the field pilot; it
+is not a verified name or a member profile. It does not authorize visit,
+exercise, or weekly-summary values. OpenAI may use it only with the returning
+greeting and must not infer missing data. The broker request remains bodyless
+and receives no member identity. A real Curves member-system binding will
+replace the enrollment label with a system-provided preferred name later.
+
+44B does not bind temporary IDs to a Curves member-management account and does
+not provide a member name, visit history, exercise data, or real weekly
+summary. The existing Debug fixture is not remapped to a recognized real ID;
+real member context remains blocked on the separately designed CMS API and
+identity-binding contract. Recognition timeout, automatic continuous
+recognition, formal enrollment/consent, and production thresholds remain
+unresolved product decisions.
+
+TDD evidence for the original slice: policy 12/12, pilot adapter 7/7, exact
+known/unknown session-to-voice paths 2/2, Debug App composition 27/27, and
+Debug-Live App composition/runtime 48/48. The Option A addition captured a
+missing-contract RED before production code; focused GREEN passed coordinator
+40/40, Realtime adapter 26/26, Mock voice 14/14, and App composition 28/28 in
+both Debug and Debug-Live. Full hosted App gates passed 88/88 in both Debug and
+Debug-Live after a tests-first fix for an existing early mock-arrival race.
+These automated gates prove the contract and wiring, not field accuracy,
+false-accept rate, or production readiness. The exact package-wide `swift test`
+gate built successfully, passed its 4/4 XCTest snapshots, and showed no visible
+Swift Testing failure after the race fixes, but the existing
+`swiftpm-testing-helper` lifecycle hang required interruption (exit 130); no
+clean package-wide pass or total count is claimed.
 
 ### Important Rule
 

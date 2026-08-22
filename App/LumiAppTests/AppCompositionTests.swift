@@ -132,6 +132,10 @@ struct AppCompositionTests {
 
         #expect(!firstSimulation.hasArtificialVoiceControls)
         #expect(!secondSimulation.hasArtificialVoiceControls)
+#if DEBUG
+        #expect(!firstSimulation.hasManualIdentityControls)
+        #expect(!secondSimulation.hasManualIdentityControls)
+#endif
         #expect(firstSetup !== secondSetup)
         #expect(firstSimulation !== secondSimulation)
         #expect(firstSetup.state == .loading)
@@ -164,6 +168,8 @@ struct AppCompositionTests {
 
         #expect(firstModel.hasArtificialVoiceControls)
         #expect(secondModel.hasArtificialVoiceControls)
+        #expect(firstModel.hasManualIdentityControls)
+        #expect(secondModel.hasManualIdentityControls)
         #expect(firstModel !== secondModel)
     }
 

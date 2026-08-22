@@ -28,6 +28,28 @@ enum AppRootRouting {
     }
 }
 
+/// Reserves separate screen corners for the two DEBUG controls that remain
+/// visible over the ready Avatar. Keeping this contract in one place prevents
+/// the root device action from covering the session-controls affordance.
+enum AppOverlayCorner: Equatable {
+    case topLeading
+    case topTrailing
+
+    var alignment: Alignment {
+        switch self {
+        case .topLeading:
+            .topLeading
+        case .topTrailing:
+            .topTrailing
+        }
+    }
+}
+
+enum AppOverlayLayout {
+    static let deviceSetupControl: AppOverlayCorner = .topLeading
+    static let sessionControls: AppOverlayCorner = .topTrailing
+}
+
 /// Chooses setup/loading/failure or the already-composed session content.
 ///
 /// The same Presentation model is retained across route changes so a semantic
@@ -58,7 +80,7 @@ struct AppRootView<ReadyContent: View>: View {
     }
 
     private var readyDestination: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: AppOverlayLayout.deviceSetupControl.alignment) {
             readyContent
 
 #if DEBUG

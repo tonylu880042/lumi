@@ -366,11 +366,20 @@ enum VoiceConversationDirection {
     case postWorkoutReview
 }
 
+struct VoiceMemberAddress {
+    let spokenLabel: String
+}
+
 protocol VoiceSessionPort: Sendable {
     func start(context: VoiceContext) async throws
     func start(
         context: VoiceContext,
         direction: VoiceConversationDirection
+    ) async throws
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection,
+        memberAddress: VoiceMemberAddress?
     ) async throws
     func eventUpdates() async -> AsyncStream<VoiceSessionEvent>
     func stop() async
@@ -382,9 +391,20 @@ The coordinator is the sole consumer of typed `userSpeechStarted`,
 `userSpeechEnded`, `responseReady`, and payload-free `failure` events. A
 failure leaves the semantic state unchanged so its legal action can be retried.
 `VoiceContext` distinguishes only a returning member from a generic visitor;
-it carries no member identity, confidence, or private profile data. `ToolResult`
-and `sendToolResult(_:)` are introduced with Phase 3 tool calling, not ordinary
+it carries no member identity, confidence, or private profile data. The
+separate optional `VoiceMemberAddress` is a narrow Application value containing
+only a validated 1–32-character Unicode letter/number label. Its default is
+`nil`; Release remains anonymous. The owner-approved Debug-Live 44B pilot may
+resolve a locally confirmed enrollment ID into this label, while unsafe,
+unknown, and unmapped paths fail closed to `nil`. No profile, confidence,
+biometric, visit, or exercise data crosses with it. `ToolResult` and
+`sendToolResult(_:)` are introduced with Phase 3 tool calling, not ordinary
 conversation.
+
+The same Debug-Live resolver may format the local confirmation copy as
+`<spokenLabel>，歡迎回來～`. If no validated label exists, the UI keeps the
+anonymous returning-member greeting; unknown and Release paths never display
+the enrollment ID.
 
 `VoiceConversationDirection` is a provider-neutral, payload-free focus for one
 voice session. It carries no member ID, name, confidence, embedding, photo, or

@@ -57,6 +57,33 @@ struct DeviceSetupModelTests {
         #expect(await store.savedTokens.count == 1)
     }
 
+    @Test("pasted authorization saves immediately without manual field editing")
+    func pastedAuthorizationSavesImmediately() async throws {
+        let store = RecordingDeviceAuthorizationStore()
+        let model = DeviceSetupModel(controller: DeviceAuthorizationController(store: store))
+        await model.load()
+
+        await model.savePastedAuthorization("  \n\(validToken)\r\n")
+
+        #expect(model.state == .ready)
+        #expect(model.tokenInput.isEmpty)
+        #expect(await store.saveCallCount == 1)
+        #expect(await store.storedToken?.rawValue == validToken)
+    }
+
+    @Test("pasted authorization clears its transient value after storage failure")
+    func pastedAuthorizationClearsAfterFailure() async throws {
+        let store = RecordingDeviceAuthorizationStore()
+        await store.setSaveFailure(TestStorageFailure(marker: marker))
+        let model = DeviceSetupModel(controller: DeviceAuthorizationController(store: store))
+        await model.load()
+
+        await model.savePastedAuthorization(validToken)
+
+        #expect(model.state == .failure(message: DeviceSetupModel.retryableFailureMessage))
+        #expect(model.tokenInput.isEmpty)
+    }
+
     @Test("empty and invalid input remain in setup with generic validation")
     func invalidInputRemainsInSetup() async throws {
         let store = RecordingDeviceAuthorizationStore()

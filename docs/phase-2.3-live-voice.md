@@ -48,7 +48,7 @@ Phase 2.3 includes:
 - a separate `LumiApp-Live` shared Xcode scheme
 - `Debug-Live` and `Release-Live` build configurations
 - a separate Live bundle identifier, `com.curves.lumi.live`
-- a first-run Live setup screen for manual device-token provisioning
+- a first-run Live setup screen with native one-tap device-token paste
 - device-token storage in the iOS Keychain
 - a concrete HTTP implementation of `OpenAIRealtimeClientSecretSource`
 - Live composition of the completed Phase 2.1 adapter and Phase 2.2 transport
@@ -88,6 +88,8 @@ automatic fallback from Live to Mock.
 
 ### 3.3 Hybrid Phase 2.3 simulation boundary
 
+At the original Phase 2.3 acceptance boundary, the following was true:
+
 In `LumiApp-Live`:
 
 - hardware remains driven by the existing deterministic mock controls
@@ -98,6 +100,12 @@ In `LumiApp-Live`:
   responses, and failures are absent or disabled
 - real provider events drive speaking, listening, thinking, interruption, and
   retry behavior through the existing Application boundary
+
+Subsequent Milestone 3 work supersedes only the Debug-Live identity bullet:
+the owner-approved 44B pilot now uses the bundled camera/Vision/Core ML/local
+SQLite path when the operator requests recognition. Mock Debug and
+Release-Live keep their anonymous/mock identity composition. Hardware remains
+mocked, and the broker contract is unchanged.
 
 ## 4. Device Provisioning and Keychain Contract
 
@@ -110,8 +118,8 @@ once for delivery to the iPad and its SHA-256 digest for Vercel configuration.
 
 The raw token:
 
-- is pasted manually into the Live setup screen in Phase 2.3
-- is displayed as secure input
+- is delivered through the native SwiftUI paste control after an explicit user tap
+- is never displayed in a text field, accessibility value, or confirmation UI
 - is never committed, bundled, logged, or sent to OpenAI
 - is stored only in a this-device-only Keychain item for the selected broker
   environment
@@ -123,9 +131,11 @@ is explicitly deferred.
 ### 4.2 Setup behavior
 
 When the current environment has no stored token, `LumiApp-Live` opens the
-setup screen instead of the session UI. Empty or syntactically invalid input is
-not saved and displays `請輸入有效的裝置授權`. A save/reset cancellation or
-storage failure displays the retryable generic message
+setup screen instead of the session UI. The operator copies the one-time raw
+token and taps the system `PasteButton`; there is no manual token field or
+separate save action. Empty or syntactically invalid pasted content is not
+saved and displays `請輸入有效的裝置授權`. A save/reset cancellation or storage
+failure displays the retryable generic message
 `裝置設定失敗，請再試一次`. A saved token is authorized on the first
 credential request.
 
@@ -265,6 +275,17 @@ provider-default Server VAD, and only the privacy-safe `returningMember` or
 `visitor` greeting context directly to OpenAI. It never sends a member ID,
 name, confidence, embedding, or image.
 
+Owner amendment (2026-08-22): Debug-Live may additionally send one
+Application-validated `VoiceMemberAddress.spokenLabel` directly to OpenAI for
+an already-confirmed 44B returning member. This temporary enrollment label is
+restricted to 1–32 Unicode letters/numbers only; invalid labels, Release,
+unknown visitors, and unmapped members remain anonymous. It carries no member
+profile, confidence, biometric, visit, or exercise values. The broker contract
+and its bodyless request are unchanged and still receive no member identity.
+Debug-Live may also show the same validated label locally as
+`<spokenLabel>，歡迎回來～` after recognition and before voice startup; unknown,
+invalid-label, and Release paths stay anonymous.
+
 ## 7. App Credential Source and Failure Mapping
 
 The concrete client-secret source is an Infrastructure adapter. It receives an
@@ -333,11 +354,14 @@ the app-side camera → Vision face detection → normalized crop → Core ML
 embedding → local `MemberMatcher` path behind `IdentityRecognitionPort`.
 Multiple local embeddings per member, deletion/revocation, and storage/sync
 policy will be specified there. Raw face images are not retained by default and
-identity features are not sent to this broker or the LLM.
+identity features are not sent to this broker. Except for the explicitly
+approved Debug-Live spoken-label pilot above, they are not sent to the LLM.
 
-## 10. Out of Scope
+## 10. Original Phase 2.3 Out of Scope
 
-Phase 2.3 does not add:
+At Phase 2.3 acceptance, this phase did not add the following. Later milestones
+may supersede individual bullets; in particular, Milestone 3 now supplies the
+Debug-Live 44B local identity pilot described above.
 
 - a standard OpenAI API key to the app
 - a general application backend or database

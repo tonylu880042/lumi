@@ -31,6 +31,7 @@ public actor AssistantSessionCoordinator {
     private let hardware: any HardwareControlPort
     private let identity: any IdentityRecognitionPort
     private let voice: any VoiceSessionPort
+    private let memberAddressResolver: @Sendable (MemberID) -> VoiceMemberAddress?
     private let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
     private let reducer: AssistantStateReducer
 
@@ -61,11 +62,14 @@ public actor AssistantSessionCoordinator {
         hardware: any HardwareControlPort,
         identity: any IdentityRecognitionPort,
         voice: any VoiceSessionPort,
+        memberAddressResolver:
+            @escaping @Sendable (MemberID) -> VoiceMemberAddress? = { _ in nil },
         voiceToolCallConfiguration: VoiceToolCallSessionConfiguration? = nil
     ) {
         self.hardware = hardware
         self.identity = identity
         self.voice = voice
+        self.memberAddressResolver = memberAddressResolver
         self.voiceToolCallConfiguration = voiceToolCallConfiguration
         self.reducer = AssistantStateReducer()
         self.state = .idle
@@ -282,13 +286,16 @@ public actor AssistantSessionCoordinator {
 
         let context: VoiceContext
         let memberID: MemberID?
+        let memberAddress: VoiceMemberAddress?
         switch recognitionResult {
         case let .known(knownMemberID, _):
             context = .returningMember
             memberID = knownMemberID
+            memberAddress = memberAddressResolver(knownMemberID)
         case .unknown:
             context = .visitor
             memberID = nil
+            memberAddress = nil
         }
 
         let voice = voice
@@ -308,7 +315,11 @@ public actor AssistantSessionCoordinator {
                 toolRunner = nil
             }
             try Task.checkCancellation()
-            try await voice.start(context: context, direction: direction)
+            try await voice.start(
+                context: context,
+                direction: direction,
+                memberAddress: memberAddress
+            )
             return VoiceStartPreparation(events: events, toolRunner: toolRunner)
         }
         voiceStartOperation = operation

@@ -34,6 +34,7 @@ public actor MockHardwareControlPort: HardwareControlPort {
     private var nextRotationID: UInt64 = 0
     private var nextReturnHomeID: UInt64 = 0
     private var pendingMovement: PendingMovement?
+    private var completeNextRotation = false
 
     public init() {}
 
@@ -41,6 +42,12 @@ public actor MockHardwareControlPort: HardwareControlPort {
     public var hasPendingReturnHome: Bool {
         guard let pendingMovement else { return false }
         if case .returnHome = pendingMovement { return true }
+        return false
+    }
+
+    public var hasPendingRotation: Bool {
+        guard let pendingMovement else { return false }
+        if case .rotation = pendingMovement { return true }
         return false
     }
 
@@ -68,6 +75,11 @@ public actor MockHardwareControlPort: HardwareControlPort {
                 }
 
                 rotationTargets.append(angle)
+                if completeNextRotation {
+                    completeNextRotation = false
+                    continuation.resume()
+                    return
+                }
                 pendingMovement = .rotation(
                     PendingRotation(id: requestID, continuation: continuation)
                 )
@@ -81,6 +93,24 @@ public actor MockHardwareControlPort: HardwareControlPort {
         guard case let .rotation(pendingRotation)? = pendingMovement else { return }
         self.pendingMovement = nil
         pendingRotation.continuation.resume()
+    }
+
+    /// Completes the active rotation, or remembers an arrival signal until the
+    /// coordinator registers the immediately upcoming mock rotation.
+    ///
+    /// Simulator state can become `.rotating` one actor turn before `rotate`
+    /// installs its continuation. Keeping this separate from `completeRotation`
+    /// preserves that method's explicit no-op behavior when nothing is pending.
+    public func completeCurrentOrNextRotation() {
+        switch pendingMovement {
+        case let .rotation(pendingRotation):
+            pendingMovement = nil
+            pendingRotation.continuation.resume()
+        case .returnHome:
+            return
+        case nil:
+            completeNextRotation = true
+        }
     }
 
     public func returnHome() async throws {
@@ -153,6 +183,7 @@ public actor MockHardwareControlPort: HardwareControlPort {
     }
 
     private func cancelCurrentMovement() {
+        completeNextRotation = false
         guard let pendingMovement else { return }
         self.pendingMovement = nil
 

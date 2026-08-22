@@ -363,9 +363,10 @@ saved.
 
 The tool requires explicit Start/Stop. Every capture arms the camera for
 exactly the next fresh frame; pre-arm buffered/stale frames are discarded.
-There is no warmup, timeout, preview, or image persistence, and stop or
-cancellation is fail-closed. A temporary member ID may be selected and reset
-only through explicit reset confirmation. The suggested 3–5 enrollment
+The same camera cursor also publishes a bounded newest-one transient preview,
+without changing the fresh-capture rule. There is no warmup, timeout, or image
+persistence, and stop or cancellation is fail-closed. Samples for a temporary
+member ID are deleted only through explicit reset confirmation. The suggested 3–5 enrollment
 samples is soft guidance, not a cap or automatic completion. Return captures
 rank the full temporary gallery and show raw top-1/top-2 IDs, cosine scores,
 and margin only.
@@ -445,6 +446,107 @@ That is deployment/connectivity evidence, not manual picker or recognition
 quality evidence. Scoped checks were clean. Existing Release-exclusion
 evidence remains applicable because the picker remains inside the DEBUG-only
 tool.
+
+### 1.11 DEBUG live-preview field console (selected option A, 2026-08-21)
+
+The product owner selected the Google Stitch “Lumi Field Identity Console”
+option A. The DEBUG calibration route now uses a camera-first dark console with
+a dominant live preview, static face guide, honest camera state, compact
+temporary-member/sample context, and a fixed bottom safe-area capture deck for
+enrollment/return mode, the manual shutter, and Photos import. The visual
+language is scoped to this DEBUG field tool and does not change the production
+avatar or establish a global dark-theme decision.
+
+The Application boundary carries an owned, transient BGRA preview value with
+dimensions and row stride only. Infrastructure keeps one camera iterator and a
+bounded newest-one preview buffer while retaining the independent next-frame
+capture gate. Presentation maps the preview for UI consumption. SwiftUI creates
+a labeled `CGImage`, aspect-fills it, and mirrors only the display; Vision,
+YuNet, and SFace still receive the original upright, non-mirrored frame.
+Preview data is never persisted, logged, encoded, or exposed to Domain.
+
+The guide is intentionally static and makes no face-detected/readiness claim.
+No auto-capture, detector or identity threshold, `known`/`unknown` decision, or
+production enrollment route is authorized. Visual QA found and fixed one P1:
+the first shutter location was below the initial viewport, so the capture deck
+was moved to a bottom safe-area inset. The signed-device step may verify camera
+preview operation, but does not by itself validate recognition quality.
+
+TDD evidence: focused GREEN passed Application 6/6, Infrastructure 30/30,
+Presentation 32/32, and App 21/21 in both Debug configurations after the visual
+fix. The full Swift gate passed 669 tests across 53 suites plus 4 XCTest
+snapshots. Full App Debug and Debug-Live passed 76/76 before the layout-only
+safe-area fix, and the changed App suite then passed 21/21 in both
+configurations. The required unsigned generic Simulator build succeeded, and
+same-viewport visual comparison against the selected Stitch reference found no
+remaining P0/P1 issue. On 2026-08-22 the signed Debug build was installed and
+launched on the connected iPhone 15 Plus `TonyLu`; this is deployment and launch
+connectivity evidence only, not physical preview or recognition-quality proof.
+
+A 2026-08-22 physical-device regression report found a blank preview and an ID
+editor that was not practically reachable. RED tests pinned both causes. The
+App renderer now treats the fourth BGRA byte as skipped/opaque instead of
+premultiplied alpha, and the editable temporary-ID controls now live in the
+fixed capture deck. Debug and Debug-Live focused suites passed; Simulator
+automation entered/applied `tony2`, and the corrected signed build was installed
+and launched on `TonyLu`. Direct operator confirmation of the physical preview
+remains required.
+
+On 2026-08-22 the product owner selected Scheme A as an identity-first
+replacement for the original camera-first entry. The DEBUG tool now confirms
+one `會員 ID／暫時 ID`, loads its existing sample count, and starts the camera
+only after the combined `套用並開始相機` action succeeds. Camera preview and
+capture controls exist only in the subsequent capture stage, and that stage
+does not repeat the ID editor. `更換會員` stops the camera and returns to ID
+selection without deleting stored embeddings; sample deletion stays behind the
+separate confirmed `清除目前會員樣本` action. The 3–5 count remains guidance,
+not a cap or progress denominator.
+
+This decision does not give the temporary ID production-member semantics and
+does not create, bind, rename, or delete a member-management account. Same-size
+visual comparison found and fixed one duplicate-title P1, then recorded a
+passing result in `design-qa.md`. Focused TDD evidence passed Presentation
+34/34 and App 24/24 after the new ordering, validation, and title regressions.
+
+### 1.12 DEBUG-Live confidence pilot and voice routing (44B, 2026-08-22)
+
+The product owner approved a bounded Debug/Debug-Live field pilot after manually
+checking three temporary identities on the connected device. This observation
+is enough to authorize a diagnostic pilot, but it is not the representative
+store dataset required by ADR-0004 and therefore does not change this ADR's
+production-threshold status.
+
+The pilot pins top-1 cosine `>= 0.70`, top-1/top-2 margin `>= 0.20`, exactly
+three fresh observations, and at least two accepted observations for the same
+member. Equality passes; missing top-2 fails closed. A known result reports the
+minimum accepted confirming score. The policy lives in Domain, while the
+DEBUG-only Infrastructure adapter owns the camera/Core ML/SQLite evidence and
+maps internal reasons to the existing public known/unknown port contract.
+
+Debug-Live App composition lazily builds the bundled SFace/YuNet graph and the
+same dedicated calibration SQLite path when the operator first requests
+recognition. Mock Debug keeps deterministic manual identity controls. Release
+composition does not enable this pilot policy. The existing coordinator maps a
+known result to the provider-neutral `.returningMember` voice context and an
+unknown result to `.visitor`; it does not send face data, embeddings, raw
+scores, or a member ID through that voice context.
+
+The temporary calibration ID is not a production CMS identity. No recognized
+ID is mapped to `DebugMemberFixture`, so 44B does not fabricate member profile
+or exercise data. CMS lookup, account binding, formal enrollment/consent,
+recognition timeout, and representative threshold validation remain separate
+blocking work.
+
+RED-to-GREEN evidence: confidence policy 12/12, pilot adapter 7/7, focused
+known/unknown session-to-voice routing 2/2, Debug App composition 27/27, and
+Debug-Live App composition/runtime 48/48. Full hosted App gates passed 88/88 in
+both Debug and Debug-Live after a tests-first fix for the early mock-arrival
+race. These results prove deterministic wiring only, not
+false-accept/false-reject performance. The exact package-wide `swift test`
+gate built, passed 4/4 XCTest snapshots, and showed no visible Swift Testing
+failure after the race fixes, but the existing testing-helper lifecycle hang
+required interruption (exit 130); it is not recorded as a clean package-wide
+pass.
 
 ### 2. Convert reproducibly to Core ML
 

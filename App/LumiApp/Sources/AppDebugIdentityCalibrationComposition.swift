@@ -32,6 +32,19 @@ actor AppIdentityCalibrationPortProxy: IdentityCalibrationPort {
         await cachedPort.stopCamera()
     }
 
+    /// Preview access never widens the lazy-load boundary. The camera start
+    /// operation must have populated the cached port before a preview can be
+    /// observed; a pre-start request therefore returns an immediately finished
+    /// stream.
+    func previewFrames() async -> AsyncStream<IdentityCalibrationPreviewFrame> {
+        guard let cachedPort else {
+            return AsyncStream { continuation in
+                continuation.finish()
+            }
+        }
+        return await cachedPort.previewFrames()
+    }
+
     func captureEnrollmentSample(
         for temporaryMemberID: MemberID,
         at createdAt: Date
@@ -119,6 +132,61 @@ actor AppIdentityCalibrationPortProxy: IdentityCalibrationPort {
     }
 }
 
+/// Lazy DEBUG bridge for the session Simulator's 44B recognition action.
+///
+/// App composition owns resource/database discovery. The cached value remains
+/// the narrow Application port, so camera, Vision, Core ML, and SQLite values
+/// never reach the UI model.
+actor AppPilotIdentityRecognitionPortProxy: IdentityRecognitionPort {
+    typealias Loader = @Sendable () async throws -> any IdentityRecognitionPort
+
+    private let loader: Loader
+    private var cachedPort: (any IdentityRecognitionPort)?
+    private var loadingTask: Task<any IdentityRecognitionPort, Error>?
+
+    init(loader: @escaping Loader) {
+        self.loader = loader
+    }
+
+    func recognizeCurrentVisitor() async throws -> RecognitionResult {
+        do {
+            try Task.checkCancellation()
+            let port = try await loadPort()
+            try Task.checkCancellation()
+            let result = try await port.recognizeCurrentVisitor()
+            try Task.checkCancellation()
+            return result
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw PilotIdentityRecognitionError.failed
+        }
+    }
+
+    private func loadPort() async throws -> any IdentityRecognitionPort {
+        if let cachedPort { return cachedPort }
+        if let loadingTask { return try await loadingTask.value }
+
+        let task = Task<any IdentityRecognitionPort, Error> {
+            try await loader()
+        }
+        loadingTask = task
+
+        do {
+            let port = try await task.value
+            loadingTask = nil
+            cachedPort = port
+            return port
+        } catch {
+            loadingTask = nil
+            throw error
+        }
+    }
+}
+
 /// App-only composition for the DEBUG calibration graph.
 enum AppIdentityCalibrationComposition {
     static let databaseDirectoryName = "Lumi"
@@ -178,31 +246,64 @@ enum AppIdentityCalibrationComposition {
         return derivedDatabaseURL
     }
 
+    /// Builds the single concrete DEBUG identity graph used by either the
+    /// calibration tool or the 44B session pilot. Callers keep this lazy.
+    static func loadProductionService() async throws
+        -> CoreMLIdentityCalibrationService
+    {
+        try Task.checkCancellation()
+
+        // Resolve every bundled resource before creating a database directory.
+        // Missing models therefore leave no partial calibration store behind.
+        let resources = try AppIdentityModelResources.resolve(using: Bundle.main)
+        guard let applicationSupportURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw IdentityCalibrationError.failed
+        }
+        let derivedDatabaseURL = try prepareDatabaseURL(
+            applicationSupportURL: applicationSupportURL,
+            fileManager: .default
+        )
+
+        return try await CoreMLIdentityCalibrationFactory.load(
+            sFaceModelURL: resources.sFaceModelURL,
+            yuNetModelURL: resources.yuNetModelURL,
+            databaseURL: derivedDatabaseURL
+        )
+    }
+
     private static let productionLoader:
         AppIdentityCalibrationPortProxy.Loader = {
-            try Task.checkCancellation()
-
-            // Resolve every bundled resource before creating a database
-            // directory. Missing model resources therefore leave no partial
-            // calibration store behind.
-            let resources = try AppIdentityModelResources.resolve(using: Bundle.main)
-            guard let applicationSupportURL = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first else {
-                throw IdentityCalibrationError.failed
-            }
-            let derivedDatabaseURL = try prepareDatabaseURL(
-                applicationSupportURL: applicationSupportURL,
-                fileManager: .default
-            )
-
-            return try await CoreMLIdentityCalibrationFactory.load(
-                sFaceModelURL: resources.sFaceModelURL,
-                yuNetModelURL: resources.yuNetModelURL,
-                databaseURL: derivedDatabaseURL
-            )
+            try await loadProductionService()
         }
+}
+
+/// DEBUG-only session composition for the owner-approved 44B pilot.
+enum AppPilotIdentityRecognitionComposition {
+    /// Owner-approved DEBUG-Live bridge: a safe enrollment identifier may be
+    /// spoken as a temporary address until the member system supplies a name.
+    /// Invalid/free-form identifiers remain anonymous.
+    static func voiceMemberAddress(
+        for memberID: MemberID
+    ) -> VoiceMemberAddress? {
+        try? VoiceMemberAddress(spokenLabel: memberID.rawValue)
+    }
+
+    static func makePort(
+        loader: @escaping AppPilotIdentityRecognitionPortProxy.Loader
+    ) -> any IdentityRecognitionPort {
+        AppPilotIdentityRecognitionPortProxy(loader: loader)
+    }
+
+    static func makePort() -> any IdentityRecognitionPort {
+        makePort {
+            let service = try await AppIdentityCalibrationComposition
+                .loadProductionService()
+            return PilotIdentityRecognitionAdapter(source: service)
+        }
+    }
 }
 
 #endif

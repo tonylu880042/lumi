@@ -20,9 +20,123 @@ struct DebugIdentityCalibrationModelTests {
         #expect(model.selectedMemberID == nil)
         #expect(model.selectedSampleCount == 0)
         #expect(model.scoreEvidence == nil)
+        #expect(model.previewFrame == nil)
         #expect(model.statusMessage == nil)
         acceptsSendable(model.state)
         acceptsSendable(model.scoreEvidence)
+        acceptsSendable(model.previewFrame)
+    }
+
+    @Test("model does not request preview before camera start")
+    func previewIsNotObservedBeforeStart() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        _ = DebugIdentityCalibrationModel(port: port)
+
+        #expect(await port.previewFramesCallCount == 0)
+    }
+
+    @Test("successful camera start subscribes once and displays transient preview")
+    func startDisplaysPreviewFrame() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        let model = DebugIdentityCalibrationModel(port: port)
+        let preview = IdentityCalibrationPreviewFrame(
+            bgraBytes: Data([0x01, 0x02, 0x03, 0xFF]),
+            width: 1,
+            height: 1,
+            bytesPerRow: 4
+        )
+
+        await model.startCamera()
+        #expect(await port.previewFramesCallCount == 1)
+        await port.waitForPreviewRequest()
+        await port.sendPreview(preview)
+        await port.waitForPreviewRequest()
+
+        #expect(model.state == .ready)
+        #expect(model.previewFrame == DebugIdentityCalibrationPreviewFrame(
+            preview: preview
+        ))
+
+        await model.stopCamera()
+        #expect(model.previewFrame == nil)
+    }
+
+    @Test("preview stream exit keeps camera state semantic and clears only preview")
+    func previewExitDoesNotChangeCameraState() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        let model = DebugIdentityCalibrationModel(port: port)
+        let preview = IdentityCalibrationPreviewFrame(
+            bgraBytes: Data([0x10, 0x20, 0x30, 0xFF]),
+            width: 1,
+            height: 1,
+            bytesPerRow: 4
+        )
+
+        await model.startCamera()
+        await port.waitForPreviewRequest()
+        await port.sendPreview(preview)
+        await port.waitForPreviewRequest()
+        await port.finishPreview()
+        await port.waitForPreviewExit()
+
+        #expect(model.state == .ready)
+        #expect(model.previewFrame == nil)
+    }
+
+    @Test("restart accepts only the new preview generation")
+    func restartUsesNewPreviewGeneration() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        let model = DebugIdentityCalibrationModel(port: port)
+        let oldPreview = IdentityCalibrationPreviewFrame(
+            bgraBytes: Data([0xA0, 0x00, 0x00, 0xFF]),
+            width: 1,
+            height: 1,
+            bytesPerRow: 4
+        )
+        let newPreview = IdentityCalibrationPreviewFrame(
+            bgraBytes: Data([0xB0, 0x00, 0x00, 0xFF]),
+            width: 1,
+            height: 1,
+            bytesPerRow: 4
+        )
+
+        await model.startCamera()
+        await port.waitForPreviewRequest(generation: 0)
+        await model.stopCamera()
+
+        await model.startCamera()
+        await port.waitForPreviewRequest(generation: 1)
+        await port.sendPreview(oldPreview, generation: 0)
+        await port.sendPreview(newPreview, generation: 1)
+        await port.waitForPreviewRequest(generation: 1)
+
+        #expect(model.state == .ready)
+        #expect(model.previewFrame == DebugIdentityCalibrationPreviewFrame(
+            preview: newPreview
+        ))
+    }
+
+    @Test("cancelled or failed camera start leaves no preview observer")
+    func cancelledOrFailedStartLeavesNoPreviewObserver() async throws {
+        let cancelledPort = RecordingIdentityCalibrationPort()
+        await cancelledPort.setStartFailure(CancellationError())
+        let cancelledModel = DebugIdentityCalibrationModel(port: cancelledPort)
+        await cancelledModel.startCamera()
+
+        #expect(cancelledModel.state == .stopped)
+        #expect(cancelledModel.previewFrame == nil)
+        #expect(await cancelledPort.previewFramesCallCount == 0)
+
+        let failedPort = RecordingIdentityCalibrationPort()
+        await failedPort.setStartFailure(MarkerError.marker)
+        let failedModel = DebugIdentityCalibrationModel(port: failedPort)
+        await failedModel.startCamera()
+
+        #expect(failedModel.state == .error(
+            message: DebugIdentityCalibrationModel.genericFailureMessage
+        ))
+        #expect(failedModel.previewFrame == nil)
+        #expect(await failedPort.previewFramesCallCount == 0)
     }
 
     @Test("start maps lifecycle to ready and generic failures to fixed copy")
@@ -82,6 +196,39 @@ struct DebugIdentityCalibrationModelTests {
         #expect(model.state == .ready)
         #expect(model.statusMessage == DebugIdentityCalibrationModel.invalidMemberIDMessage)
         #expect(await port.sampleCountCalls.isEmpty)
+    }
+
+    @Test("confirming a member loads the sample count before starting the camera")
+    func confirmingMemberLoadsCountThenStartsCamera() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        let member = try MemberID(rawValue: "temporary-a")
+        await port.seedCount(6, for: member)
+        let model = DebugIdentityCalibrationModel(port: port)
+        model.memberIDInput = member.rawValue
+
+        let didStart = await model.confirmMemberAndStartCamera()
+
+        #expect(didStart)
+        #expect(model.selectedMemberID == member.rawValue)
+        #expect(model.selectedSampleCount == 6)
+        #expect(model.state == .ready)
+        #expect(await port.sampleCountCalls == [member])
+        #expect(await port.startCallCount == 1)
+    }
+
+    @Test("confirming an invalid member never starts the camera")
+    func confirmingInvalidMemberDoesNotStartCamera() async throws {
+        let port = RecordingIdentityCalibrationPort()
+        let model = DebugIdentityCalibrationModel(port: port)
+
+        let didStart = await model.confirmMemberAndStartCamera()
+
+        #expect(didStart == false)
+        #expect(model.selectedMemberID == nil)
+        #expect(model.state == .stopped)
+        #expect(model.statusMessage == DebugIdentityCalibrationModel.invalidMemberIDMessage)
+        #expect(await port.sampleCountCalls.isEmpty)
+        #expect(await port.startCallCount == 0)
     }
 
     @Test("selecting and switching temporary IDs loads counts without resetting score evidence")
@@ -670,6 +817,8 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
     private var photoReturnSuspended = false
     private var pendingPhotoReturn: CheckedContinuation<IdentityCalibrationReturnResult, Error>?
     private var photoStopCancelsPending = true
+    private var previewGenerations: [PreviewSequence] = []
+    private var currentPreviewGeneration: PreviewSequence?
     private var enrollmentStarted = AsyncStream<Void>.makeStream(
         of: Void.self,
         bufferingPolicy: .bufferingNewest(1)
@@ -699,6 +848,7 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
     private(set) var photoReturnPhotos: [IdentityCalibrationPhoto] = []
     private(set) var resetMemberIDs: [MemberID] = []
     private(set) var returnCallCount = 0
+    private(set) var previewFramesCallCount = 0
 
     func startCamera() async throws {
         startCallCount += 1
@@ -717,6 +867,9 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
             })
         }
         try startResult.get()
+        let previewGeneration = PreviewSequence()
+        previewGenerations.append(previewGeneration)
+        currentPreviewGeneration = previewGeneration
     }
 
     func stopCamera() async {
@@ -729,6 +882,17 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
             pendingPhotoReturn?.resume(throwing: CancellationError())
             pendingPhotoReturn = nil
         }
+        await currentPreviewGeneration?.finish()
+    }
+
+    func previewFrames() async -> AsyncStream<IdentityCalibrationPreviewFrame> {
+        previewFramesCallCount += 1
+        guard let currentPreviewGeneration else {
+            return AsyncStream { continuation in
+                continuation.finish()
+            }
+        }
+        return await currentPreviewGeneration.stream()
     }
 
     func captureEnrollmentSample(
@@ -954,6 +1118,39 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
         _ = await iterator.next()
     }
 
+    func waitForPreviewRequest(generation: Int? = nil) async {
+        let sequence: PreviewSequence?
+        if let generation,
+           previewGenerations.indices.contains(generation) {
+            sequence = previewGenerations[generation]
+        } else {
+            sequence = currentPreviewGeneration
+        }
+        await sequence?.waitForRequest()
+    }
+
+    func waitForPreviewExit() async {
+        await currentPreviewGeneration?.waitForExit()
+    }
+
+    func sendPreview(
+        _ preview: IdentityCalibrationPreviewFrame,
+        generation: Int? = nil
+    ) async {
+        let sequence: PreviewSequence?
+        if let generation,
+           previewGenerations.indices.contains(generation) {
+            sequence = previewGenerations[generation]
+        } else {
+            sequence = currentPreviewGeneration
+        }
+        await sequence?.send(preview)
+    }
+
+    func finishPreview() async {
+        await currentPreviewGeneration?.finish()
+    }
+
     func releaseStart() {
         pendingStart?.resume()
         pendingStart = nil
@@ -994,6 +1191,80 @@ private actor RecordingIdentityCalibrationPort: IdentityCalibrationPort {
     private func cancelPendingStart() {
         pendingStart?.resume(throwing: CancellationError())
         pendingStart = nil
+    }
+}
+
+private actor PreviewSequence {
+    private var queue: [IdentityCalibrationPreviewFrame] = []
+    private var pending: CheckedContinuation<IdentityCalibrationPreviewFrame?, Never>?
+    private var ended = false
+
+    private var requests = AsyncStream<Void>.makeStream(
+        of: Void.self,
+        bufferingPolicy: .bufferingNewest(16)
+    )
+    private var exits = AsyncStream<Void>.makeStream(
+        of: Void.self,
+        bufferingPolicy: .bufferingNewest(1)
+    )
+
+    func stream() -> AsyncStream<IdentityCalibrationPreviewFrame> {
+        let state = self
+        return AsyncStream(unfolding: {
+            await state.next()
+        })
+    }
+
+    func next() async -> IdentityCalibrationPreviewFrame? {
+        guard !ended else {
+            exits.continuation.yield(())
+            return nil
+        }
+
+        requests.continuation.yield(())
+        if !queue.isEmpty {
+            return queue.removeFirst()
+        }
+
+        let value: IdentityCalibrationPreviewFrame? = await withCheckedContinuation {
+            (continuation: CheckedContinuation<IdentityCalibrationPreviewFrame?, Never>) in
+            if ended {
+                continuation.resume(returning: nil)
+            } else {
+                pending = continuation
+            }
+        }
+        if value == nil {
+            exits.continuation.yield(())
+        }
+        return value
+    }
+
+    func send(_ preview: IdentityCalibrationPreviewFrame) {
+        guard !ended else { return }
+        if let pending {
+            self.pending = nil
+            pending.resume(returning: preview)
+        } else {
+            queue = [preview]
+        }
+    }
+
+    func finish() {
+        guard !ended else { return }
+        ended = true
+        pending?.resume(returning: nil)
+        pending = nil
+    }
+
+    func waitForRequest() async {
+        var iterator = requests.stream.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    func waitForExit() async {
+        var iterator = exits.stream.makeAsyncIterator()
+        _ = await iterator.next()
     }
 }
 

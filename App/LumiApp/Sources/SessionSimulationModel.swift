@@ -157,8 +157,9 @@ final class SessionSimulationModel: ObservableObject {
 
     private let coordinator: AssistantSessionCoordinator
     private let hardware: MockHardwareControlPort
-    private let identity: MockIdentityRecognitionAdapter
+    private let manualIdentity: MockIdentityRecognitionAdapter?
     private let voiceSimulationControls: VoiceSimulationControls?
+    private let memberAddressResolver: @Sendable (MemberID) -> VoiceMemberAddress?
     private let onAuthorizationRequired: @MainActor () -> Void
     private let mapper: AvatarStateMapper
     private let eventMapper: AvatarEventCommandMapper
@@ -188,7 +189,32 @@ final class SessionSimulationModel: ObservableObject {
     private var actionTask: Task<Void, Never>?
     private var actionGeneration: UInt64 = 0
 
-    init(
+    private init(
+        coordinator: AssistantSessionCoordinator,
+        hardware: MockHardwareControlPort,
+        manualIdentity: MockIdentityRecognitionAdapter?,
+        voiceSimulationControls: VoiceSimulationControls? = nil,
+        memberAddressResolver: @escaping @Sendable (MemberID) ->
+            VoiceMemberAddress? = { _ in nil },
+        mapper: AvatarStateMapper = AvatarStateMapper(),
+        eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
+    ) {
+        self.coordinator = coordinator
+        self.hardware = hardware
+        self.manualIdentity = manualIdentity
+        self.voiceSimulationControls = voiceSimulationControls
+        self.memberAddressResolver = memberAddressResolver
+        self.onAuthorizationRequired = onAuthorizationRequired
+        self.mapper = mapper
+        self.eventMapper = eventMapper
+        self.assistantState = .idle
+        self.avatarState = mapper.map(.idle)
+        subscribeToStateUpdates()
+        subscribeToAuthorizationUpdates()
+    }
+
+    convenience init(
         coordinator: AssistantSessionCoordinator,
         hardware: MockHardwareControlPort,
         identity: MockIdentityRecognitionAdapter,
@@ -197,17 +223,39 @@ final class SessionSimulationModel: ObservableObject {
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
         onAuthorizationRequired: @escaping @MainActor () -> Void = {}
     ) {
-        self.coordinator = coordinator
-        self.hardware = hardware
-        self.identity = identity
-        self.voiceSimulationControls = voiceSimulationControls
-        self.onAuthorizationRequired = onAuthorizationRequired
-        self.mapper = mapper
-        self.eventMapper = eventMapper
-        self.assistantState = .idle
-        self.avatarState = mapper.map(.idle)
-        subscribeToStateUpdates()
-        subscribeToAuthorizationUpdates()
+        self.init(
+            coordinator: coordinator,
+            hardware: hardware,
+            manualIdentity: identity,
+            voiceSimulationControls: voiceSimulationControls,
+            mapper: mapper,
+            eventMapper: eventMapper,
+            onAuthorizationRequired: onAuthorizationRequired
+        )
+    }
+
+    /// Creates the live identity mode. The coordinator's injected identity
+    /// port owns recognition; no deterministic completion control is exposed.
+    convenience init(
+        coordinator: AssistantSessionCoordinator,
+        hardware: MockHardwareControlPort,
+        voiceSimulationControls: VoiceSimulationControls? = nil,
+        memberAddressResolver: @escaping @Sendable (MemberID) ->
+            VoiceMemberAddress? = { _ in nil },
+        mapper: AvatarStateMapper = AvatarStateMapper(),
+        eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
+    ) {
+        self.init(
+            coordinator: coordinator,
+            hardware: hardware,
+            manualIdentity: nil,
+            voiceSimulationControls: voiceSimulationControls,
+            memberAddressResolver: memberAddressResolver,
+            mapper: mapper,
+            eventMapper: eventMapper,
+            onAuthorizationRequired: onAuthorizationRequired
+        )
     }
 
     /// Keeps the existing Mock App composition source-compatible while the
@@ -289,6 +337,10 @@ final class SessionSimulationModel: ObservableObject {
 
     var canResolveVisitor: Bool {
         assistantState == .recognizing && pendingAction == nil
+    }
+
+    var hasManualIdentityControls: Bool {
+        manualIdentity != nil
     }
 
     /// Voice startup is legal only after identity resolution reaches greeting.
@@ -378,7 +430,7 @@ final class SessionSimulationModel: ObservableObject {
         pendingAction = .completingRotation
         let hardware = hardware
         Task {
-            await hardware.completeRotation()
+            await hardware.completeCurrentOrNextRotation()
         }
     }
 
@@ -389,11 +441,10 @@ final class SessionSimulationModel: ObservableObject {
     /// entirely inside this Simulator model; the UI only sees generic copy and
     /// a Presentation-owned event command.
     func resolveVisitor(_ choice: VisitorIdentityChoice) {
-        guard canResolveVisitor else { return }
+        guard canResolveVisitor, let identity = manualIdentity else { return }
         let operationID = beginAction(.resolvingVisitor)
 
         let coordinator = coordinator
-        let identity = identity
         actionTask = Task { [weak self] in
             let recognitionTask = Task {
                 try await coordinator.recognizeVisitor()
@@ -447,6 +498,37 @@ final class SessionSimulationModel: ObservableObject {
                         operationID: operationID
                     )
                 }
+            } catch {
+                guard !Task.isCancelled else {
+                    self?.finishAction(operationID)
+                    return
+                }
+                self?.failAction(
+                    message: "無法確認訪客身分，請再試一次。",
+                    operationID: operationID
+                )
+            }
+        }
+    }
+
+    /// Runs the coordinator's concrete identity port without Simulator result
+    /// injection. This is used only by the Debug-Live 44B pilot composition.
+    func recognizeVisitor() {
+        guard canResolveVisitor, manualIdentity == nil else { return }
+        let operationID = beginAction(.resolvingVisitor)
+        let coordinator = coordinator
+
+        actionTask = Task { [weak self] in
+            do {
+                let result = try await coordinator.recognizeVisitor()
+                guard !Task.isCancelled, let self else {
+                    self?.finishAction(operationID)
+                    return
+                }
+                self.applyRecognitionResult(result)
+                self.finishAction(operationID)
+            } catch is CancellationError {
+                self?.finishAction(operationID)
             } catch {
                 guard !Task.isCancelled else {
                     self?.finishAction(operationID)
@@ -785,8 +867,12 @@ final class SessionSimulationModel: ObservableObject {
 
     private func applyRecognitionResult(_ result: RecognitionResult) {
         switch result {
-        case .known:
-            visitorGreeting = "歡迎回來～"
+        case let .known(memberID, _):
+            if let memberAddress = memberAddressResolver(memberID) {
+                visitorGreeting = "\(memberAddress.spokenLabel)，歡迎回來～"
+            } else {
+                visitorGreeting = "歡迎回來～"
+            }
             pendingAvatarEvent = eventMapper.map(.memberRecognized)
         case .unknown:
             visitorGreeting = "嗨，歡迎妳！"

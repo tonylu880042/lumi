@@ -239,9 +239,105 @@ struct SessionSimulationModelTests {
         #expect(model.canSimulateVoiceFailure == false)
 
         model.startVoiceSession()
-        try #require(await waitUntilAsync { await voice.startCallCount > 0 })
+        await voice.waitForStartCall()
         try #require(await waitUntilCurrent { model.assistantState == .speaking })
         #expect(await voice.startCallCount == 1)
+    }
+
+    @Test("Automatic identity mode recognizes a known member and starts returning-member voice")
+    func automaticIdentityStartsReturningMemberVoice() async throws {
+        let hardware = MockHardwareControlPort()
+        let memberID = try MemberID(rawValue: "tony")
+        let confidence = try RecognitionConfidence(value: 0.78)
+        let identity = ImmediateIdentityRecognitionPort(
+            result: .known(memberID: memberID, confidence: confidence)
+        )
+        let voice = ImmediateVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            memberAddressResolver: { memberID in
+                try? VoiceMemberAddress(spokenLabel: memberID.rawValue)
+            }
+        )
+
+        try await moveToRecognizing(model: model, hardware: hardware)
+        #expect(model.hasManualIdentityControls == false)
+        model.recognizeVisitor()
+
+        try #require(await waitUntilCurrent {
+            model.assistantState == .greeting && model.pendingAction == nil
+        })
+        #expect(model.visitorGreeting == "tony，歡迎回來～")
+        #expect(await identity.callCount == 1)
+
+        model.startVoiceSession()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        #expect(await voice.startContexts == [.returningMember])
+    }
+
+    @Test("Automatic known identity without an approved address stays anonymous")
+    func automaticIdentityWithoutAddressStaysAnonymous() async throws {
+        let hardware = MockHardwareControlPort()
+        let memberID = try MemberID(rawValue: "private-member-id")
+        let confidence = try RecognitionConfidence(value: 0.78)
+        let identity = ImmediateIdentityRecognitionPort(
+            result: .known(memberID: memberID, confidence: confidence)
+        )
+        let voice = ImmediateVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil
+        )
+
+        try await moveToRecognizing(model: model, hardware: hardware)
+        model.recognizeVisitor()
+
+        try #require(await waitUntilCurrent {
+            model.assistantState == .greeting && model.pendingAction == nil
+        })
+        #expect(model.visitorGreeting == "歡迎回來～")
+    }
+
+    @Test("Automatic identity mode keeps an unknown visitor on generic voice")
+    func automaticIdentityStartsVisitorVoiceForUnknown() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil
+        )
+
+        try await moveToRecognizing(model: model, hardware: hardware)
+        model.recognizeVisitor()
+
+        try #require(await waitUntilCurrent {
+            model.assistantState == .greeting && model.pendingAction == nil
+        })
+        #expect(model.visitorGreeting == "嗨，歡迎妳！")
+
+        model.startVoiceSession()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        #expect(await voice.startContexts == [.visitor])
     }
 
     @Test("Authorization-required startup invokes routing exactly once")
@@ -268,7 +364,7 @@ struct SessionSimulationModelTests {
         try await moveToGreeting(model: model, hardware: hardware)
         model.startVoiceSession()
 
-        try #require(await waitUntilAsync { await voice.startCallCount > 0 })
+        await voice.waitForStartCall()
         try #require(await waitUntilCurrent { routing.requested > 0 })
         #expect(routing.requested == 1)
         #expect(model.errorMessage == nil)
@@ -298,7 +394,7 @@ struct SessionSimulationModelTests {
 
         try await moveToGreeting(model: model, hardware: hardware)
         model.startVoiceSession()
-        try #require(await waitUntilAsync { await voice.startCallCount > 0 })
+        await voice.waitForStartCall()
         try #require(await waitUntilCurrent { model.assistantState == .speaking })
 
         await voice.emit(.authorizationRequired)
@@ -336,7 +432,7 @@ struct SessionSimulationModelTests {
         try await moveToGreeting(model: model, hardware: hardware)
         model.startVoiceSession()
 
-        try #require(await waitUntilAsync { await voice.startCallCount > 0 })
+        await voice.waitForStartCall()
         try #require(await waitUntilCurrent {
             model.errorMessage == "語音啟動失敗，請再試一次。"
         })
@@ -370,6 +466,24 @@ private func moveToGreeting(
 }
 
 @MainActor
+private func moveToRecognizing(
+    model: SessionSimulationModel,
+    hardware: MockHardwareControlPort
+) async throws {
+    model.confirm(direction: .center)
+    try #require(await waitUntilCurrent {
+        model.assistantState == .detected(direction: .center) && model.pendingAction == nil
+    })
+
+    model.begin()
+    try #require(await waitUntilCurrent { model.assistantState == .rotating })
+    model.completeArrival()
+    try #require(await waitUntilCurrent {
+        model.assistantState == .recognizing && model.pendingAction == nil
+    })
+}
+
+@MainActor
 private func waitUntilCurrent(
     _ condition: @escaping @MainActor () -> Bool
 ) async -> Bool {
@@ -378,16 +492,6 @@ private func waitUntilCurrent(
         await Task.yield()
     }
     return condition()
-}
-
-private func waitUntilAsync(
-    _ condition: @escaping @Sendable () async -> Bool
-) async -> Bool {
-    for _ in 0..<128 {
-        if await condition() { return true }
-        await Task.yield()
-    }
-    return await condition()
 }
 
 private enum TestVoiceFailure: Error, Equatable, Sendable {
@@ -487,7 +591,9 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
 
     private let startBehavior: StartBehavior
     private(set) var startCallCount = 0
+    private(set) var startContexts: [VoiceContext] = []
     private var continuation: AsyncStream<VoiceSessionEvent>.Continuation?
+    private var startCallWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(startBehavior: StartBehavior = .success) {
         self.startBehavior = startBehavior
@@ -495,6 +601,12 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
 
     func start(context: VoiceContext) async throws {
         startCallCount += 1
+        startContexts.append(context)
+        let waiters = startCallWaiters
+        startCallWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
         switch startBehavior {
         case .success:
             return
@@ -502,6 +614,17 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
             throw VoiceSessionAuthorizationError.authorizationRequired
         case .ordinaryFailure:
             throw TestVoiceFailure.injected
+        }
+    }
+
+    func waitForStartCall() async {
+        if startCallCount > 0 { return }
+        await withCheckedContinuation { waiter in
+            if startCallCount > 0 {
+                waiter.resume()
+            } else {
+                startCallWaiters.append(waiter)
+            }
         }
     }
 
@@ -521,5 +644,19 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
     func stop() async {
         continuation?.finish()
         continuation = nil
+    }
+}
+
+private actor ImmediateIdentityRecognitionPort: IdentityRecognitionPort {
+    private let result: RecognitionResult
+    private(set) var callCount = 0
+
+    init(result: RecognitionResult) {
+        self.result = result
+    }
+
+    func recognizeCurrentVisitor() async throws -> RecognitionResult {
+        callCount += 1
+        return result
     }
 }

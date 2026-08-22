@@ -18,6 +18,35 @@ public enum VoiceConversationDirection: Equatable, Sendable {
     case postWorkoutReview
 }
 
+/// A deliberately narrow, provider-neutral label that voice may speak.
+///
+/// This value is not a member profile and carries no exercise, recognition,
+/// or biometric data. Its restricted alphabet keeps an enrollment identifier
+/// from becoming free-form prompt text at the provider boundary.
+public struct VoiceMemberAddress: Equatable, Sendable {
+    public let spokenLabel: String
+
+    public init(spokenLabel: String) throws(VoiceMemberAddressError) {
+        guard
+            !spokenLabel.isEmpty,
+            spokenLabel.count <= 32,
+            spokenLabel.allSatisfy({ character in
+                character.isLetter
+                    || character.isNumber
+            })
+        else {
+            throw VoiceMemberAddressError.invalid
+        }
+
+        self.spokenLabel = spokenLabel
+    }
+}
+
+/// Fixed, payload-free validation failure for a spoken member label.
+public enum VoiceMemberAddressError: Error, Equatable, Sendable {
+    case invalid
+}
+
 /// Semantic lifecycle events emitted by a voice session.
 ///
 /// Provider errors and payloads stay behind the Infrastructure adapter. The
@@ -54,6 +83,14 @@ public protocol VoiceSessionPort: Sendable {
         direction: VoiceConversationDirection
     ) async throws
 
+    /// Returns only after the voice session is ready, optionally allowing a
+    /// previously validated address label for a confirmed returning member.
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection,
+        memberAddress: VoiceMemberAddress?
+    ) async throws
+
     /// Registers an independent subscriber for subsequent semantic events.
     func eventUpdates() async -> AsyncStream<VoiceSessionEvent>
 
@@ -68,5 +105,15 @@ public extension VoiceSessionPort {
         direction _: VoiceConversationDirection
     ) async throws {
         try await start(context: context)
+    }
+
+    /// Existing ports remain anonymous until their composition explicitly
+    /// opts into the narrow member-address contract.
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection,
+        memberAddress _: VoiceMemberAddress?
+    ) async throws {
+        try await start(context: context, direction: direction)
     }
 }

@@ -13,6 +13,12 @@ actor IdentityCalibrationCameraFrameSource: IdentityCalibrationFrameSource {
         of: Void.self,
         bufferingPolicy: .bufferingNewest(4)
     )
+    private var previewStream: AsyncStream<CameraFrame>?
+    private var previewContinuation: AsyncStream<CameraFrame>.Continuation?
+    private var previewDeliverySignal = AsyncStream<Void>.makeStream(
+        of: Void.self,
+        bufferingPolicy: .bufferingNewest(16)
+    )
     private var running = false
 
     init(adapter: any IdentityCalibrationCameraAdapter) {
@@ -22,7 +28,21 @@ actor IdentityCalibrationCameraFrameSource: IdentityCalibrationFrameSource {
     func start() async throws {
         guard !running else { throw IdentityCalibrationError.failed }
         let stream = try await adapter.start()
-        let newCursor = IdentityCalibrationStreamCursor(stream: stream)
+        previewDeliverySignal = AsyncStream<Void>.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(16)
+        )
+        let preview = AsyncStream<CameraFrame>.makeStream(
+            of: CameraFrame.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let newCursor = IdentityCalibrationStreamCursor(
+            stream: stream,
+            previewContinuation: preview.continuation,
+            previewDeliverySignal: previewDeliverySignal.continuation
+        )
+        previewStream = preview.stream
+        previewContinuation = preview.continuation
         await newCursor.start()
         cursor = newCursor
         running = true
@@ -34,7 +54,29 @@ actor IdentityCalibrationCameraFrameSource: IdentityCalibrationFrameSource {
             await cursor.stop()
         }
         self.cursor = nil
+        previewContinuation?.finish()
+        previewContinuation = nil
+        previewStream = nil
+        previewDeliverySignal.continuation.finish()
         await adapter.stop()
+    }
+
+    /// Returns the current generation's bounded preview stream. Before start,
+    /// and after stop, this is an immediately finished stream.
+    func previewFrames() async -> AsyncStream<CameraFrame> {
+        guard let previewStream else {
+            return AsyncStream { continuation in
+                continuation.finish()
+            }
+        }
+        return previewStream
+    }
+
+    /// Deterministic DEBUG test handshake for a frame reaching the preview
+    /// continuation. It is not part of the Application port.
+    func waitForPreviewDelivery() async {
+        var iterator = previewDeliverySignal.stream.makeAsyncIterator()
+        _ = await iterator.next()
     }
 
     func nextFrame() async throws -> CameraFrame {
@@ -91,13 +133,21 @@ actor IdentityCalibrationCameraFrameSource: IdentityCalibrationFrameSource {
 
 private actor IdentityCalibrationStreamCursor {
     private let stream: AsyncStream<CameraFrame>
+    private let previewContinuation: AsyncStream<CameraFrame>.Continuation
+    private let previewDeliverySignal: AsyncStream<Void>.Continuation
     private var queue: [CameraFrame] = []
     private var pending: CheckedContinuation<CameraFrame?, Never>?
     private var ended = false
     private var worker: Task<Void, Never>?
 
-    init(stream: AsyncStream<CameraFrame>) {
+    init(
+        stream: AsyncStream<CameraFrame>,
+        previewContinuation: AsyncStream<CameraFrame>.Continuation,
+        previewDeliverySignal: AsyncStream<Void>.Continuation
+    ) {
         self.stream = stream
+        self.previewContinuation = previewContinuation
+        self.previewDeliverySignal = previewDeliverySignal
     }
 
     func start() {
@@ -125,6 +175,7 @@ private actor IdentityCalibrationStreamCursor {
         worker?.cancel()
         worker = nil
         queue.removeAll(keepingCapacity: false)
+        previewContinuation.finish()
         pending?.resume(returning: nil)
         pending = nil
     }
@@ -145,6 +196,8 @@ private actor IdentityCalibrationStreamCursor {
 
     private func receive(_ frame: CameraFrame) {
         guard !ended else { return }
+        _ = previewContinuation.yield(frame)
+        previewDeliverySignal.yield(())
         if let pending {
             self.pending = nil
             pending.resume(returning: frame)
@@ -156,6 +209,7 @@ private actor IdentityCalibrationStreamCursor {
 
     private func finish() {
         ended = true
+        previewContinuation.finish()
         pending?.resume(returning: nil)
         pending = nil
     }

@@ -2,7 +2,7 @@
 
 > File: `roadmap.md`
 > Status: Active
-> Last updated: 2026-08-21
+> Last updated: 2026-08-22
 > Development principles: Clean Architecture + TDD + Ask-if-Unclear
 
 ## 1. Roadmap Goal
@@ -1067,6 +1067,12 @@ Milestone 3      Vision + Core ML Identity Recognition
                  ├─ Member Matching
                  ├─ Confidence / Unknown Policy
                  └─ Enrollment
+
+                 44B Debug-Live pilot: 0.70 top-1, 0.20 margin,
+                 2-of-3 fresh observations → returning-member voice context;
+                 safe enrollment ID may be a temporary spoken address in
+                 Debug-Live only (owner Option A, 2026-08-22).
+                 Production thresholds and CMS identity binding remain pending.
 
 Milestone 4      Real Curves Member API
 Milestone 5      Integrated Store MVP

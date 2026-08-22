@@ -32,6 +32,11 @@ Keep `LumiApp` on Mock dependencies. Add a separately installable
 `com.curves.lumi.live`. Live uses real voice with mock hardware and identity.
 There is no runtime mode switch and no automatic fallback to Mock.
 
+Subsequent owner amendment (44B, 2026-08-22): Debug-Live may replace only the
+mock identity dependency with the local camera/Vision/Core ML/SQLite pilot.
+Release-Live keeps anonymous/mock identity composition. This does not alter the
+real-voice boundary, broker request, device authorization, or fallback policy.
+
 **32A — Live configuration failure:** If the Live endpoint or environment is
 missing or malformed at composition time, the app shows only
 `語音服務尚未完成設定，請聯絡管理員。` It must not present setup/token UI,
@@ -50,6 +55,13 @@ Provision each environment/iPad with a random 256-bit base64url token. Store
 the raw value only in a this-device-only Keychain item. Store only SHA-256
 digests in the Vercel allowlist. Environment updates and redeployment add or
 revoke devices; no database or administrative UI is introduced.
+
+On 2026-08-22, the product owner simplified the single-operator setup UX. The
+App now accepts the one-time raw value only through SwiftUI's native paste
+control after an explicit tap and immediately runs the existing validation and
+Keychain save. It has no 43-character manual input field, token display, QR
+flow, bundled credential, or new server-side activation system. This changes
+only provisioning interaction; the broker authorization boundary is unchanged.
 
 Revocation removes the digest from the allowlist. The broker keeps no revoked
 digest or denylist and returns the same `401 unauthorized` response for a
@@ -103,9 +115,23 @@ The broker request is bodyless and carries only the device Bearer token. It
 does not receive member IDs, names, recognition results, face data, embeddings,
 audio, transcripts, instructions, or model selection.
 
-After connection, the approved App still sends only the existing generic
-returning-member/visitor greeting context directly to OpenAI. Local member
-feature storage remains a later Identity milestone decision.
+Before the following owner amendment, the approved App sent only the existing
+generic returning-member/visitor greeting context directly to OpenAI. Local
+member feature storage remains a later Identity milestone decision.
+
+Amendment (2026-08-22): the owner approved a Debug-Live-only 44B field-pilot
+exception. For a locally confirmed returning member, App composition may send
+one `VoiceMemberAddress.spokenLabel` directly to OpenAI. The label accepts only
+1–32 Unicode letters/numbers; unsafe, unknown, unmapped, and Release
+paths remain anonymous. This does not send recognition confidence, biometric
+features, profile fields, visit history, or exercise data and does not create a
+member-management binding. The broker request remains bodyless and receives
+none of this label or other member data.
+
+The same validated label may appear in Debug-Live's local recognition
+confirmation as `<spokenLabel>，歡迎回來～`, so the operator can verify the
+identity-to-voice handoff before starting audio. Missing/unsafe labels,
+unknown visitors, and Release remain anonymous.
 
 ## Alternatives Considered
 

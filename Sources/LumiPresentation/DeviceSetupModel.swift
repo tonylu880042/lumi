@@ -1,3 +1,4 @@
+import Foundation
 import LumiApplication
 import Observation
 
@@ -13,8 +14,8 @@ public enum DeviceSetupState: Equatable, Sendable {
 /// Presentation-owned setup state for the active device-authorization store.
 ///
 /// The model never loads a stored token for display. `tokenInput` is only the
-/// transient value currently being edited by the setup view and is cleared at
-/// the approved success, reset, and cancellation boundaries.
+/// transient value supplied by the system paste control and is cleared at the
+/// approved success, reset, and cancellation boundaries.
 @MainActor
 @Observable
 public final class DeviceSetupModel {
@@ -78,6 +79,16 @@ public final class DeviceSetupModel {
         } catch {
             state = .failure(message: Self.retryableFailureMessage)
         }
+    }
+
+    /// Saves a value delivered by the system paste control without requiring
+    /// the user to manually edit the authorization field.
+    public func savePastedAuthorization(_ rawValue: String) async {
+        guard state != .loading, state != .saving else { return }
+
+        tokenInput = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        await save()
+        tokenInput = ""
     }
 
     /// Requests confirmation before deleting the active environment's token.

@@ -50,11 +50,44 @@ public struct DebugIdentityCalibrationEvidence: Equatable, Sendable {
     }
 }
 
+/// Presentation-owned transient camera preview value.
+///
+/// The bytes are immutable, upright, non-mirrored BGRA8 data supplied only for
+/// the active DEBUG preview. This model does not persist, log, or encode the
+/// bytes.
+public struct DebugIdentityCalibrationPreviewFrame: Equatable, Sendable {
+    public let bgraBytes: Data
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+
+    public init(
+        bgraBytes: Data,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int
+    ) {
+        self.bgraBytes = bgraBytes
+        self.width = width
+        self.height = height
+        self.bytesPerRow = bytesPerRow
+    }
+
+    public init(preview: IdentityCalibrationPreviewFrame) {
+        self.init(
+            bgraBytes: preview.bgraBytes,
+            width: preview.width,
+            height: preview.height,
+            bytesPerRow: preview.bytesPerRow
+        )
+    }
+}
+
 /// DEBUG-only Presentation model for manual identity calibration.
 ///
-/// It exposes only editable IDs, sample counts, and score evidence. Camera,
-/// Vision, Core ML, SQLite, embeddings, and recognition-policy diagnostics
-/// remain behind `IdentityCalibrationPort`.
+/// It exposes only editable IDs, transient preview metadata, sample counts,
+/// and score evidence. Camera, Vision, Core ML, SQLite, embeddings, and
+/// recognition-policy diagnostics remain behind `IdentityCalibrationPort`.
 @MainActor
 @Observable
 public final class DebugIdentityCalibrationModel {
@@ -70,6 +103,7 @@ public final class DebugIdentityCalibrationModel {
     public private(set) var selectedMemberID: String?
     public private(set) var selectedSampleCount = 0
     public private(set) var scoreEvidence: DebugIdentityCalibrationEvidence?
+    public private(set) var previewFrame: DebugIdentityCalibrationPreviewFrame?
     public private(set) var statusMessage: String?
     public private(set) var isResetConfirmationPresented = false
 
@@ -82,6 +116,12 @@ public final class DebugIdentityCalibrationModel {
     @ObservationIgnored
     private var stopRequested = false
 
+    @ObservationIgnored
+    private var previewObservationTask: Task<Void, Never>?
+
+    @ObservationIgnored
+    private var previewGeneration: UInt64 = 0
+
     public init(port: any IdentityCalibrationPort) {
         self.port = port
     }
@@ -92,6 +132,7 @@ public final class DebugIdentityCalibrationModel {
     public func startCamera() async {
         guard !operationInFlight, canStart else { return }
 
+        resetPreviewObservation()
         operationInFlight = true
         stopRequested = false
         state = .starting
@@ -110,15 +151,22 @@ public final class DebugIdentityCalibrationModel {
                 state = .stopped
             } else {
                 state = .ready
+                let previewStream = await port.previewFrames()
+                observePreview(
+                    previewStream,
+                    generation: previewGeneration
+                )
             }
         } catch let cancellation as CancellationError {
             _ = cancellation
             await stopAfterCancellation()
         } catch {
             if stopRequested || Task.isCancelled {
+                resetPreviewObservation()
                 state = .stopped
                 statusMessage = nil
             } else {
+                resetPreviewObservation()
                 state = .error(message: Self.genericFailureMessage)
                 statusMessage = nil
             }
@@ -129,6 +177,7 @@ public final class DebugIdentityCalibrationModel {
     /// next frame. Selection and score evidence remain available for review.
     public func stopCamera() async {
         stopRequested = true
+        resetPreviewObservation()
         isResetConfirmationPresented = false
         statusMessage = nil
         state = .stopped
@@ -165,6 +214,24 @@ public final class DebugIdentityCalibrationModel {
             state = stateBeforeQuery
             statusMessage = Self.genericFailureMessage
         }
+    }
+
+    /// Confirms the editable member ID, refreshes its stored sample count, and
+    /// starts the camera only after that identity context is ready. The result
+    /// lets the DEBUG App advance to capture without inferring from transient
+    /// lifecycle states.
+    @discardableResult
+    public func confirmMemberAndStartCamera() async -> Bool {
+        let requestedMemberID = memberIDInput
+        await selectTemporaryMember()
+
+        guard selectedMemberID == requestedMemberID,
+              statusMessage == nil else {
+            return false
+        }
+
+        await startCamera()
+        return state == .ready
     }
 
     /// Captures one fresh enrollment sample for the selected temporary ID.
@@ -384,12 +451,45 @@ public final class DebugIdentityCalibrationModel {
     }
 
     private func stopAfterCancellation() async {
+        resetPreviewObservation()
         if !stopRequested {
             stopRequested = true
             await port.stopCamera()
         }
         state = .stopped
         statusMessage = nil
+    }
+
+    private func observePreview(
+        _ stream: AsyncStream<IdentityCalibrationPreviewFrame>,
+        generation: UInt64
+    ) {
+        previewObservationTask?.cancel()
+        previewObservationTask = Task { @MainActor [weak self] in
+            for await preview in stream {
+                guard !Task.isCancelled, let self,
+                      self.previewGeneration == generation else {
+                    return
+                }
+                self.previewFrame = DebugIdentityCalibrationPreviewFrame(
+                    preview: preview
+                )
+            }
+
+            guard let self,
+                  self.previewGeneration == generation else {
+                return
+            }
+            self.previewFrame = nil
+            self.previewObservationTask = nil
+        }
+    }
+
+    private func resetPreviewObservation() {
+        previewGeneration &+= 1
+        previewObservationTask?.cancel()
+        previewObservationTask = nil
+        previewFrame = nil
     }
 
     private static func mapEvidence(

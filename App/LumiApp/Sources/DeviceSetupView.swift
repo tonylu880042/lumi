@@ -9,10 +9,7 @@ import LumiPresentation
 struct DeviceSetupViewIntent: Equatable, Sendable {
     let title: String
     let instructions: String
-    let secureFieldPrompt: String
-    let secureFieldAccessibilityLabel: String
-    let secureFieldAccessibilityValue: String
-    let saveLabel: String
+    let pasteButtonAccessibilityLabel: String
     let reconfigureLabel: String
     let resetLabel: String
     let resetConfirmationTitle: String
@@ -24,10 +21,7 @@ struct DeviceSetupViewIntent: Equatable, Sendable {
         [
             title,
             instructions,
-            secureFieldPrompt,
-            secureFieldAccessibilityLabel,
-            secureFieldAccessibilityValue,
-            saveLabel,
+            pasteButtonAccessibilityLabel,
             reconfigureLabel,
             resetLabel,
             resetConfirmationTitle,
@@ -39,18 +33,15 @@ struct DeviceSetupViewIntent: Equatable, Sendable {
 
 /// First-run device authorization screen.
 ///
-/// SwiftUI owns only transient field editing and Presentation actions. It
-/// never reaches into Keychain, URLSession, or any other adapter directly.
+/// SwiftUI receives a transient value only through the system paste control
+/// and forwards it to Presentation. It never reaches into Keychain,
+/// URLSession, or any other adapter directly.
 @MainActor
 struct DeviceSetupView: View {
     static let viewIntent = DeviceSetupViewIntent(
         title: "裝置設定",
-        instructions: "請貼上此裝置的授權值以啟用語音。",
-        secureFieldPrompt: "裝置授權",
-        secureFieldAccessibilityLabel: "裝置授權輸入",
-        // A secure input must not expose its current value to VoiceOver.
-        secureFieldAccessibilityValue: "",
-        saveLabel: "儲存",
+        instructions: "先複製此裝置的授權值，再按下「貼上」啟用語音。",
+        pasteButtonAccessibilityLabel: "從剪貼簿啟用語音",
         reconfigureLabel: "重新設定",
         resetLabel: "解除裝置設定",
         resetConfirmationTitle: "解除裝置設定？",
@@ -101,23 +92,6 @@ struct DeviceSetupView: View {
                         .font(.body)
                         .foregroundStyle(.secondary)
 
-                    SecureField(
-                        Self.viewIntent.secureFieldPrompt,
-                        text: $model.tokenInput
-                    )
-                    .textContentType(.password)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityLabel(
-                        Text(Self.viewIntent.secureFieldAccessibilityLabel)
-                    )
-                    .accessibilityValue(
-                        Text(Self.viewIntent.secureFieldAccessibilityValue)
-                    )
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 12))
-
                     if let message {
                         Text(message)
                             .font(.callout)
@@ -130,15 +104,19 @@ struct DeviceSetupView: View {
                             .accessibilityLabel(Text("正在儲存裝置設定"))
                     }
 
-                    Button {
-                        Task { await model.save() }
-                    } label: {
-                        Text(Self.viewIntent.saveLabel)
-                            .frame(maxWidth: .infinity)
+                    PasteButton(payloadType: String.self) { values in
+                        guard let rawValue = values.first else { return }
+                        Task {
+                            await model.savePastedAuthorization(rawValue)
+                        }
                     }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .disabled(isSaving)
-                    .accessibilityIdentifier("device-setup-save")
+                    .accessibilityLabel(
+                        Text(Self.viewIntent.pasteButtonAccessibilityLabel)
+                    )
+                    .accessibilityIdentifier("device-setup-paste")
 
                     if showsReconfiguration {
                         Button(Self.viewIntent.reconfigureLabel) {

@@ -163,16 +163,27 @@ struct AppRootRoutingTests {
         #expect(await store.storedToken == token)
     }
 
-    @Test("setup view intent is secure and contains no QR or token accessibility value")
-    func setupViewIntentIsTokenFree() {
+    @Test("setup view intent uses one-tap paste and exposes no token")
+    func setupViewIntentUsesOneTapPaste() {
         let intent = DeviceSetupView.viewIntent
         let accessibilityText = intent.accessibilityLabels.joined(separator: " ")
 
-        #expect(intent.secureFieldAccessibilityValue.isEmpty)
+        #expect(intent.instructions == "先複製此裝置的授權值，再按下「貼上」啟用語音。")
+        #expect(intent.pasteButtonAccessibilityLabel == "從剪貼簿啟用語音")
         #expect(intent.includesQRCodeAffordance == false)
         #expect(accessibilityText.contains(validToken) == false)
         #expect(accessibilityText.contains(marker) == false)
         #expect(accessibilityText.localizedCaseInsensitiveContains("qr") == false)
+    }
+
+    @Test("ready screen keeps device reset and session controls in separate corners")
+    func readyScreenSeparatesTopControls() {
+        #expect(AppOverlayLayout.deviceSetupControl == .topLeading)
+        #expect(AppOverlayLayout.sessionControls == .topTrailing)
+        #expect(
+            AppOverlayLayout.deviceSetupControl
+                != AppOverlayLayout.sessionControls
+        )
     }
 
     private var markerView: some View {
