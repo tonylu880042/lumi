@@ -1,3 +1,4 @@
+import Combine
 import LumiDomain
 import LumiApplication
 import LumiInfrastructure
@@ -340,6 +341,193 @@ struct SessionSimulationModelTests {
         #expect(await voice.startContexts == [.visitor])
     }
 
+    @Test("continuous experience recognizes, greets, and starts voice without manual controls")
+    func continuousExperienceGreetsAutomatically() async throws {
+        let hardware = MockHardwareControlPort()
+        let memberID = try MemberID(rawValue: "ruby")
+        let identity = ImmediateIdentityRecognitionPort(
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.82)
+            )
+        )
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            memberAddressResolver: { candidate in
+                candidate == memberID
+                    ? try? VoiceMemberAddress(spokenLabel: "Ruby")
+                    : nil
+            },
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+
+        try #require(await waitUntilCurrent {
+            model.assistantState == .speaking
+        })
+        #expect(model.visitorGreeting == "Ruby，歡迎回來～")
+        #expect(await identity.callCount == 1)
+        #expect(await voice.startContexts == [.returningMember])
+        #expect(model.isContinuousExperienceRunning)
+    }
+
+    @Test("ten-second departure result ends the session and rearms recognition")
+    func continuousExperienceRearmsAfterDeparture() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        await presence.waitForDepartureRequest()
+        await presence.signalDeparture()
+
+        try #require(await waitUntilCurrent { model.assistantState == .idle })
+        await presence.waitForArrivalRequest(count: 2)
+        #expect(await voice.startContexts == [.visitor])
+        #expect(await hardware.returnHomeCallCount == 1)
+    }
+
+    @Test("a stopped continuous generation cannot clear a freshly restarted loop")
+    func stoppedContinuousGenerationCannotClearRestart() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let presence = DeferredStopVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest(count: 1)
+        model.stopContinuousExperience()
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest(count: 2)
+
+        await presence.releaseFirstArrivalAsCancellation()
+        await presence.waitForStopCall(count: 2)
+        for _ in 0..<32 { await Task.yield() }
+        #expect(model.isContinuousExperienceRunning)
+
+        model.stopContinuousExperience()
+        await presence.releaseAllArrivalsAsCancellation()
+    }
+
+    @Test("continuous restart waits for presence teardown before a new visitor wait")
+    func continuousRestartWaitsForPresenceTeardown() async throws {
+        let source = SerializedRestartPresenceSource()
+        let presence = PilotVisitorPresenceMonitor(
+            source: source,
+            departureAbsenceDuration: .seconds(10)
+        )
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await source.waitForCapture(count: 1)
+
+        model.stopContinuousExperience()
+        model.startContinuousExperience()
+        await source.waitForStopCall(count: 1)
+
+        for _ in 0..<128 { await Task.yield() }
+        #expect(await source.captureCount == 1)
+        #expect(await source.startCount == 1)
+
+        await source.releaseFirstStop()
+        #expect(await source.waitForStart(count: 2))
+
+        #expect(await source.captureCount == 2)
+        #expect(await source.startCount == 2)
+        #expect(await source.overlapDetected == false)
+
+        model.stopContinuousExperience()
+        await source.releaseAllCapturesAsCancellation()
+    }
+
+    @Test("automatic departure failure returns home before offering retry")
+    func continuousDepartureFailureReturnsHome() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        await presence.waitForDepartureRequest()
+        let stopped = Task { @MainActor in
+            for await running in model.$isContinuousExperienceRunning.values {
+                if !running { return }
+            }
+        }
+        await presence.failDeparture()
+        await presence.waitForStopCall()
+        await stopped.value
+
+        #expect(model.errorMessage != nil)
+        #expect(model.assistantState == .idle)
+        #expect(await hardware.returnHomeCallCount == 1)
+    }
+
     @Test("Authorization-required startup invokes routing exactly once")
     func authorizationRequiredRoutesExactlyOnce() async throws {
         let hardware = MockHardwareControlPort()
@@ -487,7 +675,10 @@ private func moveToRecognizing(
 private func waitUntilCurrent(
     _ condition: @escaping @MainActor () -> Bool
 ) async -> Bool {
-    for _ in 0..<128 {
+    // The full App test target runs multiple Swift Testing suites in parallel.
+    // Keep this bounded while allowing the coordinator and its state-stream
+    // consumer enough executor turns under that load.
+    for _ in 0..<4_096 {
         if condition() { return true }
         await Task.yield()
     }
@@ -542,7 +733,7 @@ private actor MockControlsRecorder {
 
     func waitForCompleteStartCall() async -> Bool {
         var iterator = completeStartCallIterator
-        let event = await iterator.next()
+        let event: Void? = await iterator.next()
         completeStartCallIterator = iterator
         return event != nil
     }
@@ -659,4 +850,224 @@ private actor ImmediateIdentityRecognitionPort: IdentityRecognitionPort {
         callCount += 1
         return result
     }
+}
+
+private actor ControlledVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
+    private var arrivalContinuation: CheckedContinuation<Void, Error>?
+    private var departureContinuation: CheckedContinuation<Void, Error>?
+    private var arrivalRequestCount = 0
+    private var arrivalWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var departureWaiters: [CheckedContinuation<Void, Never>] = []
+    private var stopCallCount = 0
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitForVisitor() async throws {
+        arrivalRequestCount += 1
+        let ready = arrivalWaiters.filter { arrivalRequestCount >= $0.0 }
+        arrivalWaiters.removeAll { arrivalRequestCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+        try await withCheckedThrowingContinuation { arrivalContinuation = $0 }
+    }
+
+    func waitForDeparture() async throws {
+        for waiter in departureWaiters { waiter.resume() }
+        departureWaiters.removeAll()
+        try await withCheckedThrowingContinuation { departureContinuation = $0 }
+    }
+
+    func stop() async {
+        stopCallCount += 1
+        let ready = stopWaiters
+        stopWaiters.removeAll()
+        for waiter in ready { waiter.resume() }
+        arrivalContinuation?.resume(throwing: CancellationError())
+        arrivalContinuation = nil
+        departureContinuation?.resume(throwing: CancellationError())
+        departureContinuation = nil
+    }
+
+    func waitForArrivalRequest(count: Int = 1) async {
+        if arrivalRequestCount >= count { return }
+        await withCheckedContinuation { arrivalWaiters.append((count, $0)) }
+    }
+
+    func waitForDepartureRequest() async {
+        if departureContinuation != nil { return }
+        await withCheckedContinuation { departureWaiters.append($0) }
+    }
+
+    func waitForStopCall() async {
+        if stopCallCount > 0 { return }
+        await withCheckedContinuation { stopWaiters.append($0) }
+    }
+
+    func signalArrival() {
+        arrivalContinuation?.resume()
+        arrivalContinuation = nil
+    }
+
+    func signalDeparture() {
+        departureContinuation?.resume()
+        departureContinuation = nil
+    }
+
+    func failDeparture() {
+        departureContinuation?.resume(throwing: TestVoiceFailure.injected)
+        departureContinuation = nil
+    }
+}
+
+private actor DeferredStopVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
+    private var arrivalContinuations: [CheckedContinuation<Void, Error>] = []
+    private var arrivalRequestCount = 0
+    private var arrivalWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var stopCallCount = 0
+    private var stopWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func waitForVisitor() async throws {
+        arrivalRequestCount += 1
+        let ready = arrivalWaiters.filter { arrivalRequestCount >= $0.0 }
+        arrivalWaiters.removeAll { arrivalRequestCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+        try await withCheckedThrowingContinuation {
+            arrivalContinuations.append($0)
+        }
+    }
+
+    func waitForDeparture() async throws {
+        throw CancellationError()
+    }
+
+    func stop() async {
+        stopCallCount += 1
+        let ready = stopWaiters.filter { stopCallCount >= $0.0 }
+        stopWaiters.removeAll { stopCallCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+    }
+
+    func waitForArrivalRequest(count: Int) async {
+        if arrivalRequestCount >= count { return }
+        await withCheckedContinuation { arrivalWaiters.append((count, $0)) }
+    }
+
+    func waitForStopCall(count: Int) async {
+        if stopCallCount >= count { return }
+        await withCheckedContinuation { stopWaiters.append((count, $0)) }
+    }
+
+    func releaseFirstArrivalAsCancellation() {
+        guard !arrivalContinuations.isEmpty else { return }
+        arrivalContinuations.removeFirst().resume(throwing: CancellationError())
+    }
+
+    func releaseAllArrivalsAsCancellation() {
+        let continuations = arrivalContinuations
+        arrivalContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+}
+
+private actor SerializedRestartPresenceSource: PilotVisitorPresenceEvidenceSource {
+    private var cameraRunning = false
+    private var captureInProgress = false
+    private var firstStopReleased = false
+    private var firstStopContinuations: [CheckedContinuation<Void, Never>] = []
+    private var captureContinuations: [CheckedContinuation<Bool, Error>] = []
+    private var captureWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var stopWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    private(set) var startCount = 0
+    private(set) var captureCount = 0
+    private(set) var stopCallCount = 0
+    private(set) var overlapDetected = false
+
+    func startCamera() async throws {
+        guard !cameraRunning else {
+            overlapDetected = true
+            throw SerializedRestartPresenceSourceError.overlap
+        }
+        cameraRunning = true
+        startCount += 1
+    }
+
+    func stopCamera() async {
+        stopCallCount += 1
+        let ready = stopWaiters.filter { stopCallCount >= $0.0 }
+        stopWaiters.removeAll { stopCallCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+
+        if !firstStopReleased {
+            await withCheckedContinuation {
+                firstStopContinuations.append($0)
+            }
+        }
+
+        cameraRunning = false
+        let captures = captureContinuations
+        captureContinuations.removeAll()
+        for continuation in captures {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    func captureUsableFace() async throws -> Bool {
+        guard cameraRunning, !captureInProgress else {
+            overlapDetected = true
+            throw SerializedRestartPresenceSourceError.overlap
+        }
+        captureInProgress = true
+        captureCount += 1
+        let ready = captureWaiters.filter { captureCount >= $0.0 }
+        captureWaiters.removeAll { captureCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+        defer { captureInProgress = false }
+
+        return try await withCheckedThrowingContinuation {
+            captureContinuations.append($0)
+        }
+    }
+
+    func waitForCapture(count: Int) async {
+        if captureCount >= count { return }
+        await withCheckedContinuation {
+            captureWaiters.append((count, $0))
+        }
+    }
+
+    func waitForStart(count: Int, timeout: Duration = .seconds(1)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while startCount < count {
+            if ContinuousClock.now >= deadline { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    func waitForStopCall(count: Int) async {
+        if stopCallCount >= count { return }
+        await withCheckedContinuation {
+            stopWaiters.append((count, $0))
+        }
+    }
+
+    func releaseFirstStop() {
+        firstStopReleased = true
+        let continuations = firstStopContinuations
+        firstStopContinuations.removeAll()
+        for continuation in continuations { continuation.resume() }
+    }
+
+    func releaseAllCapturesAsCancellation() {
+        let continuations = captureContinuations
+        captureContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+}
+
+private enum SerializedRestartPresenceSourceError: Error {
+    case overlap
 }

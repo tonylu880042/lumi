@@ -84,11 +84,14 @@ struct AppRootView<ReadyContent: View>: View {
             readyContent
 
 #if DEBUG
-            Button(DeviceSetupView.viewIntent.resetLabel) {
+            Button {
                 setupModel.requestReset()
+            } label: {
+                Image(systemName: "gearshape")
             }
             .buttonStyle(.bordered)
             .padding(16)
+            .accessibilityLabel(DeviceSetupView.viewIntent.resetLabel)
             .accessibilityIdentifier("device-setup-reset")
 #endif
         }

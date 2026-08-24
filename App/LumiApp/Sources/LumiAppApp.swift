@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiApplication
+import LumiDomain
 import LumiInfrastructure
 import LumiPresentation
 
@@ -96,7 +97,10 @@ struct AppCompositionFactory {
             )
             let voiceConfiguration: OpenAIRealtimeConfiguration
             let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
+            let visitorEnrollmentToolCallConfiguration:
+                VisitorEnrollmentToolCallSessionConfiguration?
             let enablesWeeklySummaryTool: Bool
+            let enablesVisitorEnrollmentTools: Bool
 #if DEBUG
             let baseConfiguration = OpenAIRealtimeConfiguration()
             let repository = try DebugMemberFixture.makeRepository()
@@ -108,15 +112,18 @@ struct AppCompositionFactory {
                     + DebugMemberFixture.promptAddition
             )
             enablesWeeklySummaryTool = true
+            enablesVisitorEnrollmentTools = true
 #else
             voiceConfiguration = OpenAIRealtimeConfiguration()
             enablesWeeklySummaryTool = false
+            enablesVisitorEnrollmentTools = false
 #endif
             let voice = OpenAIRealtimeAdapter(
                 configuration: voiceConfiguration,
                 clientSecretSource: source,
                 transportFactory: OpenAIWebRTCTransportFactory(),
-                enablesWeeklySummaryTool: enablesWeeklySummaryTool
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
             )
 
 #if DEBUG
@@ -126,31 +133,58 @@ struct AppCompositionFactory {
                     repository: repository
                 )
             )
+            let identityServiceLoader = AppCoreMLIdentityServiceLoader()
+            let visitorEnrollment = AppVisitorEnrollmentPortProxy {
+                try await identityServiceLoader.load()
+            }
+            visitorEnrollmentToolCallConfiguration =
+                VisitorEnrollmentToolCallSessionConfiguration(
+                    port: voice,
+                    enrollmentPort: visitorEnrollment
+                )
 #else
             voiceToolCallConfiguration = nil
+            visitorEnrollmentToolCallConfiguration = nil
 #endif
 
             let hardware = MockHardwareControlPort()
 #if DEBUG
-            let identity = AppPilotIdentityRecognitionComposition.makePort()
+            let identity = AppPilotIdentityRecognitionComposition.makePort {
+                let service = try await identityServiceLoader.load()
+                return PilotIdentityRecognitionAdapter(source: service)
+            }
+            let visitorPresence = AppVisitorPresenceMonitoringPortProxy {
+                let service = try await identityServiceLoader.load()
+                return PilotVisitorPresenceMonitor(
+                    source: service,
+                    departureAbsenceDuration: .seconds(10)
+                )
+            }
+            let memberAddressResolver:
+                @Sendable (MemberID) async -> VoiceMemberAddress? = { memberID in
+                    if let storedAddress = try? await visitorEnrollment.address(
+                        for: memberID
+                    ) {
+                        return storedAddress
+                    }
+                    return AppPilotIdentityRecognitionComposition
+                        .voiceMemberAddress(for: memberID)
+                }
             let coordinator = AssistantSessionCoordinator(
                 hardware: hardware,
                 identity: identity,
                 voice: voice,
-                memberAddressResolver: { memberID in
-                    AppPilotIdentityRecognitionComposition
-                        .voiceMemberAddress(for: memberID)
-                },
-                voiceToolCallConfiguration: voiceToolCallConfiguration
+                memberAddressResolver: memberAddressResolver,
+                voiceToolCallConfiguration: voiceToolCallConfiguration,
+                visitorEnrollmentToolCallConfiguration:
+                    visitorEnrollmentToolCallConfiguration
             )
             let simulationModel = SessionSimulationModel(
                 coordinator: coordinator,
                 hardware: hardware,
                 voiceSimulationControls: nil,
-                memberAddressResolver: { memberID in
-                    AppPilotIdentityRecognitionComposition
-                        .voiceMemberAddress(for: memberID)
-                },
+                memberAddressResolver: memberAddressResolver,
+                visitorPresenceMonitor: visitorPresence,
                 onAuthorizationRequired: {
                     setupModel.authorizationInvalidated()
                 }

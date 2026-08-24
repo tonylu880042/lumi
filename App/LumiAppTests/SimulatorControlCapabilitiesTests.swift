@@ -6,6 +6,40 @@ import LumiInfrastructure
 
 @Suite("Simulator voice control capabilities")
 struct SimulatorControlCapabilitiesTests {
+    @Test("continuous experience starts on appearance and hides manual pilot controls")
+    func continuousExperienceOwnsTheReadyAvatar() throws {
+        let contentSource = try source(named: "ContentView.swift")
+
+        #expect(contentSource.contains("simulationModel.startContinuousExperience()"))
+        #expect(contentSource.contains("simulationModel.stopContinuousExperience()"))
+        #expect(contentSource.contains("if !simulationModel.supportsContinuousExperience"))
+        #expect(contentSource.contains("simulationModel.isContinuousExperienceRunning"))
+        #expect(contentSource.contains("重新開始辨識"))
+        #expect(contentSource.contains("alignment: .bottomLeading"))
+        #expect(
+            !contentSource.contains(
+                "simulationModel.supportsContinuousExperience ? .topTrailing : .bottomLeading"
+            )
+        )
+    }
+
+    @Test("Debug-Live hides manual calibration while Mock Debug keeps it")
+    @MainActor
+    func calibrationEntryFollowsContinuousExperienceBoundary() {
+        #expect(ContentView.shouldShowCalibrationEntry(
+            hasCalibrationModel: true,
+            supportsContinuousExperience: false
+        ))
+        #expect(!ContentView.shouldShowCalibrationEntry(
+            hasCalibrationModel: true,
+            supportsContinuousExperience: true
+        ))
+        #expect(!ContentView.shouldShowCalibrationEntry(
+            hasCalibrationModel: false,
+            supportsContinuousExperience: false
+        ))
+    }
+
     @Test("Conversation direction picker stays inside the Debug-Live boundary")
     func conversationDirectionPickerIsDebugLiveOnly() throws {
         let controlsSource = try source(named: "SimulatorControlsView.swift")

@@ -187,6 +187,148 @@ actor AppPilotIdentityRecognitionPortProxy: IdentityRecognitionPort {
     }
 }
 
+/// Lazy DEBUG-Live bridge for the continuous visitor-presence loop.
+/// Loading begins only when the ready Avatar asks for its first visitor.
+actor AppVisitorPresenceMonitoringPortProxy: VisitorPresenceMonitoringPort {
+    typealias Loader = @Sendable () async throws -> any VisitorPresenceMonitoringPort
+
+    private let loader: Loader
+    private var cachedPort: (any VisitorPresenceMonitoringPort)?
+    private var loadingTask: Task<any VisitorPresenceMonitoringPort, Error>?
+
+    init(loader: @escaping Loader) {
+        self.loader = loader
+    }
+
+    func waitForVisitor() async throws {
+        try await loadPort().waitForVisitor()
+    }
+
+    func waitForDeparture() async throws {
+        try await loadPort().waitForDeparture()
+    }
+
+    func stop() async {
+        guard let cachedPort else { return }
+        await cachedPort.stop()
+    }
+
+    private func loadPort() async throws -> any VisitorPresenceMonitoringPort {
+        if let cachedPort { return cachedPort }
+        if let loadingTask { return try await loadingTask.value }
+
+        let task = Task<any VisitorPresenceMonitoringPort, Error> {
+            try await loader()
+        }
+        loadingTask = task
+        do {
+            let port = try await task.value
+            loadingTask = nil
+            cachedPort = port
+            return port
+        } catch {
+            loadingTask = nil
+            throw error
+        }
+    }
+}
+
+/// One lazy Debug-Live bridge shared by conversational enrollment and the
+/// subsequent local spoken-name lookup.
+actor AppVisitorEnrollmentPortProxy:
+    VisitorEnrollmentPort,
+    VoiceMemberAddressRepository
+{
+    typealias Service = any VisitorEnrollmentPort & VoiceMemberAddressRepository
+    typealias Loader = @Sendable () async throws -> Service
+
+    private let loader: Loader
+    private var cachedService: Service?
+    private var loadingTask: Task<Service, Error>?
+
+    init(loader: @escaping Loader) {
+        self.loader = loader
+    }
+
+    func begin(consentedAt: Date) async throws -> VisitorEnrollmentBeginResult {
+        try await loadService().begin(consentedAt: consentedAt)
+    }
+
+    func complete(
+        memberID: MemberID,
+        address: VoiceMemberAddress,
+        completedAt: Date
+    ) async throws {
+        try await loadService().complete(
+            memberID: memberID,
+            address: address,
+            completedAt: completedAt
+        )
+    }
+
+    func cancel() async {
+        guard let cachedService else { return }
+        await cachedService.cancel()
+    }
+
+    func address(for memberID: MemberID) async throws -> VoiceMemberAddress? {
+        try await loadService().address(for: memberID)
+    }
+
+    private func loadService() async throws -> Service {
+        if let cachedService { return cachedService }
+        if let loadingTask { return try await loadingTask.value }
+
+        let task = Task<Service, Error> { try await loader() }
+        loadingTask = task
+        do {
+            let service = try await task.value
+            loadingTask = nil
+            cachedService = service
+            return service
+        } catch {
+            loadingTask = nil
+            throw error
+        }
+    }
+}
+
+/// Ensures recognition, enrollment, and address lookup use one in-memory
+/// camera/model service while still sharing the same durable SQLite file with
+/// the calibration tool.
+actor AppCoreMLIdentityServiceLoader {
+    typealias Loader = @Sendable () async throws -> CoreMLIdentityCalibrationService
+
+    private let loader: Loader
+    private var cachedService: CoreMLIdentityCalibrationService?
+    private var loadingTask: Task<CoreMLIdentityCalibrationService, Error>?
+
+    init(loader: @escaping Loader = {
+        try await AppIdentityCalibrationComposition.loadProductionService()
+    }) {
+        self.loader = loader
+    }
+
+    func load() async throws -> CoreMLIdentityCalibrationService {
+        if let cachedService { return cachedService }
+        if let loadingTask { return try await loadingTask.value }
+
+        let task = Task<CoreMLIdentityCalibrationService, Error> {
+            try await loader()
+        }
+        loadingTask = task
+        do {
+            let service = try await task.value
+            loadingTask = nil
+            cachedService = service
+            return service
+        } catch {
+            loadingTask = nil
+            throw error
+        }
+    }
+}
+
 /// App-only composition for the DEBUG calibration graph.
 enum AppIdentityCalibrationComposition {
     static let databaseDirectoryName = "Lumi"

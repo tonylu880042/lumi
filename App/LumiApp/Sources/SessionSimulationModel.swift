@@ -154,12 +154,15 @@ final class SessionSimulationModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var visitorGreeting: String?
     @Published private(set) var pendingAvatarEvent: AvatarEventCommand?
+    @Published private(set) var isContinuousExperienceRunning = false
 
     private let coordinator: AssistantSessionCoordinator
     private let hardware: MockHardwareControlPort
     private let manualIdentity: MockIdentityRecognitionAdapter?
     private let voiceSimulationControls: VoiceSimulationControls?
-    private let memberAddressResolver: @Sendable (MemberID) -> VoiceMemberAddress?
+    private let memberAddressResolver:
+        @Sendable (MemberID) async -> VoiceMemberAddress?
+    private let visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)?
     private let onAuthorizationRequired: @MainActor () -> Void
     private let mapper: AvatarStateMapper
     private let eventMapper: AvatarEventCommandMapper
@@ -187,15 +190,18 @@ final class SessionSimulationModel: ObservableObject {
     private var authorizationRegistrationTask: Task<AsyncStream<Void>, Never>?
     private var authorizationUpdatesTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
+    private var continuousExperienceTask: Task<Void, Never>?
     private var actionGeneration: UInt64 = 0
+    private var continuousExperienceGeneration: UInt64 = 0
 
     private init(
         coordinator: AssistantSessionCoordinator,
         hardware: MockHardwareControlPort,
         manualIdentity: MockIdentityRecognitionAdapter?,
         voiceSimulationControls: VoiceSimulationControls? = nil,
-        memberAddressResolver: @escaping @Sendable (MemberID) ->
+        memberAddressResolver: @escaping @Sendable (MemberID) async ->
             VoiceMemberAddress? = { _ in nil },
+        visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
         onAuthorizationRequired: @escaping @MainActor () -> Void = {}
@@ -205,6 +211,7 @@ final class SessionSimulationModel: ObservableObject {
         self.manualIdentity = manualIdentity
         self.voiceSimulationControls = voiceSimulationControls
         self.memberAddressResolver = memberAddressResolver
+        self.visitorPresenceMonitor = visitorPresenceMonitor
         self.onAuthorizationRequired = onAuthorizationRequired
         self.mapper = mapper
         self.eventMapper = eventMapper
@@ -240,8 +247,9 @@ final class SessionSimulationModel: ObservableObject {
         coordinator: AssistantSessionCoordinator,
         hardware: MockHardwareControlPort,
         voiceSimulationControls: VoiceSimulationControls? = nil,
-        memberAddressResolver: @escaping @Sendable (MemberID) ->
+        memberAddressResolver: @escaping @Sendable (MemberID) async ->
             VoiceMemberAddress? = { _ in nil },
+        visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
         onAuthorizationRequired: @escaping @MainActor () -> Void = {}
@@ -252,6 +260,7 @@ final class SessionSimulationModel: ObservableObject {
             manualIdentity: nil,
             voiceSimulationControls: voiceSimulationControls,
             memberAddressResolver: memberAddressResolver,
+            visitorPresenceMonitor: visitorPresenceMonitor,
             mapper: mapper,
             eventMapper: eventMapper,
             onAuthorizationRequired: onAuthorizationRequired
@@ -285,6 +294,7 @@ final class SessionSimulationModel: ObservableObject {
         authorizationRegistrationTask?.cancel()
         authorizationUpdatesTask?.cancel()
         actionTask?.cancel()
+        continuousExperienceTask?.cancel()
     }
 
     var canChooseDirection: Bool {
@@ -351,6 +361,108 @@ final class SessionSimulationModel: ObservableObject {
     /// Whether the UI may expose deterministic artificial voice controls.
     var hasArtificialVoiceControls: Bool {
         voiceSimulationControls != nil
+    }
+
+    var supportsContinuousExperience: Bool {
+        visitorPresenceMonitor != nil && manualIdentity == nil
+    }
+
+    /// Starts the owner-approved kiosk loop. One usable face arms one welcome;
+    /// the monitor must then observe ten continuous seconds without a usable
+    /// face before another welcome can be armed.
+    func startContinuousExperience() {
+        guard supportsContinuousExperience, continuousExperienceTask == nil,
+              let visitorPresenceMonitor else { return }
+
+        errorMessage = nil
+        isContinuousExperienceRunning = true
+        continuousExperienceGeneration &+= 1
+        let acceptedGeneration = continuousExperienceGeneration
+        continuousExperienceTask = Task { [weak self] in
+            do {
+                while !Task.isCancelled {
+                    try await visitorPresenceMonitor.waitForVisitor()
+                    try Task.checkCancellation()
+                    try await self?.runAutomaticWelcome()
+                    try Task.checkCancellation()
+                    try await visitorPresenceMonitor.waitForDeparture()
+                    try Task.checkCancellation()
+                    try await self?.finishAutomaticVisit()
+                }
+            } catch is CancellationError {
+                await visitorPresenceMonitor.stop()
+            } catch {
+                await visitorPresenceMonitor.stop()
+                guard !Task.isCancelled else { return }
+                guard let self,
+                      self.continuousExperienceGeneration == acceptedGeneration else {
+                    return
+                }
+                if self.canEndSession {
+                    try? await self.finishAutomaticVisit()
+                }
+                guard self.continuousExperienceGeneration == acceptedGeneration else {
+                    return
+                }
+                self.errorMessage = "自動辨識暫時無法使用，請再試一次。"
+            }
+            self?.finishContinuousExperience(generation: acceptedGeneration)
+        }
+    }
+
+    func stopContinuousExperience() {
+        continuousExperienceGeneration &+= 1
+        continuousExperienceTask?.cancel()
+        continuousExperienceTask = nil
+        isContinuousExperienceRunning = false
+        guard let visitorPresenceMonitor else { return }
+        Task { await visitorPresenceMonitor.stop() }
+    }
+
+    private func finishContinuousExperience(generation: UInt64) {
+        guard continuousExperienceGeneration == generation else { return }
+        isContinuousExperienceRunning = false
+        continuousExperienceTask = nil
+    }
+
+    private func runAutomaticWelcome() async throws {
+        guard assistantState == .idle else { return }
+
+        let detected = try await coordinator.confirmPresence(direction: .center)
+        receive(detected)
+
+        let orientationTask = Task {
+            try await coordinator.beginOrientation()
+        }
+        await hardware.completeCurrentOrNextRotation()
+        let recognizing = try await withTaskCancellationHandler(operation: {
+            try await orientationTask.value
+        }, onCancel: {
+            orientationTask.cancel()
+        })
+        receive(recognizing)
+
+        let result = try await coordinator.recognizeVisitor()
+        try Task.checkCancellation()
+        receive(await coordinator.state)
+        await applyRecognitionResult(result)
+        startVoiceSession(direction: .general)
+    }
+
+    private func finishAutomaticVisit() async throws {
+        guard canEndSession else { return }
+        let updates = await coordinator.stateUpdates()
+        endSession(cause: .visitorLeft)
+        await hardware.completeCurrentOrNextReturnHome()
+
+        for await state in updates {
+            try Task.checkCancellation()
+            if state == .idle {
+                receive(state)
+                return
+            }
+        }
+        throw VisitorPresenceMonitoringError.failed
     }
 
     /// The Simulator exposes each lifecycle event as an explicit action. A
@@ -486,7 +598,7 @@ final class SessionSimulationModel: ObservableObject {
                     return
                 }
                 guard let self else { return }
-                self.applyRecognitionResult(result)
+                await self.applyRecognitionResult(result)
                 self.finishAction(operationID)
             } catch is CancellationError {
                 recognitionTask.cancel()
@@ -525,7 +637,7 @@ final class SessionSimulationModel: ObservableObject {
                     self?.finishAction(operationID)
                     return
                 }
-                self.applyRecognitionResult(result)
+                await self.applyRecognitionResult(result)
                 self.finishAction(operationID)
             } catch is CancellationError {
                 self?.finishAction(operationID)
@@ -842,10 +954,11 @@ final class SessionSimulationModel: ObservableObject {
     }
 
     private func receive(_ state: AssistantState) {
+        let previousState = assistantState
         assistantState = state
         avatarState = mapper.map(state)
 
-        if state == .idle {
+        if state == .idle, previousState != .idle {
             visitorGreeting = nil
             errorMessage = nil
             pendingAvatarEvent = nil
@@ -865,10 +978,10 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
-    private func applyRecognitionResult(_ result: RecognitionResult) {
+    private func applyRecognitionResult(_ result: RecognitionResult) async {
         switch result {
         case let .known(memberID, _):
-            if let memberAddress = memberAddressResolver(memberID) {
+            if let memberAddress = await memberAddressResolver(memberID) {
                 visitorGreeting = "\(memberAddress.spokenLabel)，歡迎回來～"
             } else {
                 visitorGreeting = "歡迎回來～"

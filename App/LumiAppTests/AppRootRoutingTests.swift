@@ -177,12 +177,23 @@ struct AppRootRoutingTests {
     }
 
     @Test("ready screen keeps device reset and session controls in separate corners")
-    func readyScreenSeparatesTopControls() {
+    func readyScreenSeparatesTopControls() throws {
         #expect(AppOverlayLayout.deviceSetupControl == .topLeading)
         #expect(AppOverlayLayout.sessionControls == .topTrailing)
         #expect(
             AppOverlayLayout.deviceSetupControl
                 != AppOverlayLayout.sessionControls
+        )
+
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("LumiApp/Sources/AppRootView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        #expect(source.contains("Image(systemName: \"gearshape\")"))
+        #expect(
+            source.contains("Button(DeviceSetupView.viewIntent.resetLabel)")
+                == false
         )
     }
 

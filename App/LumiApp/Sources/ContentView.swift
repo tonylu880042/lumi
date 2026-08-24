@@ -46,12 +46,25 @@ struct ContentView: View {
         self._simulationModel = ObservedObject(wrappedValue: simulationModel)
         self.calibrationModel = calibrationModel
     }
+
+    static func shouldShowCalibrationEntry(
+        hasCalibrationModel: Bool,
+        supportsContinuousExperience: Bool
+    ) -> Bool {
+        hasCalibrationModel && !supportsContinuousExperience
+    }
 #endif
 
     private var renderedAvatarState: AvatarVisualState {
         switch controlsMode {
         case .session:
-            simulationModel.avatarState
+            if simulationModel.supportsContinuousExperience,
+               simulationModel.isContinuousExperienceRunning,
+               simulationModel.assistantState == .idle {
+                mapper.map(.recognizing)
+            } else {
+                simulationModel.avatarState
+            }
         case .avatar:
             mapper.map(SimulatorControlCatalog.tuningStates[tuningSelection].state)
         }
@@ -79,29 +92,76 @@ struct ContentView: View {
             .id(controlsMode)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: AppOverlayLayout.sessionControls.alignment) {
-                SimulatorControlsView(
-                    simulationModel: simulationModel,
-                    controlsExpanded: $controlsExpanded,
-                    controlsMode: $controlsMode,
-                    direction: $direction,
-                    identityChoice: $identityChoice,
-                    conversationDirectionChoice: $conversationDirectionChoice,
-                    tuningSelection: $tuningSelection,
-                    eventSelection: $eventSelection,
-                    triggeredEvent: $triggeredEvent,
-                    cancelEvent: $cancelEvent,
-                    rawAmplitude: $rawAmplitude,
-                    processedAmplitude: $processedAmplitude
-                )
+                if !simulationModel.supportsContinuousExperience {
+                    SimulatorControlsView(
+                        simulationModel: simulationModel,
+                        controlsExpanded: $controlsExpanded,
+                        controlsMode: $controlsMode,
+                        direction: $direction,
+                        identityChoice: $identityChoice,
+                        conversationDirectionChoice: $conversationDirectionChoice,
+                        tuningSelection: $tuningSelection,
+                        eventSelection: $eventSelection,
+                        triggeredEvent: $triggeredEvent,
+                        cancelEvent: $cancelEvent,
+                        rawAmplitude: $rawAmplitude,
+                        processedAmplitude: $processedAmplitude
+                    )
+                }
+            }
+
+            if simulationModel.supportsContinuousExperience {
+                SystemVolumeControlPanel()
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .bottom
+                    )
+            }
+
+            if simulationModel.supportsContinuousExperience,
+               let errorMessage = simulationModel.errorMessage {
+                VStack(spacing: 12) {
+                    Text(errorMessage)
+                        .multilineTextAlignment(.center)
+                    Button(
+                        simulationModel.canStartVoiceSession
+                            ? "重新啟動語音"
+                            : "重新開始辨識"
+                    ) {
+                        if simulationModel.canStartVoiceSession {
+                            simulationModel.startVoiceSession()
+                        } else {
+                            simulationModel.stopContinuousExperience()
+                            simulationModel.startContinuousExperience()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(18)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                .padding(.horizontal, 24)
+                .padding(.top, 72)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 #if DEBUG
-            if calibrationModel != nil {
-                Button("DEBUG 身份校準") {
+            if Self.shouldShowCalibrationEntry(
+                hasCalibrationModel: calibrationModel != nil,
+                supportsContinuousExperience: simulationModel.supportsContinuousExperience
+            ) {
+                Button {
                     isCalibrationPresented = true
+                } label: {
+                    Image(systemName: "wrench.and.screwdriver")
                 }
                 .buttonStyle(.bordered)
                 .padding(16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .bottomLeading
+                )
+                .accessibilityLabel("DEBUG 身份校準")
                 .accessibilityIdentifier("debug-identity-calibration")
             }
 #endif
@@ -113,6 +173,12 @@ struct ContentView: View {
             }
         }
 #endif
+        .task {
+            simulationModel.startContinuousExperience()
+        }
+        .onDisappear {
+            simulationModel.stopContinuousExperience()
+        }
         .onChange(of: rawAmplitude) { _, newValue in
             processedAmplitude = amplitudeProcessor.process([newValue])
         }

@@ -11,6 +11,24 @@ import Testing
 
 @Suite("DEBUG identity calibration App composition")
 struct AppDebugIdentityCalibrationCompositionTests {
+    @Test("presence proxy lazily loads once and forwards both lifecycle waits")
+    func presenceProxyLoadsOnceAndForwards() async throws {
+        let monitor = RecordingVisitorPresenceMonitor()
+        let recorder = DebugPresenceLoaderRecorder(monitor: monitor)
+        let proxy = AppVisitorPresenceMonitoringPortProxy {
+            try await recorder.load()
+        }
+
+        try await proxy.waitForVisitor()
+        try await proxy.waitForDeparture()
+        await proxy.stop()
+
+        #expect(await recorder.loadCallCount == 1)
+        #expect(await monitor.arrivalCallCount == 1)
+        #expect(await monitor.departureCallCount == 1)
+        #expect(await monitor.stopCallCount == 1)
+    }
+
     @Test("stop before first start does not invoke the lazy loader")
     func stopBeforeLoadIsNoOp() async throws {
         let recorder = DebugCalibrationLoaderRecorder()
@@ -411,6 +429,32 @@ struct AppDebugIdentityCalibrationCompositionTests {
         }
     }
 
+    @Test("visitor enrollment proxy shares one lazy service for capture and address lookup")
+    func visitorEnrollmentProxyLoadsOnceAndForwards() async throws {
+        let service = RecordingVisitorEnrollmentService()
+        let recorder = DebugVisitorEnrollmentLoaderRecorder(service: service)
+        let proxy = AppVisitorEnrollmentPortProxy {
+            try await recorder.load()
+        }
+        let memberID = try MemberID(rawValue: "local-test-uuid")
+        let address = try VoiceMemberAddress(spokenLabel: "Tony")
+        let consentedAt = Date(timeIntervalSince1970: 100)
+        let completedAt = Date(timeIntervalSince1970: 200)
+
+        #expect(try await proxy.begin(consentedAt: consentedAt) == .samplesCaptured(3))
+        try await proxy.complete(
+            memberID: memberID,
+            address: address,
+            completedAt: completedAt
+        )
+        #expect(try await proxy.address(for: memberID) == address)
+
+        #expect(await recorder.loadCallCount == 1)
+        #expect(await service.beginDates == [consentedAt])
+        #expect(await service.completedMemberIDs == [memberID])
+        #expect(await service.completedAddresses == [address])
+    }
+
     @Test("pilot voice address uses only safe enrollment identifiers")
     func pilotVoiceAddressFailsClosedForUnsafeIdentifiers() throws {
         let safeMemberID = try MemberID(rawValue: "tony")
@@ -567,6 +611,7 @@ struct AppDebugIdentityCalibrationCompositionTests {
     }
 
     @Test("debug calibration view uses the PhotosPicker Data contract")
+    @MainActor
     func debugCalibrationViewUsesPhotosPickerDataContract() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -667,6 +712,30 @@ private actor DebugCalibrationLoaderRecorder {
     }
 }
 
+private actor DebugPresenceLoaderRecorder {
+    private let monitor: any VisitorPresenceMonitoringPort
+    private(set) var loadCallCount = 0
+
+    init(monitor: any VisitorPresenceMonitoringPort) {
+        self.monitor = monitor
+    }
+
+    func load() async throws -> any VisitorPresenceMonitoringPort {
+        loadCallCount += 1
+        return monitor
+    }
+}
+
+private actor RecordingVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
+    private(set) var arrivalCallCount = 0
+    private(set) var departureCallCount = 0
+    private(set) var stopCallCount = 0
+
+    func waitForVisitor() async throws { arrivalCallCount += 1 }
+    func waitForDeparture() async throws { departureCallCount += 1 }
+    func stop() async { stopCallCount += 1 }
+}
+
 private actor DebugIdentityLoaderRecorder {
     private var port: (any IdentityRecognitionPort)?
     private(set) var loadCallCount = 0
@@ -679,6 +748,53 @@ private actor DebugIdentityLoaderRecorder {
         loadCallCount += 1
         guard let port else { throw DebugCalibrationMarkerError.marker }
         return port
+    }
+}
+
+private actor DebugVisitorEnrollmentLoaderRecorder {
+    private let service: any VisitorEnrollmentPort & VoiceMemberAddressRepository
+    private(set) var loadCallCount = 0
+
+    init(service: any VisitorEnrollmentPort & VoiceMemberAddressRepository) {
+        self.service = service
+    }
+
+    func load() async throws
+        -> any VisitorEnrollmentPort & VoiceMemberAddressRepository
+    {
+        loadCallCount += 1
+        return service
+    }
+}
+
+private actor RecordingVisitorEnrollmentService:
+    VisitorEnrollmentPort,
+    VoiceMemberAddressRepository
+{
+    private(set) var beginDates: [Date] = []
+    private(set) var completedMemberIDs: [MemberID] = []
+    private(set) var completedAddresses: [VoiceMemberAddress] = []
+    private var addresses: [MemberID: VoiceMemberAddress] = [:]
+
+    func begin(consentedAt: Date) async throws -> VisitorEnrollmentBeginResult {
+        beginDates.append(consentedAt)
+        return .samplesCaptured(3)
+    }
+
+    func complete(
+        memberID: MemberID,
+        address: VoiceMemberAddress,
+        completedAt _: Date
+    ) async throws {
+        completedMemberIDs.append(memberID)
+        completedAddresses.append(address)
+        addresses[memberID] = address
+    }
+
+    func cancel() async {}
+
+    func address(for memberID: MemberID) async throws -> VoiceMemberAddress? {
+        addresses[memberID]
     }
 }
 
