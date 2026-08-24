@@ -146,21 +146,24 @@ public struct RecognitionConfidencePolicy: Sendable {
                 sawLowScore = true
                 continue
             }
-            guard let second else {
-                sawAmbiguousCandidate = true
-                continue
-            }
-            let margin = best.similarity - second.similarity
-            let scale = max(
-                1.0,
-                abs(best.similarity),
-                abs(second.similarity),
-                abs(configuration.minimumMargin)
-            )
-            let roundingTolerance = 4 * Double.ulpOfOne * scale
-            guard margin + roundingTolerance >= configuration.minimumMargin else {
-                sawAmbiguousCandidate = true
-                continue
+            // The ambiguity gate protects against a competing member, not
+            // multiple gallery samples belonging to the same member. The
+            // matcher normally aggregates by MemberID, but the Domain policy
+            // remains safe when a lower layer supplies duplicate-member
+            // evidence or no second candidate at all.
+            if let second, second.memberID != best.memberID {
+                let margin = best.similarity - second.similarity
+                let scale = max(
+                    1.0,
+                    abs(best.similarity),
+                    abs(second.similarity),
+                    abs(configuration.minimumMargin)
+                )
+                let roundingTolerance = 4 * Double.ulpOfOne * scale
+                guard margin + roundingTolerance >= configuration.minimumMargin else {
+                    sawAmbiguousCandidate = true
+                    continue
+                }
             }
 
             acceptedScores[best.memberID, default: []].append(best.similarity)

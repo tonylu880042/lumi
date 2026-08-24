@@ -11,6 +11,7 @@ struct OpenAIRealtimeAudioSessionTests {
         try await audioSession.activate()
 
         #expect(await backend.operations == [
+            .configureWebRTCDefaults([.defaultToSpeaker, .allowBluetoothHFP]),
             .activate(
                 OpenAIRealtimeAudioSessionIntent(
                     category: .playAndRecord,
@@ -32,6 +33,7 @@ struct OpenAIRealtimeAudioSessionTests {
         await audioSession.deactivate()
 
         #expect(await backend.operations == [
+            .configureWebRTCDefaults([.defaultToSpeaker, .allowBluetoothHFP]),
             .activate(
                 OpenAIRealtimeAudioSessionIntent(
                     category: .playAndRecord,
@@ -55,6 +57,7 @@ struct OpenAIRealtimeAudioSessionTests {
         }
 
         #expect(await backend.operations == [
+            .configureWebRTCDefaults([.defaultToSpeaker, .allowBluetoothHFP]),
             .activate(
                 OpenAIRealtimeAudioSessionIntent(
                     category: .playAndRecord,
@@ -84,6 +87,7 @@ struct OpenAIRealtimeAudioSessionTests {
         }
 
         #expect(await backend.operations == [
+            .configureWebRTCDefaults([.defaultToSpeaker, .allowBluetoothHFP]),
             .activate(
                 OpenAIRealtimeAudioSessionIntent(
                     category: .playAndRecord,
@@ -112,6 +116,7 @@ struct OpenAIRealtimeAudioSessionTests {
         }
 
         #expect(await backend.operations == [
+            .configureWebRTCDefaults([.defaultToSpeaker, .allowBluetoothHFP]),
             .activate(
                 OpenAIRealtimeAudioSessionIntent(
                     category: .playAndRecord,
@@ -127,6 +132,7 @@ struct OpenAIRealtimeAudioSessionTests {
 
 private actor RecordingAudioSessionBackend: OpenAIRealtimeAudioSessionBackend {
     fileprivate enum Operation: Equatable, Sendable {
+        case configureWebRTCDefaults(OpenAIRealtimeAudioSessionOptions)
         case activate(OpenAIRealtimeAudioSessionIntent)
         case deactivate
     }
@@ -142,6 +148,12 @@ private actor RecordingAudioSessionBackend: OpenAIRealtimeAudioSessionBackend {
 
     init(failure: Failure? = nil) {
         self.failure = failure
+    }
+
+    func configureWebRTCDefaults(
+        options: OpenAIRealtimeAudioSessionOptions
+    ) async {
+        operations.append(.configureWebRTCDefaults(options))
     }
 
     func activate(configurationIntent: OpenAIRealtimeAudioSessionIntent) async throws {

@@ -899,6 +899,17 @@ Stage failures use the existing generic error path, while `CancellationError`
 is preserved even when it races a generic source failure. Internal
 `UnknownReason` never crosses `IdentityRecognitionPort`.
 
+Owner amendment (2026-08-24): for the Debug/Debug-Live 44B pilot, the
+top-1/top-2 margin gate applies only when the second candidate belongs to a
+different `MemberID`. A single candidate, or a second gallery sample carrying
+the same `MemberID`, still must pass the unchanged `0.70` top-1 score gate,
+exactly three observations, and at least two observations confirming the same
+`MemberID`; its confidence remains the lowest confirming top-1 score. A
+second candidate from a different `MemberID` retains the unchanged `0.20`
+ambiguity margin. This amendment does not deduplicate or merge local profiles,
+and it does not change any threshold or the fail-closed behavior for low score,
+insufficient observations, or inconsistent identities.
+
 In Debug-Live, the session Simulator now lazily loads the same bundled
 SFace/YuNet graph and `Library/Application Support/Lumi/IdentityCalibration.sqlite`
 gallery used by the calibration tool. The operator advances the existing

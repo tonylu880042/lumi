@@ -385,6 +385,7 @@ struct SessionSimulationModelTests {
 
     @Test("ten-second departure result ends the session and rearms recognition")
     func continuousExperienceRearmsAfterDeparture() async throws {
+        var diagnostics: [SessionSimulationModel.ContinuousExperienceDiagnostic] = []
         let hardware = MockHardwareControlPort()
         let identity = ImmediateIdentityRecognitionPort(result: .unknown)
         let voice = ImmediateVoiceSessionPort()
@@ -398,7 +399,10 @@ struct SessionSimulationModelTests {
             coordinator: coordinator,
             hardware: hardware,
             voiceSimulationControls: nil,
-            visitorPresenceMonitor: presence
+            visitorPresenceMonitor: presence,
+            onContinuousExperienceDiagnostic: { diagnostic in
+                diagnostics.append(diagnostic)
+            }
         )
 
         model.startContinuousExperience()
@@ -410,6 +414,7 @@ struct SessionSimulationModelTests {
 
         try #require(await waitUntilCurrent { model.assistantState == .idle })
         await presence.waitForArrivalRequest(count: 2)
+        #expect(diagnostics.contains(.stageStarted(.finishSession)))
         #expect(await voice.startContexts == [.visitor])
         #expect(await hardware.returnHomeCallCount == 1)
     }
@@ -434,13 +439,14 @@ struct SessionSimulationModelTests {
 
         model.startContinuousExperience()
         await presence.waitForArrivalRequest(count: 1)
-        model.stopContinuousExperience()
-        model.startContinuousExperience()
-        await presence.waitForArrivalRequest(count: 2)
+        let restartTask = Task { @MainActor in
+            await model.restartContinuousExperience()
+        }
 
+        await presence.waitForStopCall(count: 1)
         await presence.releaseFirstArrivalAsCancellation()
-        await presence.waitForStopCall(count: 2)
-        for _ in 0..<32 { await Task.yield() }
+        await restartTask.value
+        await presence.waitForArrivalRequest(count: 2)
         #expect(model.isContinuousExperienceRunning)
 
         model.stopContinuousExperience()
@@ -449,11 +455,7 @@ struct SessionSimulationModelTests {
 
     @Test("continuous restart waits for presence teardown before a new visitor wait")
     func continuousRestartWaitsForPresenceTeardown() async throws {
-        let source = SerializedRestartPresenceSource()
-        let presence = PilotVisitorPresenceMonitor(
-            source: source,
-            departureAbsenceDuration: .seconds(10)
-        )
+        let presence = DeterministicRestartPresenceMonitor()
         let hardware = MockHardwareControlPort()
         let identity = ImmediateIdentityRecognitionPort(result: .unknown)
         let voice = ImmediateVoiceSessionPort()
@@ -470,25 +472,113 @@ struct SessionSimulationModelTests {
         )
 
         model.startContinuousExperience()
-        await source.waitForCapture(count: 1)
+        await presence.waitForVisitorRequest(count: 1)
+
+        let restartTask = Task { @MainActor in
+            await model.restartContinuousExperience()
+        }
+
+        await presence.waitForStopCall(count: 1)
+        #expect(await presence.visitorWaitCount == 1)
+        #expect(await presence.overlapDetected == false)
+
+        await presence.releaseStop()
+        await restartTask.value
+
+        #expect(await presence.waitForVisitorRequest(count: 2))
+        #expect(await presence.visitorWaitCount == 2)
+        #expect(await presence.overlapDetected == false)
 
         model.stopContinuousExperience()
+        await presence.releaseAllVisitorsAsCancellation()
+    }
+
+    @Test("a stop during pending restart prevents the loop from returning")
+    func stopDuringPendingRestartPreventsLoopReturn() async throws {
+        let presence = DeterministicRestartPresenceMonitor()
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
         model.startContinuousExperience()
-        await source.waitForStopCall(count: 1)
+        await presence.waitForVisitorRequest(count: 1)
 
-        for _ in 0..<128 { await Task.yield() }
-        #expect(await source.captureCount == 1)
-        #expect(await source.startCount == 1)
+        let restartTask = Task { @MainActor in
+            await model.restartContinuousExperience()
+        }
+        await presence.waitForStopCall(count: 1)
 
-        await source.releaseFirstStop()
-        #expect(await source.waitForStart(count: 2))
-
-        #expect(await source.captureCount == 2)
-        #expect(await source.startCount == 2)
-        #expect(await source.overlapDetected == false)
-
+        // Mirrors the view disappearing while the unstructured retry task is
+        // still waiting for the prior monitor teardown.
         model.stopContinuousExperience()
-        await source.releaseAllCapturesAsCancellation()
+        await presence.releaseStop()
+        await restartTask.value
+
+        #expect(model.isContinuousExperienceRunning == false)
+        #expect(await presence.visitorWaitCount == 1)
+        await presence.releaseAllVisitorsAsCancellation()
+    }
+
+    @Test("continuous failures report a privacy-safe lifecycle stage")
+    func continuousFailureReportsPrivacySafeStage() async throws {
+        var diagnostics: [SessionSimulationModel.ContinuousExperienceDiagnostic] = []
+        let presence = ControlledVisitorPresenceMonitor()
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence,
+            onContinuousExperienceDiagnostic: { diagnostic in
+                diagnostics.append(diagnostic)
+            }
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        #expect(diagnostics == [
+            .stageStarted(.waitForArrival)
+        ])
+
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent {
+            diagnostics.contains(.stageStarted(.welcomeIdentityAndVoice))
+        })
+        await presence.waitForDepartureRequest()
+        #expect(diagnostics.contains(.stageStarted(.waitForDeparture)))
+
+        await presence.failDeparture()
+        try #require(await waitUntilCurrent {
+            diagnostics.contains(.stageFailed(.waitForDeparture))
+        })
+        try #require(await waitUntilCurrent {
+            model.errorMessage == "自動辨識暫時無法使用，請再試一次。"
+        })
+
+        let failureDiagnostics = diagnostics.filter {
+            if case .stageFailed = $0 { return true }
+            return false
+        }
+        #expect(failureDiagnostics == [.stageFailed(.waitForDeparture)])
+        model.stopContinuousExperience()
     }
 
     @Test("automatic departure failure returns home before offering retry")
@@ -969,80 +1059,61 @@ private actor DeferredStopVisitorPresenceMonitor: VisitorPresenceMonitoringPort 
     }
 }
 
-private actor SerializedRestartPresenceSource: PilotVisitorPresenceEvidenceSource {
-    private var cameraRunning = false
-    private var captureInProgress = false
-    private var firstStopReleased = false
-    private var firstStopContinuations: [CheckedContinuation<Void, Never>] = []
-    private var captureContinuations: [CheckedContinuation<Bool, Error>] = []
-    private var captureWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+private actor DeterministicRestartPresenceMonitor: VisitorPresenceMonitoringPort {
+    private var visitorContinuations: [CheckedContinuation<Void, Error>] = []
+    private var visitorRequestWaiters: [(Int, CheckedContinuation<Bool, Never>)] = []
+    private var stopContinuations: [CheckedContinuation<Void, Never>] = []
     private var stopWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var stopReleased = false
 
-    private(set) var startCount = 0
-    private(set) var captureCount = 0
+    private(set) var visitorWaitCount = 0
     private(set) var stopCallCount = 0
     private(set) var overlapDetected = false
 
-    func startCamera() async throws {
-        guard !cameraRunning else {
+    func waitForVisitor() async throws {
+        visitorWaitCount += 1
+        let ready = visitorRequestWaiters.filter { visitorWaitCount >= $0.0 }
+        visitorRequestWaiters.removeAll { visitorWaitCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume(returning: true) }
+
+        guard stopCallCount == 0 || stopReleased else {
             overlapDetected = true
-            throw SerializedRestartPresenceSourceError.overlap
+            throw TestVoiceFailure.injected
         }
-        cameraRunning = true
-        startCount += 1
+
+        try await withCheckedThrowingContinuation {
+            visitorContinuations.append($0)
+        }
     }
 
-    func stopCamera() async {
+    func waitForDeparture() async throws {
+        throw CancellationError()
+    }
+
+    func stop() async {
         stopCallCount += 1
         let ready = stopWaiters.filter { stopCallCount >= $0.0 }
         stopWaiters.removeAll { stopCallCount >= $0.0 }
         for (_, waiter) in ready { waiter.resume() }
 
-        if !firstStopReleased {
+        if !stopReleased {
             await withCheckedContinuation {
-                firstStopContinuations.append($0)
+                stopContinuations.append($0)
             }
         }
 
-        cameraRunning = false
-        let captures = captureContinuations
-        captureContinuations.removeAll()
-        for continuation in captures {
+        let continuations = visitorContinuations
+        visitorContinuations.removeAll()
+        for continuation in continuations {
             continuation.resume(throwing: CancellationError())
         }
     }
 
-    func captureUsableFace() async throws -> Bool {
-        guard cameraRunning, !captureInProgress else {
-            overlapDetected = true
-            throw SerializedRestartPresenceSourceError.overlap
+    func waitForVisitorRequest(count: Int) async -> Bool {
+        if visitorWaitCount >= count { return true }
+        return await withCheckedContinuation {
+            visitorRequestWaiters.append((count, $0))
         }
-        captureInProgress = true
-        captureCount += 1
-        let ready = captureWaiters.filter { captureCount >= $0.0 }
-        captureWaiters.removeAll { captureCount >= $0.0 }
-        for (_, waiter) in ready { waiter.resume() }
-        defer { captureInProgress = false }
-
-        return try await withCheckedThrowingContinuation {
-            captureContinuations.append($0)
-        }
-    }
-
-    func waitForCapture(count: Int) async {
-        if captureCount >= count { return }
-        await withCheckedContinuation {
-            captureWaiters.append((count, $0))
-        }
-    }
-
-    func waitForStart(count: Int, timeout: Duration = .seconds(1)) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while startCount < count {
-            if ContinuousClock.now >= deadline { return false }
-            await Task.yield()
-        }
-        return true
     }
 
     func waitForStopCall(count: Int) async {
@@ -1052,22 +1123,18 @@ private actor SerializedRestartPresenceSource: PilotVisitorPresenceEvidenceSourc
         }
     }
 
-    func releaseFirstStop() {
-        firstStopReleased = true
-        let continuations = firstStopContinuations
-        firstStopContinuations.removeAll()
+    func releaseStop() {
+        stopReleased = true
+        let continuations = stopContinuations
+        stopContinuations.removeAll()
         for continuation in continuations { continuation.resume() }
     }
 
-    func releaseAllCapturesAsCancellation() {
-        let continuations = captureContinuations
-        captureContinuations.removeAll()
+    func releaseAllVisitorsAsCancellation() {
+        let continuations = visitorContinuations
+        visitorContinuations.removeAll()
         for continuation in continuations {
             continuation.resume(throwing: CancellationError())
         }
     }
-}
-
-private enum SerializedRestartPresenceSourceError: Error {
-    case overlap
 }

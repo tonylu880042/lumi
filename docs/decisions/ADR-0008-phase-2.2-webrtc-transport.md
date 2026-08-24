@@ -87,6 +87,17 @@ The product owner approved a `2.0` gain for decoded Realtime remote audio on
 does not modify `AVAudioSession.outputVolume`, force `overrideOutputAudioPort`,
 or change the external-route policy in section 5.
 
+### 5.2 Owner amendment — 2026-08-24 WebRTC default route correction
+
+WebRTC's public `RTCAudioSessionConfiguration.webRTCConfiguration()` is
+updated before the WebRTC audio unit is created, and the result is applied
+through `setWebRTCConfiguration`. The existing category options are preserved
+and `.defaultToSpeaker` plus `.allowBluetoothHFP` are added. This addresses
+WebRTC's later configuration pass replacing the App's pre-activation speaker
+preference, while retaining external Bluetooth HFP routing. The correction does
+not write system output volume, use private API/KVC, or force
+`overrideOutputAudioPort(.speaker)`.
+
 ### 6. Reject expired short-lived credentials locally
 
 A credential with `expiresAt <= now` is rejected before microphone permission,

@@ -87,6 +87,21 @@ known(MemberID)
 
 ## 4. Required Policy Inputs
 
+### 4.1 Owner amendment — 2026-08-24
+
+For the owner-approved Debug/Debug-Live 44B pilot, the top-1/top-2 margin is
+an inter-member ambiguity gate. It is evaluated only when the second candidate
+has a different `MemberID` from the top candidate. With no second candidate, or
+with a second candidate carrying the same `MemberID`, the unchanged top-1
+acceptance threshold, exact three-observation requirement, and two-observation
+same-member confirmation still apply; the known confidence remains the lowest
+confirming top-1 score.
+
+A second candidate from a different `MemberID` must still satisfy the existing
+`0.20` minimum margin. This does not merge duplicate local profiles, relax the
+score threshold, change temporal confirmation, or weaken the conservative
+unknown outcome for low, inconsistent, or otherwise invalid evidence.
+
 The confidence policy should receive a model-independent input similar to:
 
 ```swift

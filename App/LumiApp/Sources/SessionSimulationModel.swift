@@ -3,6 +3,7 @@ import LumiApplication
 import LumiDomain
 import LumiInfrastructure
 import LumiPresentation
+import OSLog
 
 /// App-internal controls that exist only for deterministic Mock voice flows.
 ///
@@ -103,6 +104,21 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
+    /// Privacy-safe lifecycle stages for local Debug-Live diagnostics. These
+    /// values deliberately carry no identity, media, embedding, or error
+    /// payload, so the UI can keep its generic recovery copy.
+    enum ContinuousExperienceStage: String, Equatable, Sendable {
+        case waitForArrival = "wait-for-arrival"
+        case welcomeIdentityAndVoice = "welcome-identity-and-voice"
+        case waitForDeparture = "wait-for-departure"
+        case finishSession = "finish-session"
+    }
+
+    enum ContinuousExperienceDiagnostic: Equatable, Sendable {
+        case stageStarted(ContinuousExperienceStage)
+        case stageFailed(ContinuousExperienceStage)
+    }
+
     enum PendingAction: Equatable {
         case confirmingPresence
         case beginningRotation
@@ -164,6 +180,8 @@ final class SessionSimulationModel: ObservableObject {
         @Sendable (MemberID) async -> VoiceMemberAddress?
     private let visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)?
     private let onAuthorizationRequired: @MainActor () -> Void
+    private let onContinuousExperienceDiagnostic:
+        @MainActor (ContinuousExperienceDiagnostic) -> Void
     private let mapper: AvatarStateMapper
     private let eventMapper: AvatarEventCommandMapper
 
@@ -185,12 +203,18 @@ final class SessionSimulationModel: ObservableObject {
     }()
 
     private static let maxPendingRequestYields = 128
+    private static let continuousExperienceLogger = Logger(
+        subsystem: "com.curves.lumi",
+        category: "continuous-experience"
+    )
 
     private var stateUpdatesTask: Task<Void, Never>?
     private var authorizationRegistrationTask: Task<AsyncStream<Void>, Never>?
     private var authorizationUpdatesTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
     private var continuousExperienceTask: Task<Void, Never>?
+    private var continuousExperienceTeardownTask: Task<Void, Never>?
+    private var continuousExperienceTeardownGeneration: UInt64 = 0
     private var actionGeneration: UInt64 = 0
     private var continuousExperienceGeneration: UInt64 = 0
 
@@ -204,7 +228,10 @@ final class SessionSimulationModel: ObservableObject {
         visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
-        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {},
+        onContinuousExperienceDiagnostic: @escaping @MainActor
+            (ContinuousExperienceDiagnostic) -> Void =
+                SessionSimulationModel.logContinuousExperienceDiagnostic
     ) {
         self.coordinator = coordinator
         self.hardware = hardware
@@ -213,6 +240,7 @@ final class SessionSimulationModel: ObservableObject {
         self.memberAddressResolver = memberAddressResolver
         self.visitorPresenceMonitor = visitorPresenceMonitor
         self.onAuthorizationRequired = onAuthorizationRequired
+        self.onContinuousExperienceDiagnostic = onContinuousExperienceDiagnostic
         self.mapper = mapper
         self.eventMapper = eventMapper
         self.assistantState = .idle
@@ -228,7 +256,10 @@ final class SessionSimulationModel: ObservableObject {
         voiceSimulationControls: VoiceSimulationControls? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
-        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {},
+        onContinuousExperienceDiagnostic: @escaping @MainActor
+            (ContinuousExperienceDiagnostic) -> Void =
+                SessionSimulationModel.logContinuousExperienceDiagnostic
     ) {
         self.init(
             coordinator: coordinator,
@@ -237,7 +268,8 @@ final class SessionSimulationModel: ObservableObject {
             voiceSimulationControls: voiceSimulationControls,
             mapper: mapper,
             eventMapper: eventMapper,
-            onAuthorizationRequired: onAuthorizationRequired
+            onAuthorizationRequired: onAuthorizationRequired,
+            onContinuousExperienceDiagnostic: onContinuousExperienceDiagnostic
         )
     }
 
@@ -252,7 +284,10 @@ final class SessionSimulationModel: ObservableObject {
         visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
-        onAuthorizationRequired: @escaping @MainActor () -> Void = {}
+        onAuthorizationRequired: @escaping @MainActor () -> Void = {},
+        onContinuousExperienceDiagnostic: @escaping @MainActor
+            (ContinuousExperienceDiagnostic) -> Void =
+                SessionSimulationModel.logContinuousExperienceDiagnostic
     ) {
         self.init(
             coordinator: coordinator,
@@ -263,7 +298,8 @@ final class SessionSimulationModel: ObservableObject {
             visitorPresenceMonitor: visitorPresenceMonitor,
             mapper: mapper,
             eventMapper: eventMapper,
-            onAuthorizationRequired: onAuthorizationRequired
+            onAuthorizationRequired: onAuthorizationRequired,
+            onContinuousExperienceDiagnostic: onContinuousExperienceDiagnostic
         )
     }
 
@@ -295,6 +331,7 @@ final class SessionSimulationModel: ObservableObject {
         authorizationUpdatesTask?.cancel()
         actionTask?.cancel()
         continuousExperienceTask?.cancel()
+        continuousExperienceTeardownTask?.cancel()
     }
 
     var canChooseDirection: Bool {
@@ -378,22 +415,48 @@ final class SessionSimulationModel: ObservableObject {
         isContinuousExperienceRunning = true
         continuousExperienceGeneration &+= 1
         let acceptedGeneration = continuousExperienceGeneration
+        let predecessor = continuousExperienceTeardownTask
         continuousExperienceTask = Task { [weak self] in
+            if let predecessor {
+                await predecessor.value
+            }
+            guard !Task.isCancelled else { return }
+
+            var stage = ContinuousExperienceStage.waitForArrival
             do {
                 while !Task.isCancelled {
+                    stage = .waitForArrival
+                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                     try await visitorPresenceMonitor.waitForVisitor()
                     try Task.checkCancellation()
+
+                    stage = .welcomeIdentityAndVoice
+                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                     try await self?.runAutomaticWelcome()
                     try Task.checkCancellation()
+
+                    stage = .waitForDeparture
+                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                     try await visitorPresenceMonitor.waitForDeparture()
                     try Task.checkCancellation()
+
+                    stage = .finishSession
+                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                     try await self?.finishAutomaticVisit()
                 }
             } catch is CancellationError {
-                await visitorPresenceMonitor.stop()
+                // An explicit stop owns monitor teardown and waits for this
+                // task below. Awaiting that same teardown here would form a
+                // cycle, so the canceled generation simply exits. A
+                // cancellation without an external owner still performs its
+                // own best-effort monitor cleanup.
+                if self?.continuousExperienceTeardownTask == nil {
+                    await visitorPresenceMonitor.stop()
+                }
             } catch {
-                await visitorPresenceMonitor.stop()
                 guard !Task.isCancelled else { return }
+                self?.recordContinuousExperienceDiagnostic(.stageFailed(stage))
+                await visitorPresenceMonitor.stop()
                 guard let self,
                       self.continuousExperienceGeneration == acceptedGeneration else {
                     return
@@ -410,13 +473,84 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
+    private func recordContinuousExperienceDiagnostic(
+        _ diagnostic: ContinuousExperienceDiagnostic
+    ) {
+        onContinuousExperienceDiagnostic(diagnostic)
+    }
+
+    private static func logContinuousExperienceDiagnostic(
+        _ diagnostic: ContinuousExperienceDiagnostic
+    ) {
+        switch diagnostic {
+        case let .stageStarted(stage):
+            continuousExperienceLogger.info(
+                "continuous stage started: \(stage.rawValue, privacy: .public)"
+            )
+        case let .stageFailed(stage):
+            continuousExperienceLogger.error(
+                "continuous stage failed: \(stage.rawValue, privacy: .public)"
+            )
+        }
+    }
+
     func stopContinuousExperience() {
         continuousExperienceGeneration &+= 1
-        continuousExperienceTask?.cancel()
-        continuousExperienceTask = nil
         isContinuousExperienceRunning = false
-        guard let visitorPresenceMonitor else { return }
-        Task { await visitorPresenceMonitor.stop() }
+        guard continuousExperienceTask != nil else { return }
+        guard let visitorPresenceMonitor else {
+            continuousExperienceTask?.cancel()
+            continuousExperienceTask = nil
+            return
+        }
+        let activeTask = continuousExperienceTask
+        _ = scheduleContinuousExperienceTeardown(
+            monitor: visitorPresenceMonitor,
+            activeTask: activeTask
+        )
+        activeTask?.cancel()
+        continuousExperienceTask = nil
+    }
+
+    /// Serializes the UI's stop-then-start retry sequence. The old generation
+    /// must finish monitor teardown before a new presence wait can begin.
+    func restartContinuousExperience() async {
+        stopContinuousExperience()
+        let acceptedGeneration = continuousExperienceGeneration
+        if let teardown = continuousExperienceTeardownTask {
+            await teardown.value
+        }
+        guard !Task.isCancelled,
+              continuousExperienceGeneration == acceptedGeneration else {
+            return
+        }
+        startContinuousExperience()
+    }
+
+    private func scheduleContinuousExperienceTeardown(
+        monitor: any VisitorPresenceMonitoringPort,
+        activeTask: Task<Void, Never>? = nil
+    ) -> Task<Void, Never> {
+        let predecessor = continuousExperienceTeardownTask
+        continuousExperienceTeardownGeneration &+= 1
+        let acceptedGeneration = continuousExperienceTeardownGeneration
+        let teardown = Task { [weak self] in
+            await predecessor?.value
+            await monitor.stop()
+            await activeTask?.value
+            self?.finishContinuousExperienceTeardown(
+                generation: acceptedGeneration
+            )
+        }
+        continuousExperienceTeardownTask = teardown
+        return teardown
+    }
+
+    private func finishContinuousExperienceTeardown(generation: UInt64) {
+        guard continuousExperienceTeardownGeneration == generation else {
+            return
+        }
+        continuousExperienceTeardownTask = nil
     }
 
     private func finishContinuousExperience(generation: UInt64) {

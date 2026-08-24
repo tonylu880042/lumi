@@ -97,8 +97,8 @@ struct RecognitionConfidencePolicyTests {
         ))
     }
 
-    @Test("missing second candidate fails the pilot margin gate")
-    func rejectsMissingSecondCandidate() throws {
+    @Test("a single candidate does not require a second-member margin")
+    func acceptsSingleCandidateWithoutSecondMember() throws {
         let tony = try MemberID(rawValue: "tony")
         let policy = RecognitionConfidencePolicy(configuration: .pilot44B)
         let observation = RecognitionObservation.ranked(
@@ -106,8 +106,26 @@ struct RecognitionConfidencePolicyTests {
             second: nil
         )
 
-        #expect(policy.decide(observations: [observation, observation, observation]) == .unknown(
-            reason: .ambiguousCandidates
+        let confidence = try RecognitionConfidence(value: 0.90)
+        #expect(policy.decide(observations: [observation, observation, observation]) == .known(
+            memberID: tony,
+            confidence: confidence
+        ))
+    }
+
+    @Test("a same-member second sample does not create inter-member ambiguity")
+    func acceptsSameMemberSecondCandidateWithoutMargin() throws {
+        let tony = try MemberID(rawValue: "tony")
+        let policy = RecognitionConfidencePolicy(configuration: .pilot44B)
+        let observation = try RecognitionObservation.ranked(
+            best: RecognitionMatchCandidate(memberID: tony, similarity: 0.90),
+            second: RecognitionMatchCandidate(memberID: tony, similarity: 0.89)
+        )
+
+        let confidence = try RecognitionConfidence(value: 0.90)
+        #expect(policy.decide(observations: [observation, observation, observation]) == .known(
+            memberID: tony,
+            confidence: confidence
         ))
     }
 

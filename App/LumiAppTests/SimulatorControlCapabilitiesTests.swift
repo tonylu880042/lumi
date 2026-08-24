@@ -12,6 +12,7 @@ struct SimulatorControlCapabilitiesTests {
 
         #expect(contentSource.contains("simulationModel.startContinuousExperience()"))
         #expect(contentSource.contains("simulationModel.stopContinuousExperience()"))
+        #expect(contentSource.contains("simulationModel.restartContinuousExperience()"))
         #expect(contentSource.contains("if !simulationModel.supportsContinuousExperience"))
         #expect(contentSource.contains("simulationModel.isContinuousExperienceRunning"))
         #expect(contentSource.contains("重新開始辨識"))

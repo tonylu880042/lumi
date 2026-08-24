@@ -18,6 +18,16 @@ struct OpenAIRealtimeAudioSessionOptions: OptionSet, Equatable, Sendable {
     static let allowBluetoothHFP = Self(rawValue: 1 << 1)
 }
 
+/// Public WebRTC configuration policy kept separate from AVFoundation types so
+/// the route contract can be verified by the macOS package tests.
+enum OpenAIRealtimeWebRTCConfigurationPolicy {
+    static func defaultRouteOptions(
+        to existingOptions: OpenAIRealtimeAudioSessionOptions = []
+    ) -> OpenAIRealtimeAudioSessionOptions {
+        existingOptions.union([.defaultToSpeaker, .allowBluetoothHFP])
+    }
+}
+
 struct OpenAIRealtimeAudioSessionIntent: Equatable, Sendable {
     let category: OpenAIRealtimeAudioSessionCategory
     let mode: OpenAIRealtimeAudioSessionMode
@@ -54,6 +64,13 @@ enum OpenAIRealtimeAudioSessionBackendError: Error, Equatable, Sendable {
 /// implementation locks, configures, activates, and unlocks synchronously
 /// inside that operation; callers never hold a framework lock over `await`.
 protocol OpenAIRealtimeAudioSessionBackend: Sendable {
+    /// Applies the final WebRTC route options before the backend activates the
+    /// system audio session and creates its audio unit. The framework adapter
+    /// maps these Infrastructure values to WebRTC's documented configuration
+    /// setter; tests can record both the options and the ordering.
+    func configureWebRTCDefaults(
+        options: OpenAIRealtimeAudioSessionOptions
+    ) async
     func activate(
         configurationIntent: OpenAIRealtimeAudioSessionIntent
     ) async throws
@@ -129,8 +146,14 @@ actor OpenAIRealtimeAudioSession: OpenAIRealtimeAudioSessionController {
         guard !isActive else { return }
 
         do {
+            let intent = OpenAIRealtimeAudioSessionIntent(
+                category: .playAndRecord,
+                mode: .voiceChat,
+                options: OpenAIRealtimeWebRTCConfigurationPolicy.defaultRouteOptions()
+            )
+            await backend.configureWebRTCDefaults(options: intent.options)
             try await backend.activate(
-                configurationIntent: .voiceChat
+                configurationIntent: intent
             )
             isActive = true
             cleanupPerformed = false
@@ -217,6 +240,17 @@ private actor OpenAIRealtimeRTCAudioSessionBackend:
             try? audioSession.setActive(false)
             throw OpenAIRealtimeAudioSessionBackendError.activation
         }
+    }
+
+    /// WebRTC creates/configures its audio unit after the app's AVAudioSession
+    /// activation. Set the documented WebRTC default configuration first so
+    /// that its later configure step retains the product route preference.
+    func configureWebRTCDefaults(
+        options: OpenAIRealtimeAudioSessionOptions
+    ) async {
+        let configuration = RTCAudioSessionConfiguration.webRTC()
+        configuration.categoryOptions.insert(avOptions(for: options))
+        RTCAudioSessionConfiguration.setWebRTC(configuration)
     }
 
     func deactivate() async {

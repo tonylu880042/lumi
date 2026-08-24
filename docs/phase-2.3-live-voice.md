@@ -107,6 +107,23 @@ SQLite path when the operator requests recognition. Mock Debug and
 Release-Live keep their anonymous/mock identity composition. Hardware remains
 mocked, and the broker contract is unchanged.
 
+### 3.4 Debug-Live continuous visitor experience diagnostics
+
+Owner amendment (2026-08-24): the Debug-Live continuous visitor loop owns an
+explicit asynchronous restart boundary. A retry first cancels the prior
+generation, waits for the presence monitor's teardown and the prior loop task
+to finish, and only then begins the next visitor wait. This prevents a new
+arrival wait from overlapping the monitor operation that is still stopping.
+
+The loop writes privacy-safe local Console diagnostics through an injectable
+App-local callback whose default sink is OSLog/Console. The only event payload
+is one of these stage slugs: `wait-for-arrival`,
+`welcome-identity-and-voice`, `wait-for-departure`, or `finish-session`, with
+`started` or `failed` status. The UI continues to show only
+`自動辨識暫時無法使用，請再試一次。`; diagnostics never include a member name
+or ID, spoken label, embedding, photo, transcript, or raw error. Cancellation
+and an explicit stop are not reported as stage failures.
+
 ## 4. Device Provisioning and Keychain Contract
 
 ### 4.1 Token properties
@@ -308,6 +325,15 @@ Unified Plan receiver callbacks. This is a per-track media gain only; it does
 not write system output volume, force a speaker route, or change the existing
 external-route policy. The native `MPVolumeView` remains the user-facing
 system-volume control.
+
+Owner amendment (2026-08-24, route correction): WebRTC's public
+`RTCAudioSessionConfiguration.webRTCConfiguration()` is amended before audio
+unit creation through `setWebRTCConfiguration`. The App preserves the existing
+WebRTC category options and adds `.defaultToSpeaker` plus `.allowBluetoothHFP`,
+so an absent external route prefers the built-in speaker while Bluetooth HFP
+and other existing external-route behavior remain available. This does not
+write `AVAudioSession.outputVolume`, use a private API, or call
+`overrideOutputAudioPort`.
 
 ## 7. App Credential Source and Failure Mapping
 

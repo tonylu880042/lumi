@@ -132,8 +132,9 @@ struct ContentView: View {
                         if simulationModel.canStartVoiceSession {
                             simulationModel.startVoiceSession()
                         } else {
-                            simulationModel.stopContinuousExperience()
-                            simulationModel.startContinuousExperience()
+                            Task {
+                                await simulationModel.restartContinuousExperience()
+                            }
                         }
                     }
                     .buttonStyle(.borderedProminent)
