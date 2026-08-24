@@ -185,6 +185,7 @@ struct AppCompositionFactory {
                 voiceSimulationControls: nil,
                 memberAddressResolver: memberAddressResolver,
                 visitorPresenceMonitor: visitorPresence,
+                identityEnrollmentSummary: identityServiceLoader,
                 onAuthorizationRequired: {
                     setupModel.authorizationInvalidated()
                 }

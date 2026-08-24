@@ -329,6 +329,12 @@ actor AppCoreMLIdentityServiceLoader {
     }
 }
 
+extension AppCoreMLIdentityServiceLoader: IdentityEnrollmentSummaryPort {
+    func enrolledMemberCount() async throws -> Int {
+        try await load().enrolledMemberCount()
+    }
+}
+
 /// App-only composition for the DEBUG calibration graph.
 enum AppIdentityCalibrationComposition {
     static let databaseDirectoryName = "Lumi"

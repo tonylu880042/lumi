@@ -383,6 +383,53 @@ struct SessionSimulationModelTests {
         #expect(model.isContinuousExperienceRunning)
     }
 
+    @Test("continuous experience publishes enrolled count and recognition display state")
+    func continuousExperiencePublishesHomeStatus() async throws {
+        let hardware = MockHardwareControlPort()
+        let memberID = try MemberID(rawValue: "ruby")
+        let identity = ImmediateIdentityRecognitionPort(
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.82)
+            )
+        )
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let summary = FixedIdentityEnrollmentSummaryPort(count: 3)
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            memberAddressResolver: { candidate in
+                candidate == memberID
+                    ? try? VoiceMemberAddress(spokenLabel: "Ruby")
+                    : nil
+            },
+            visitorPresenceMonitor: presence,
+            identityEnrollmentSummary: summary
+        )
+
+        model.startContinuousExperience()
+        try #require(await waitUntilCurrent {
+            model.enrolledMemberCount == 3
+        })
+        #expect(model.recognitionDisplayStatus == .waiting)
+
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+
+        try #require(await waitUntilCurrent {
+            model.assistantState == .speaking
+        })
+        #expect(model.recognitionDisplayStatus == .known)
+        #expect(await summary.callCount == 1)
+    }
+
     @Test("ten-second departure result ends the session and rearms recognition")
     func continuousExperienceRearmsAfterDeparture() async throws {
         var diagnostics: [SessionSimulationModel.ContinuousExperienceDiagnostic] = []
@@ -1136,5 +1183,19 @@ private actor DeterministicRestartPresenceMonitor: VisitorPresenceMonitoringPort
         for continuation in continuations {
             continuation.resume(throwing: CancellationError())
         }
+    }
+}
+
+private actor FixedIdentityEnrollmentSummaryPort: IdentityEnrollmentSummaryPort {
+    private let count: Int
+    private(set) var callCount = 0
+
+    init(count: Int) {
+        self.count = count
+    }
+
+    func enrolledMemberCount() async throws -> Int {
+        callCount += 1
+        return count
     }
 }

@@ -119,6 +119,15 @@ final class SessionSimulationModel: ObservableObject {
         case stageFailed(ContinuousExperienceStage)
     }
 
+    /// Presentation-safe identity status for the ready Avatar overlay.
+    /// Low-level recognition reasons and raw identity values never reach UI.
+    enum RecognitionDisplayStatus: Equatable, Sendable {
+        case waiting
+        case recognizing
+        case known
+        case unknown
+    }
+
     enum PendingAction: Equatable {
         case confirmingPresence
         case beginningRotation
@@ -171,6 +180,8 @@ final class SessionSimulationModel: ObservableObject {
     @Published private(set) var visitorGreeting: String?
     @Published private(set) var pendingAvatarEvent: AvatarEventCommand?
     @Published private(set) var isContinuousExperienceRunning = false
+    @Published private(set) var recognitionDisplayStatus: RecognitionDisplayStatus = .waiting
+    @Published private(set) var enrolledMemberCount: Int?
 
     private let coordinator: AssistantSessionCoordinator
     private let hardware: MockHardwareControlPort
@@ -179,6 +190,7 @@ final class SessionSimulationModel: ObservableObject {
     private let memberAddressResolver:
         @Sendable (MemberID) async -> VoiceMemberAddress?
     private let visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)?
+    private let identityEnrollmentSummary: (any IdentityEnrollmentSummaryPort)?
     private let onAuthorizationRequired: @MainActor () -> Void
     private let onContinuousExperienceDiagnostic:
         @MainActor (ContinuousExperienceDiagnostic) -> Void
@@ -226,6 +238,7 @@ final class SessionSimulationModel: ObservableObject {
         memberAddressResolver: @escaping @Sendable (MemberID) async ->
             VoiceMemberAddress? = { _ in nil },
         visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
+        identityEnrollmentSummary: (any IdentityEnrollmentSummaryPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
         onAuthorizationRequired: @escaping @MainActor () -> Void = {},
@@ -239,6 +252,7 @@ final class SessionSimulationModel: ObservableObject {
         self.voiceSimulationControls = voiceSimulationControls
         self.memberAddressResolver = memberAddressResolver
         self.visitorPresenceMonitor = visitorPresenceMonitor
+        self.identityEnrollmentSummary = identityEnrollmentSummary
         self.onAuthorizationRequired = onAuthorizationRequired
         self.onContinuousExperienceDiagnostic = onContinuousExperienceDiagnostic
         self.mapper = mapper
@@ -282,6 +296,7 @@ final class SessionSimulationModel: ObservableObject {
         memberAddressResolver: @escaping @Sendable (MemberID) async ->
             VoiceMemberAddress? = { _ in nil },
         visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
+        identityEnrollmentSummary: (any IdentityEnrollmentSummaryPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
         onAuthorizationRequired: @escaping @MainActor () -> Void = {},
@@ -296,6 +311,7 @@ final class SessionSimulationModel: ObservableObject {
             voiceSimulationControls: voiceSimulationControls,
             memberAddressResolver: memberAddressResolver,
             visitorPresenceMonitor: visitorPresenceMonitor,
+            identityEnrollmentSummary: identityEnrollmentSummary,
             mapper: mapper,
             eventMapper: eventMapper,
             onAuthorizationRequired: onAuthorizationRequired,
@@ -427,6 +443,8 @@ final class SessionSimulationModel: ObservableObject {
                 while !Task.isCancelled {
                     stage = .waitForArrival
                     self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                    await self?.refreshEnrollmentSummary()
+                    try Task.checkCancellation()
                     try await visitorPresenceMonitor.waitForVisitor()
                     try Task.checkCancellation()
 
@@ -557,6 +575,23 @@ final class SessionSimulationModel: ObservableObject {
         guard continuousExperienceGeneration == generation else { return }
         isContinuousExperienceRunning = false
         continuousExperienceTask = nil
+    }
+
+    private func refreshEnrollmentSummary() async {
+        guard let identityEnrollmentSummary else {
+            enrolledMemberCount = nil
+            return
+        }
+
+        do {
+            let count = try await identityEnrollmentSummary.enrolledMemberCount()
+            guard !Task.isCancelled else { return }
+            enrolledMemberCount = max(0, count)
+        } catch is CancellationError {
+            return
+        } catch {
+            enrolledMemberCount = nil
+        }
     }
 
     private func runAutomaticWelcome() async throws {
@@ -1098,6 +1133,15 @@ final class SessionSimulationModel: ObservableObject {
             pendingAvatarEvent = nil
         }
 
+        switch state {
+        case .idle:
+            recognitionDisplayStatus = .waiting
+        case .recognizing:
+            recognitionDisplayStatus = .recognizing
+        default:
+            break
+        }
+
         switch (pendingAction, state) {
         case (.startingVoice, .speaking),
              (.userSpeechStarted, .listening),
@@ -1115,6 +1159,7 @@ final class SessionSimulationModel: ObservableObject {
     private func applyRecognitionResult(_ result: RecognitionResult) async {
         switch result {
         case let .known(memberID, _):
+            recognitionDisplayStatus = .known
             if let memberAddress = await memberAddressResolver(memberID) {
                 visitorGreeting = "\(memberAddress.spokenLabel)，歡迎回來～"
             } else {
@@ -1122,6 +1167,7 @@ final class SessionSimulationModel: ObservableObject {
             }
             pendingAvatarEvent = eventMapper.map(.memberRecognized)
         case .unknown:
+            recognitionDisplayStatus = .unknown
             visitorGreeting = "嗨，歡迎妳！"
             pendingAvatarEvent = nil
         }
