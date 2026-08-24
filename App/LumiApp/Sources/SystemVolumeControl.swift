@@ -33,20 +33,22 @@ struct SystemVolumeControl: UIViewRepresentable {
 struct SystemVolumeControlPanel: View {
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "speaker.wave.2.fill")
-                .foregroundStyle(AvatarTokens.lash)
+            Image(systemName: "speaker.fill")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(AvatarTokens.lash.opacity(0.62))
                 .accessibilityHidden(true)
 
-            Text(SystemVolumeControl.viewIntent.title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(AvatarTokens.lash)
-
             SystemVolumeControl()
-                .frame(width: 170, height: 32)
+                .frame(maxWidth: 280)
+                .frame(height: 44)
+
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(AvatarTokens.lash.opacity(0.62))
+                .accessibilityHidden(true)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(.bottom, 12)
+        .frame(maxWidth: 340)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 18)
     }
 }

@@ -9,6 +9,10 @@ import LumiUI
 struct ContentView: View {
     @ObservedObject private var simulationModel: SessionSimulationModel
 
+    @AppStorage(LumiHomeViewIntent.hintsStorageKey)
+    private var showsApplicationHints = LumiHomeViewIntent.showsHintsByDefault
+    @State private var isHomeSettingsPresented = false
+
 #if DEBUG
     private let calibrationModel: DebugIdentityCalibrationModel?
     @State private var isCalibrationPresented = false
@@ -111,12 +115,15 @@ struct ContentView: View {
             }
 
             if simulationModel.supportsContinuousExperience {
-                SystemVolumeControlPanel()
-                    .frame(
-                        maxWidth: .infinity,
-                        maxHeight: .infinity,
-                        alignment: .bottom
-                    )
+                LumiHomeOverlay(
+                    status: simulationModel.recognitionDisplayStatus,
+                    greeting: simulationModel.visitorGreeting,
+                    enrolledMemberCount: simulationModel.enrolledMemberCount,
+                    showsApplicationHints: showsApplicationHints,
+                    openSettings: {
+                        isHomeSettingsPresented = true
+                    }
+                )
             }
 
             if simulationModel.supportsContinuousExperience,
@@ -166,6 +173,13 @@ struct ContentView: View {
                 .accessibilityIdentifier("debug-identity-calibration")
             }
 #endif
+        }
+        .sheet(isPresented: $isHomeSettingsPresented) {
+            LumiHomeSettingsView(
+                showsApplicationHints: $showsApplicationHints
+            )
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
         }
 #if DEBUG
         .sheet(isPresented: $isCalibrationPresented) {
