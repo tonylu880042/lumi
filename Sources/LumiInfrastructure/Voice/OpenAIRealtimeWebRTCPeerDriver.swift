@@ -82,6 +82,10 @@ final class OpenAIRealtimeWebRTCPeerDriver:
     private var isPrepared = false
     private var isClosed = false
 
+    private enum RemoteAudioPolicy {
+        static let gain = 2.0
+    }
+
     /// The factory is owned by this driver instance; no process-wide WebRTC
     /// singleton is used. The injectable initializer keeps framework creation
     /// deterministic for callers that need to control construction.
@@ -290,16 +294,32 @@ final class OpenAIRealtimeWebRTCPeerDriver:
     }
 
     private func enableRemoteAudio(in stream: RTCMediaStream) {
-        for track in stream.audioTracks {
-            track.isEnabled = true
-        }
+        configureRemoteAudio(in: stream)
     }
 
     private func enableRemoteAudio(in receiver: RTCRtpReceiver) {
-        guard let track = receiver.track, track.kind == kRTCMediaStreamTrackKindAudio else {
+        configureRemoteAudioTrack(receiver.track)
+    }
+
+    /// Shared Infrastructure seam for both legacy stream and Unified Plan
+    /// receiver callbacks. The pinned WebRTC surface exposes remote-track gain
+    /// through `RTCAudioTrack.source.volume`; system output volume remains an
+    /// OS-owned concern.
+    func configureRemoteAudio(in stream: RTCMediaStream) {
+        for track in stream.audioTracks {
+            configureRemoteAudioTrack(track)
+        }
+    }
+
+    /// `RTCRtpReceiver.track` is typed as the base media-track class, so the
+    /// runtime audio track is narrowed before applying its public source gain.
+    func configureRemoteAudioTrack(_ track: RTCMediaStreamTrack?) {
+        guard let track, track.kind == kRTCMediaStreamTrackKindAudio else {
             return
         }
+
         track.isEnabled = true
+        (track as? RTCAudioTrack)?.source.volume = RemoteAudioPolicy.gain
     }
 
     // MARK: - RTCDataChannelDelegate

@@ -301,6 +301,14 @@ can change system output volume. `AVAudioSession.outputVolume` remains
 read-only; the App does not set it programmatically. The existing
 `.defaultToSpeaker` route preference remains unchanged.
 
+Owner amendment (2026-08-24): the product owner approved a `2.0` gain for
+decoded Realtime remote audio. Infrastructure applies this gain through the
+pinned WebRTC `RTCAudioTrack.source.volume` API for both legacy stream and
+Unified Plan receiver callbacks. This is a per-track media gain only; it does
+not write system output volume, force a speaker route, or change the existing
+external-route policy. The native `MPVolumeView` remains the user-facing
+system-volume control.
+
 ## 7. App Credential Source and Failure Mapping
 
 The concrete client-secret source is an Infrastructure adapter. It receives an

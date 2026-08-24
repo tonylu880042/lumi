@@ -1,9 +1,57 @@
 import Foundation
 @testable import LumiInfrastructure
+@preconcurrency import WebRTC
 import Testing
 
 @Suite("OpenAI Realtime WebRTC peer driver")
 struct OpenAIRealtimeWebRTCPeerDriverTests {
+    @Test("legacy remote audio tracks use the approved 2x gain")
+    @MainActor
+    func legacyRemoteAudioUsesApprovedGain() async throws {
+        let factory = RTCPeerConnectionFactory()
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: nil,
+            optionalConstraints: nil
+        )
+        let source = factory.audioSource(with: constraints)
+        let track = factory.audioTrack(
+            with: source,
+            trackId: "legacy-remote"
+        )
+        let stream = factory.mediaStream(withStreamId: "legacy")
+        stream.addAudioTrack(track)
+        let driver = OpenAIRealtimeWebRTCPeerDriver(factory: factory)
+
+        driver.configureRemoteAudio(in: stream)
+
+        #expect(track.isEnabled)
+        #expect(track.source.volume == 2.0)
+        await driver.close()
+    }
+
+    @Test("Unified Plan receiver audio tracks use the approved 2x gain")
+    @MainActor
+    func unifiedPlanRemoteAudioUsesApprovedGain() async throws {
+        let factory = RTCPeerConnectionFactory()
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: nil,
+            optionalConstraints: nil
+        )
+        let source = factory.audioSource(with: constraints)
+        let track = factory.audioTrack(
+            with: source,
+            trackId: "unified-plan-remote"
+        )
+        let receiverTrack: RTCMediaStreamTrack = track
+        let driver = OpenAIRealtimeWebRTCPeerDriver(factory: factory)
+
+        driver.configureRemoteAudioTrack(receiverTrack)
+
+        #expect(track.isEnabled)
+        #expect(track.source.volume == 2.0)
+        await driver.close()
+    }
+
     @Test("real WebRTC 151.0.0 creates an audio and data-channel offer")
     @MainActor
     func createsAudioAndDataOfferWithoutMicrophonePermission() async throws {

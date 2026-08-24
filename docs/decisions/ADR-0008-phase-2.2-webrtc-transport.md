@@ -78,6 +78,15 @@ WebRTC voice processing and echo cancellation. It prefers the built-in iPad
 speaker only when no external route is present and preserves wired or Bluetooth
 HFP routes.
 
+### 5.1 Apply the approved remote-audio gain
+
+The product owner approved a `2.0` gain for decoded Realtime remote audio on
+2026-08-24. The Infrastructure peer driver applies the pinned WebRTC
+`RTCAudioTrack.source.volume` value to remote audio tracks from both the legacy
+`didAddStream` callback and the Unified Plan `didAddReceiver` callback. This
+does not modify `AVAudioSession.outputVolume`, force `overrideOutputAudioPort`,
+or change the external-route policy in section 5.
+
 ### 6. Reject expired short-lived credentials locally
 
 A credential with `expiresAt <= now` is rejected before microphone permission,
