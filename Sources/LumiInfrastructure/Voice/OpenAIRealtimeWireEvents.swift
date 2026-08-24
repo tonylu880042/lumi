@@ -11,7 +11,8 @@ enum OpenAIRealtimeWireEncoder {
     // https://developers.openai.com/api/docs/guides/realtime-mcp
     static func sessionUpdate(
         for configuration: OpenAIRealtimeConfiguration,
-        enablesWeeklySummaryTool: Bool = false
+        enablesWeeklySummaryTool: Bool = false,
+        enablesVisitorEnrollmentTools: Bool = false
     ) throws -> Data {
         var session: [String: Any] = [
             "type": "realtime",
@@ -30,8 +31,9 @@ enum OpenAIRealtimeWireEncoder {
             ],
         ]
 
+        var tools: [[String: Any]] = []
         if enablesWeeklySummaryTool {
-            session["tools"] = [[
+            tools.append([
                 "type": "function",
                 "name": "get_member_weekly_summary",
                 "description": "Return the member's weekly exercise summary.",
@@ -41,7 +43,41 @@ enum OpenAIRealtimeWireEncoder {
                     "required": [String](),
                     "additionalProperties": false,
                 ],
-            ]]
+            ])
+        }
+        if enablesVisitorEnrollmentTools {
+            tools.append(contentsOf: [
+                [
+                    "type": "function",
+                    "name": "begin_visitor_enrollment",
+                    "description": "Capture exactly three face enrollment samples after the visitor clearly consents.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [String: Any](),
+                        "required": [String](),
+                        "additionalProperties": false,
+                    ],
+                ],
+                [
+                    "type": "function",
+                    "name": "complete_visitor_enrollment",
+                    "description": "Commit the pending face enrollment after the visitor states how Lumi should address them.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "spoken_label": [
+                                "type": "string",
+                                "description": "The visitor's spoken preferred name or form of address.",
+                            ],
+                        ],
+                        "required": ["spoken_label"],
+                        "additionalProperties": false,
+                    ],
+                ],
+            ])
+        }
+        if !tools.isEmpty {
+            session["tools"] = tools
             session["tool_choice"] = "auto"
         }
 
@@ -150,7 +186,11 @@ enum OpenAIRealtimeWireDecoder {
             )
         }
 
-        guard name == "get_member_weekly_summary" else {
+        guard [
+            "get_member_weekly_summary",
+            "begin_visitor_enrollment",
+            "complete_visitor_enrollment",
+        ].contains(name) else {
             return .toolCall(
                 VoiceToolCall(callID: callID, kind: .unsupported)
             )
@@ -160,16 +200,44 @@ enum OpenAIRealtimeWireDecoder {
             let arguments = object["arguments"] as? String,
             let argumentsData = arguments.data(using: .utf8),
             let parsedArguments = try? JSONSerialization.jsonObject(with: argumentsData),
-            let argumentsObject = parsedArguments as? [String: Any],
-            argumentsObject.isEmpty
+            let argumentsObject = parsedArguments as? [String: Any]
         else {
             return .toolCall(
                 VoiceToolCall(callID: callID, kind: .invalidArguments)
             )
         }
 
-        return .toolCall(
-            VoiceToolCall(callID: callID, kind: .getMemberWeeklySummary)
-        )
+        let kind: VoiceToolCallKind
+        switch name {
+        case "get_member_weekly_summary":
+            guard argumentsObject.isEmpty else {
+                return invalidToolArguments(callID: callID)
+            }
+            kind = .getMemberWeeklySummary
+        case "begin_visitor_enrollment":
+            guard argumentsObject.isEmpty else {
+                return invalidToolArguments(callID: callID)
+            }
+            kind = .beginVisitorEnrollment
+        case "complete_visitor_enrollment":
+            guard
+                Set(argumentsObject.keys) == ["spoken_label"],
+                let spokenLabel = argumentsObject["spoken_label"] as? String,
+                let address = try? VoiceMemberAddress(spokenLabel: spokenLabel)
+            else {
+                return invalidToolArguments(callID: callID)
+            }
+            kind = .completeVisitorEnrollment(address)
+        default:
+            preconditionFailure("Supported tool name guard is exhaustive")
+        }
+
+        return .toolCall(VoiceToolCall(callID: callID, kind: kind))
+    }
+
+    private static func invalidToolArguments(
+        callID: String
+    ) -> OpenAIRealtimeProviderEvent {
+        .toolCall(VoiceToolCall(callID: callID, kind: .invalidArguments))
     }
 }

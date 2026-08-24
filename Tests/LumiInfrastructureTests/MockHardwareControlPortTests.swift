@@ -190,6 +190,29 @@ struct MockHardwareControlPortTests {
         #expect(await hardware.hasPendingReturnHome == false)
     }
 
+    @Test("an early home-arrival signal completes the next return request")
+    func earlyReturnHomeSignalIsSticky() async throws {
+        let hardware = MockHardwareControlPort()
+
+        await hardware.completeCurrentOrNextReturnHome()
+        try await hardware.returnHome()
+
+        #expect(await hardware.returnHomeCallCount == 1)
+        #expect(await hardware.hasPendingReturnHome == false)
+    }
+
+    @Test("stop clears an unused early home-arrival signal")
+    func stopClearsEarlyReturnHomeSignal() async throws {
+        let hardware = MockHardwareControlPort()
+        await hardware.completeCurrentOrNextReturnHome()
+        await hardware.stop()
+
+        let request = Task { try await hardware.returnHome() }
+        #expect(await waitUntil { await hardware.hasPendingReturnHome })
+        await hardware.completeReturnHome()
+        try await request.value
+    }
+
     @Test("returnHome propagates an explicit home-arrival failure")
     func returnHomeFailureIsPropagated() async throws {
         let hardware = MockHardwareControlPort()

@@ -55,25 +55,51 @@ protocol IdentityCalibrationStore: Sendable {
     func deleteRecords(for memberID: MemberID) async throws
 }
 
+/// Atomic persistence boundary for a completed conversational enrollment.
+/// Pending embeddings remain owned by the service and never reach this store
+/// until a valid spoken address is available.
+protocol VisitorEnrollmentStore: Sendable {
+    func commitVisitorEnrollment(
+        memberID: MemberID,
+        address: VoiceMemberAddress,
+        consentedAt: Date,
+        completedAt: Date,
+        embeddings: [FaceEmbedding]
+    ) async throws
+
+    func address(for memberID: MemberID) async throws -> VoiceMemberAddress?
+}
+
 /// Composes one manually gated camera frame with the existing Vision/YuNet/
 /// SFace pipeline and the evidence-only matcher.
 ///
 /// This actor is an Application-port implementation. It never returns a
 /// CameraFrame, FaceEmbedding, SDK object, `UnknownReason`, or production
 /// recognition decision to its caller.
-public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
+public actor CoreMLIdentityCalibrationService:
+    IdentityCalibrationPort,
+    VisitorEnrollmentPort,
+    VoiceMemberAddressRepository
+{
     private let frameSource: any IdentityCalibrationFrameSource
     private let photoFrameSource: any IdentityCalibrationPhotoFrameSource
     private let embeddingPipeline: any IdentityCalibrationEmbeddingProducing
     private let store: any IdentityCalibrationStore
+    private let visitorEnrollmentStore: (any VisitorEnrollmentStore)?
     private let matcher = BruteForceCosineFaceMatcher()
-    private var captureInFlight = false
+    private let captureGate = IdentityCalibrationCaptureGate()
+    private let cameraLeaseCoordinator: IdentityCalibrationCameraLeaseCoordinator
+    private var manuallyHeldCameraLeases: [IdentityCalibrationCameraLeaseCoordinator.Lease] = []
+    private var enrollmentGeneration: UInt64 = 0
+    private var enrollmentInProgress = false
+    private var pendingEnrollment: PendingVisitorEnrollment?
 
     /// Internal dependency injection keeps framework-free tests deterministic.
     init(
         frameSource: any IdentityCalibrationFrameSource,
         embeddingPipeline: any IdentityCalibrationEmbeddingProducing,
         store: any IdentityCalibrationStore,
+        visitorEnrollmentStore: (any VisitorEnrollmentStore)? = nil,
         photoFrameSource: any IdentityCalibrationPhotoFrameSource =
             ImageIOIdentityCalibrationPhotoFrameDecoder()
     ) {
@@ -81,27 +107,159 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
         self.photoFrameSource = photoFrameSource
         self.embeddingPipeline = embeddingPipeline
         self.store = store
+        self.visitorEnrollmentStore = visitorEnrollmentStore
+        self.cameraLeaseCoordinator = IdentityCalibrationCameraLeaseCoordinator(
+            frameSource: frameSource
+        )
     }
 
-    public func startCamera() async throws {
+    public func begin(
+        consentedAt: Date
+    ) async throws -> VisitorEnrollmentBeginResult {
+        guard
+            pendingEnrollment == nil,
+            !enrollmentInProgress,
+            consentedAt.timeIntervalSinceReferenceDate.isFinite,
+            visitorEnrollmentStore != nil
+        else {
+            throw IdentityCalibrationError.failed
+        }
+
+        enrollmentInProgress = true
+        defer { enrollmentInProgress = false }
+        enrollmentGeneration &+= 1
+        let generation = enrollmentGeneration
+
         do {
-            try Task.checkCancellation()
-            try await frameSource.start()
-            try Task.checkCancellation()
+            let result = try await withCameraLease {
+                try await self.withEnrollmentCaptureSlot {
+                    try Task.checkCancellation()
+
+                    var embeddings: [FaceEmbedding] = []
+                    embeddings.reserveCapacity(
+                        VisitorEnrollmentToolCallRouter.requiredSampleCount
+                    )
+                    for _ in 0..<VisitorEnrollmentToolCallRouter.requiredSampleCount {
+                        try self.ensureEnrollmentGeneration(generation)
+                        guard let embedding = try await self.captureEmbeddingWithoutGate() else {
+                            return VisitorEnrollmentBeginResult.noUsableFace
+                        }
+                        try self.ensureEnrollmentGeneration(generation)
+                        embeddings.append(embedding)
+                    }
+
+                    self.pendingEnrollment = PendingVisitorEnrollment(
+                        consentedAt: consentedAt,
+                        embeddings: embeddings
+                    )
+                    return VisitorEnrollmentBeginResult.samplesCaptured(embeddings.count)
+                }
+            }
+            try ensureEnrollmentGeneration(generation)
+            return result
         } catch let cancellation as CancellationError {
-            await frameSource.stop()
+            pendingEnrollment = nil
             throw cancellation
         } catch {
-            if Task.isCancelled {
-                await frameSource.stop()
+            pendingEnrollment = nil
+            if Task.isCancelled || generation != enrollmentGeneration {
                 throw CancellationError()
             }
             throw IdentityCalibrationError.failed
         }
     }
 
+    public func complete(
+        memberID: MemberID,
+        address: VoiceMemberAddress,
+        completedAt: Date
+    ) async throws {
+        guard
+            let pendingEnrollment,
+            let visitorEnrollmentStore,
+            completedAt.timeIntervalSinceReferenceDate.isFinite,
+            pendingEnrollment.embeddings.count
+                == VisitorEnrollmentToolCallRouter.requiredSampleCount
+        else {
+            throw IdentityCalibrationError.failed
+        }
+
+        do {
+            try Task.checkCancellation()
+            try await visitorEnrollmentStore.commitVisitorEnrollment(
+                memberID: memberID,
+                address: address,
+                consentedAt: pendingEnrollment.consentedAt,
+                completedAt: completedAt,
+                embeddings: pendingEnrollment.embeddings
+            )
+            // A committed transaction wins a cancellation race. Clearing the
+            // in-memory value prevents a caller from duplicating the write.
+            self.pendingEnrollment = nil
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
+    public func cancel() async {
+        enrollmentGeneration &+= 1
+        pendingEnrollment = nil
+    }
+
+    public func address(for memberID: MemberID) async throws -> VoiceMemberAddress? {
+        guard let visitorEnrollmentStore else {
+            throw IdentityCalibrationError.failed
+        }
+        do {
+            try Task.checkCancellation()
+            let address = try await visitorEnrollmentStore.address(for: memberID)
+            try Task.checkCancellation()
+            return address
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
+    public func startCamera() async throws {
+        var lease: IdentityCalibrationCameraLeaseCoordinator.Lease?
+        do {
+            try Task.checkCancellation()
+            let acquiredLease = try await cameraLeaseCoordinator.acquire()
+            lease = acquiredLease
+            try Task.checkCancellation()
+            manuallyHeldCameraLeases.append(acquiredLease)
+        } catch let cancellation as CancellationError {
+            if let lease {
+                await cameraLeaseCoordinator.release(lease)
+            }
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                if let lease {
+                    await cameraLeaseCoordinator.release(lease)
+                }
+                throw CancellationError()
+            }
+            if let lease {
+                await cameraLeaseCoordinator.release(lease)
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
     public func stopCamera() async {
-        await frameSource.stop()
+        guard let lease = manuallyHeldCameraLeases.popLast() else { return }
+        await cameraLeaseCoordinator.release(lease)
     }
 
     /// Maps the current camera generation's transient BGRA frames into the
@@ -261,6 +419,29 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
         }
     }
 
+    /// Presence needs only a fresh usable face. It deliberately avoids the
+    /// SQLite gallery query and 800-member cosine ranking used by recognition.
+    public func captureUsableFace() async throws -> Bool {
+        do {
+            try Task.checkCancellation()
+            let embedding = try await capturePresenceEmbedding()
+            try Task.checkCancellation()
+            return embedding != nil
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch IdentityCalibrationCaptureError.busy {
+            // Presence owns no semantic side effect. A regular diagnostic
+            // capture that is already in flight is simply an absent sample;
+            // the monitor will retry without tearing down its camera lease.
+            return false
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
     public func captureReturnVisitPhoto(
         from imageURL: URL
     ) async throws -> IdentityCalibrationReturnResult {
@@ -362,41 +543,103 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
     }
 
     private func captureEmbedding() async throws -> FaceEmbedding? {
-        guard !captureInFlight else {
-            throw IdentityCalibrationError.failed
+        try await withCaptureSlot {
+            try await self.captureEmbeddingWithoutGate()
         }
-        captureInFlight = true
-        defer { captureInFlight = false }
+    }
 
-        let frame = try await frameSource.nextFrame()
+    private func capturePresenceEmbedding() async throws -> FaceEmbedding? {
+        try await withPresenceCaptureSlot {
+            try await self.captureEmbeddingWithoutGate()
+        }
+    }
+
+    private func captureEmbeddingWithoutGate() async throws -> FaceEmbedding? {
+        let frame = try await self.frameSource.nextFrame()
         try Task.checkCancellation()
-        return try await embeddingPipeline.embedding(for: frame)
+        return try await self.embeddingPipeline.embedding(for: frame)
+    }
+
+    private func ensureEnrollmentGeneration(_ generation: UInt64) throws {
+        guard generation == enrollmentGeneration, !Task.isCancelled else {
+            throw CancellationError()
+        }
     }
 
     private func captureEmbedding(from imageURL: URL) async throws -> FaceEmbedding? {
-        guard !captureInFlight else {
-            throw IdentityCalibrationError.failed
+        try await withCaptureSlot {
+            let frame = try await self.photoFrameSource.frame(from: imageURL)
+            try Task.checkCancellation()
+            return try await self.embeddingPipeline.embedding(for: frame)
         }
-        captureInFlight = true
-        defer { captureInFlight = false }
-
-        let frame = try await photoFrameSource.frame(from: imageURL)
-        try Task.checkCancellation()
-        return try await embeddingPipeline.embedding(for: frame)
     }
 
     private func captureEmbedding(
         from photo: IdentityCalibrationPhoto
     ) async throws -> FaceEmbedding? {
-        guard !captureInFlight else {
-            throw IdentityCalibrationError.failed
+        try await withCaptureSlot {
+            let frame = try await self.photoFrameSource.frame(from: photo)
+            try Task.checkCancellation()
+            return try await self.embeddingPipeline.embedding(for: frame)
         }
-        captureInFlight = true
-        defer { captureInFlight = false }
+    }
 
-        let frame = try await photoFrameSource.frame(from: photo)
-        try Task.checkCancellation()
-        return try await embeddingPipeline.embedding(for: frame)
+    private func withCaptureSlot<T: Sendable>(
+        _ operation: @escaping () async throws -> T
+    ) async throws -> T {
+        guard let permit = await captureGate.tryAcquire() else {
+            throw IdentityCalibrationCaptureError.busy
+        }
+        do {
+            let result = try await operation()
+            await captureGate.release(permit)
+            return result
+        } catch {
+            await captureGate.release(permit)
+            throw error
+        }
+    }
+
+    private func withPresenceCaptureSlot<T: Sendable>(
+        _ operation: @escaping () async throws -> T
+    ) async throws -> T {
+        let permit = try await captureGate.acquirePresence()
+        do {
+            let result = try await operation()
+            await captureGate.release(permit)
+            return result
+        } catch {
+            await captureGate.release(permit)
+            throw error
+        }
+    }
+
+    private func withEnrollmentCaptureSlot<T: Sendable>(
+        _ operation: @escaping () async throws -> T
+    ) async throws -> T {
+        let permit = try await captureGate.acquireEnrollment()
+        do {
+            let result = try await operation()
+            await captureGate.release(permit)
+            return result
+        } catch {
+            await captureGate.release(permit)
+            throw error
+        }
+    }
+
+    private func withCameraLease<T: Sendable>(
+        _ operation: @escaping () async throws -> T
+    ) async throws -> T {
+        let lease = try await cameraLeaseCoordinator.acquire()
+        do {
+            let result = try await operation()
+            await cameraLeaseCoordinator.release(lease)
+            return result
+        } catch {
+            await cameraLeaseCoordinator.release(lease)
+            throw error
+        }
     }
 
     private static func makeCandidate(
@@ -419,6 +662,244 @@ public actor CoreMLIdentityCalibrationService: IdentityCalibrationPort {
             bytesPerRow: frame.bytesPerRow
         )
     }
+}
+
+private enum IdentityCalibrationCaptureError: Error {
+    case busy
+}
+
+/// Coordinates ownership of the shared camera stream. The start task is a
+/// single-flight operation: concurrent leases await the same underlying
+/// `frameSource.start()` and only the final lease releases the stream.
+private actor IdentityCalibrationCameraLeaseCoordinator {
+    struct Lease: Hashable, Sendable {
+        fileprivate let id: UInt64
+    }
+
+    private struct StopOperation: Sendable {
+        let generation: UInt64
+        let task: Task<Void, Never>
+    }
+
+    private let frameSource: any IdentityCalibrationFrameSource
+    private var activeLeaseIDs: Set<UInt64> = []
+    private var pendingAcquireCount = 0
+    private var nextLeaseID: UInt64 = 0
+    private var startTask: Task<Void, Error>?
+    private var nextStopGeneration: UInt64 = 0
+    private var stopOperation: StopOperation?
+
+    init(frameSource: any IdentityCalibrationFrameSource) {
+        self.frameSource = frameSource
+    }
+
+    func acquire() async throws -> Lease {
+        try Task.checkCancellation()
+
+        if let stopOperation {
+            await stopOperation.task.value
+            clearStopOperation(generation: stopOperation.generation)
+        }
+        try Task.checkCancellation()
+
+        pendingAcquireCount += 1
+
+        let taskToAwait: Task<Void, Error>?
+        if activeLeaseIDs.isEmpty {
+            if let startTask {
+                taskToAwait = startTask
+            } else {
+                let frameSource = frameSource
+                let task = Task<Void, Error> {
+                    try await frameSource.start()
+                }
+                startTask = task
+                taskToAwait = task
+            }
+        } else {
+            taskToAwait = nil
+        }
+
+        do {
+            if let taskToAwait {
+                try await taskToAwait.value
+                try Task.checkCancellation()
+                startTask = nil
+            }
+
+            pendingAcquireCount -= 1
+            nextLeaseID &+= 1
+            let lease = Lease(id: nextLeaseID)
+            activeLeaseIDs.insert(lease.id)
+            return lease
+        } catch {
+            pendingAcquireCount -= 1
+            if pendingAcquireCount == 0, activeLeaseIDs.isEmpty {
+                let taskToCancel = startTask
+                startTask = nil
+                taskToCancel?.cancel()
+                await stopCameraStream()
+            }
+            throw error
+        }
+    }
+
+    func release(_ lease: Lease) async {
+        guard activeLeaseIDs.remove(lease.id) != nil else { return }
+        guard activeLeaseIDs.isEmpty, pendingAcquireCount == 0, startTask == nil else {
+            return
+        }
+        await stopCameraStream()
+    }
+
+    private func stopCameraStream() async {
+        if let stopOperation {
+            await stopOperation.task.value
+            clearStopOperation(generation: stopOperation.generation)
+            return
+        }
+
+        let frameSource = frameSource
+        nextStopGeneration &+= 1
+        let generation = nextStopGeneration
+        let task = Task<Void, Never> {
+            await frameSource.stop()
+        }
+        stopOperation = StopOperation(generation: generation, task: task)
+        await task.value
+        clearStopOperation(generation: generation)
+    }
+
+    private func clearStopOperation(generation: UInt64) {
+        guard stopOperation?.generation == generation else { return }
+        stopOperation = nil
+    }
+}
+
+/// Serializes fresh-frame and embedding work while allowing a long-running
+/// presence monitor to share the same camera service with enrollment or
+/// recognition. Regular diagnostic captures fail closed when occupied, while
+/// presence waits and enrollment receives priority over queued presence work.
+private actor IdentityCalibrationCaptureGate {
+    struct Permit: Sendable {}
+
+    private enum WaiterKind: Equatable {
+        case enrollment
+        case presence
+    }
+
+    private struct Waiter {
+        let id: UInt64
+        let kind: WaiterKind
+        let continuation: CheckedContinuation<Permit, Error>
+    }
+
+    private var held = false
+    private var nextWaiterID: UInt64 = 0
+    private var waiters: [Waiter] = []
+    private var enrollmentWaiterID: UInt64?
+
+    func tryAcquire() -> Permit? {
+        guard !held, waiters.isEmpty, enrollmentWaiterID == nil else {
+            return nil
+        }
+        held = true
+        return Permit()
+    }
+
+    func acquirePresence() async throws -> Permit {
+        try await acquire(kind: .presence)
+    }
+
+    func acquireEnrollment() async throws -> Permit {
+        guard enrollmentWaiterID == nil else {
+            throw IdentityCalibrationError.failed
+        }
+        return try await acquire(kind: .enrollment)
+    }
+
+    func release(_: Permit) {
+        if let index = waiters.firstIndex(where: { $0.kind == .enrollment }) {
+            let waiter = waiters.remove(at: index)
+            enrollmentWaiterID = nil
+            waiter.continuation.resume(returning: Permit())
+            return
+        }
+
+        if !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            waiter.continuation.resume(returning: Permit())
+            return
+        }
+
+        held = false
+    }
+
+    private func acquire(kind: WaiterKind) async throws -> Permit {
+        if !held, waiters.isEmpty, enrollmentWaiterID == nil {
+            held = true
+            return Permit()
+        }
+
+        nextWaiterID &+= 1
+        let waiterID = nextWaiterID
+        if kind == .enrollment {
+            enrollmentWaiterID = waiterID
+        }
+
+        var receivedPermit = false
+        do {
+            let permit = try await withTaskCancellationHandler(operation: {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Permit, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        waiters.append(Waiter(
+                            id: waiterID,
+                            kind: kind,
+                            continuation: continuation
+                        ))
+                    }
+                }
+            }, onCancel: {
+                Task { [weak self] in
+                    await self?.cancel(waiterID: waiterID)
+                }
+            })
+            receivedPermit = true
+            try Task.checkCancellation()
+            return permit
+        } catch {
+            if receivedPermit {
+                release(Permit())
+            } else {
+                cancel(waiterID: waiterID)
+            }
+            throw error
+        }
+    }
+
+    private func cancel(waiterID: UInt64) {
+        if let index = waiters.firstIndex(where: { $0.id == waiterID }) {
+            let waiter = waiters.remove(at: index)
+            if waiter.kind == .enrollment {
+                enrollmentWaiterID = nil
+            }
+            waiter.continuation.resume(throwing: CancellationError())
+            return
+        }
+
+        // Cancellation can happen before the continuation is appended.
+        if enrollmentWaiterID == waiterID {
+            enrollmentWaiterID = nil
+        }
+    }
+}
+
+private struct PendingVisitorEnrollment: Sendable {
+    let consentedAt: Date
+    let embeddings: [FaceEmbedding]
 }
 
 /// Loads the two exact 40A compiled model resources and builds the concrete
@@ -489,7 +970,8 @@ public enum CoreMLIdentityCalibrationFactory {
             return CoreMLIdentityCalibrationService(
                 frameSource: frameSource,
                 embeddingPipeline: embeddingPipeline,
-                store: store
+                store: store,
+                visitorEnrollmentStore: store
             )
 #else
             throw IdentityCalibrationError.failed
@@ -517,6 +999,7 @@ public enum CoreMLIdentityCalibrationFactory {
 
 #if canImport(SQLite3)
 extension SQLiteFaceEmbeddingStore: IdentityCalibrationStore {}
+extension SQLiteFaceEmbeddingStore: VisitorEnrollmentStore {}
 #endif
 
 extension SFaceFrameEmbeddingPipeline: IdentityCalibrationEmbeddingProducing {}

@@ -129,6 +129,22 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         purpose: OpenAIRealtimeConnectionPurpose,
         enablesWeeklySummaryTool: Bool = false
     ) async throws {
+        try await connect(
+            clientSecret: clientSecret,
+            configuration: configuration,
+            purpose: purpose,
+            enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+            enablesVisitorEnrollmentTools: false
+        )
+    }
+
+    func connect(
+        clientSecret: OpenAIRealtimeClientSecret,
+        configuration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
+    ) async throws {
         guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
         guard lifecycle == .idle else {
             throw OpenAIWebRTCTransportError.transportFailure
@@ -202,7 +218,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                 generation: acceptedGeneration,
                 configuration: configuration,
                 purpose: purpose,
-                enablesWeeklySummaryTool: enablesWeeklySummaryTool
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
             )
             lifecycle = .connected
         } catch {
@@ -259,7 +276,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         generation acceptedGeneration: UInt64,
         configuration: OpenAIRealtimeConfiguration,
         purpose: OpenAIRealtimeConnectionPurpose,
-        enablesWeeklySummaryTool: Bool
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
     ) {
         let task = Task { [weak self] in
             var iterator = peerEvents.makeAsyncIterator()
@@ -270,7 +288,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                     generation: acceptedGeneration,
                     configuration: configuration,
                     purpose: purpose,
-                    enablesWeeklySummaryTool: enablesWeeklySummaryTool
+                    enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+                    enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
                 )
             }
 
@@ -285,7 +304,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         generation acceptedGeneration: UInt64,
         configuration: OpenAIRealtimeConfiguration,
         purpose: OpenAIRealtimeConnectionPurpose,
-        enablesWeeklySummaryTool: Bool
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
     ) async {
         guard isGenerationActive(acceptedGeneration), !Task.isCancelled else {
             return
@@ -304,7 +324,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         do {
             let update = try OpenAIRealtimeWireEncoder.sessionUpdate(
                 for: configuration,
-                enablesWeeklySummaryTool: enablesWeeklySummaryTool
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
             )
             try await awaitCancellable {
                 try await self.peerDriver.send(update)

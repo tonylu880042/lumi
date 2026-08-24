@@ -19,6 +19,16 @@ public protocol OpenAIRealtimeTransport: Sendable {
         enablesWeeklySummaryTool: Bool
     ) async throws
 
+    /// Connects with the exact provider-neutral tool capabilities approved for
+    /// this session context.
+    func connect(
+        clientSecret: OpenAIRealtimeClientSecret,
+        configuration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
+    ) async throws
+
     /// Returns the provider event stream for this transport instance.
     ///
     /// The stream finishes when the underlying connection closes. The adapter
@@ -33,6 +43,21 @@ public protocol OpenAIRealtimeTransport: Sendable {
 }
 
 public extension OpenAIRealtimeTransport {
+    func connect(
+        clientSecret: OpenAIRealtimeClientSecret,
+        configuration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools _: Bool
+    ) async throws {
+        try await connect(
+            clientSecret: clientSecret,
+            configuration: configuration,
+            purpose: purpose,
+            enablesWeeklySummaryTool: enablesWeeklySummaryTool
+        )
+    }
+
     /// Connects without enabling application tools.
     func connect(
         clientSecret: OpenAIRealtimeClientSecret,

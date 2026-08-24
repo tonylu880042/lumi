@@ -151,6 +151,11 @@ struct OpenAIRealtimeAdapterTests {
             await source.receivedConfigurations.first?.instructions
         )
         #expect(instructions.contains("tony"))
+        #expect(instructions.contains("第一個句子必須以「tony，歡迎回來」開頭"))
+        #expect(instructions.contains("漂亮姊姊"))
+        #expect(instructions.contains("寶貝"))
+        #expect(instructions.contains("公主殿下"))
+        #expect(instructions.contains("只選一個"))
         for marker in [
             "visits_this_week",
             "activity_met_minutes",
@@ -603,6 +608,50 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await transport.sentData.isEmpty)
     }
 
+    @Test("visitor enrollment capability is active only for visitor sessions")
+    func visitorEnrollmentCapabilityUsesVisitorSessionOnly() async throws {
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("visitor-enrollment-secret"),
+        ])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesWeeklySummaryTool: true,
+            enablesVisitorEnrollmentTools: true
+        )
+        var iterator = (await adapter.toolCallUpdates()).makeAsyncIterator()
+        let call = VoiceToolCall(
+            callID: "visitor-enrollment-call",
+            kind: .beginVisitorEnrollment
+        )
+        let result = VoiceToolResult(
+            callID: call.callID,
+            payload: .enrollmentSamplesCaptured(3)
+        )
+        let start = Task { try await adapter.start(context: .visitor) }
+
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        #expect(await transport.connectionToolFlags == [false])
+        #expect(await transport.connectionVisitorToolFlags == [true])
+        await transport.emit(.sessionCreated)
+        try await start.value
+        let instructions = try #require(
+            await source.receivedConfigurations.first?.instructions
+        )
+        #expect(instructions.contains("漂亮姊姊，我好像還不認識妳"))
+        #expect(instructions.contains("我可以跟你認識嗎？"))
+        await transport.emit(.toolCall(call))
+
+        #expect(await iterator.next() == call)
+        try await adapter.sendToolResult(result)
+        #expect(await transport.sentData == [
+            try OpenAIRealtimeWireEncoder.functionCallOutput(for: result),
+            try OpenAIRealtimeWireEncoder.responseCreate(),
+        ])
+        await adapter.stop()
+    }
+
     @Test("tool subscribers are independent and each receive the normalized call")
     func toolSubscribersAreIndependent() async throws {
         let source = TestClientSecretSource(secrets: [try makeSecret("tool-subscriber-secret")])
@@ -978,6 +1027,7 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
     private(set) var connectCallCount = 0
     private(set) var connectionPurposes: [OpenAIRealtimeConnectionPurpose] = []
     private(set) var connectionToolFlags: [Bool] = []
+    private(set) var connectionVisitorToolFlags: [Bool] = []
     private(set) var closeCallCount = 0
     private(set) var sendCallCount = 0
     private(set) var sendStarted = false
@@ -1007,6 +1057,20 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
         connectCallCount += 1
         connectionPurposes.append(purpose)
         connectionToolFlags.append(enablesWeeklySummaryTool)
+        if let connectError { throw connectError }
+    }
+
+    func connect(
+        clientSecret _: OpenAIRealtimeClientSecret,
+        configuration _: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
+    ) async throws {
+        connectCallCount += 1
+        connectionPurposes.append(purpose)
+        connectionToolFlags.append(enablesWeeklySummaryTool)
+        connectionVisitorToolFlags.append(enablesVisitorEnrollmentTools)
         if let connectError { throw connectError }
     }
 
@@ -1109,13 +1173,15 @@ private enum TestTransportError: Error, Equatable, Sendable {
 private func makeAdapter(
     source: TestClientSecretSource,
     factory: TestRealtimeTransportFactory,
-    enablesWeeklySummaryTool: Bool = false
+    enablesWeeklySummaryTool: Bool = false,
+    enablesVisitorEnrollmentTools: Bool = false
 ) -> OpenAIRealtimeAdapter {
     OpenAIRealtimeAdapter(
         configuration: OpenAIRealtimeConfiguration(),
         clientSecretSource: source,
         transportFactory: factory,
-        enablesWeeklySummaryTool: enablesWeeklySummaryTool
+        enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+        enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
     )
 }
 

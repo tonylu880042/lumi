@@ -116,6 +116,45 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(serialized?.contains("member_id") == false)
     }
 
+    @Test("visitor enrollment session declares only consent and naming tools")
+    func sessionUpdateDeclaresVisitorEnrollmentTools() throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            voice: "marin",
+            instructions: "instructions"
+        )
+
+        let root = try jsonObject(
+            try OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesVisitorEnrollmentTools: true
+            )
+        )
+        let session = try object(root, at: "session")
+        guard let tools = session["tools"] as? [[String: Any]] else {
+            Issue.record("Expected visitor enrollment tools")
+            return
+        }
+
+        #expect(tools.count == 2)
+        #expect(tools.compactMap { $0["name"] as? String } == [
+            "begin_visitor_enrollment",
+            "complete_visitor_enrollment",
+        ])
+
+        let beginParameters = try object(tools[0], at: "parameters")
+        #expect((beginParameters["properties"] as? [String: Any])?.isEmpty == true)
+        #expect((beginParameters["required"] as? [Any])?.isEmpty == true)
+        #expect(beginParameters["additionalProperties"] as? Bool == false)
+
+        let completeParameters = try object(tools[1], at: "parameters")
+        let completeProperties = try object(completeParameters, at: "properties")
+        let spokenLabel = try object(completeProperties, at: "spoken_label")
+        #expect(spokenLabel["type"] as? String == "string")
+        #expect(completeParameters["required"] as? [String] == ["spoken_label"])
+        #expect(completeParameters["additionalProperties"] as? Bool == false)
+        #expect(session["tool_choice"] as? String == "auto")
+    }
+
     @Test("response.create is the minimal event and caller can preserve order")
     func responseCreateCanFollowSessionUpdate() throws {
         let configuration = OpenAIRealtimeConfiguration(
@@ -302,6 +341,79 @@ struct OpenAIRealtimeWireEventsTests {
 
         for fixture in invalidArguments {
             let callID = fixture["call_id"] as? String ?? ""
+            #expect(
+                OpenAIRealtimeWireDecoder.decode(try jsonData(fixture))
+                    == .toolCall(
+                        VoiceToolCall(callID: callID, kind: .invalidArguments)
+                    )
+            )
+        }
+    }
+
+    @Test("visitor enrollment function calls decode only exact arguments")
+    func visitorEnrollmentFunctionCallsDecode() throws {
+        let begin = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.done",
+                "call_id": "begin-call",
+                "name": "begin_visitor_enrollment",
+                "arguments": "{}",
+            ])
+        )
+        #expect(
+            begin == .toolCall(
+                VoiceToolCall(callID: "begin-call", kind: .beginVisitorEnrollment)
+            )
+        )
+
+        let complete = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.done",
+                "call_id": "complete-call",
+                "name": "complete_visitor_enrollment",
+                "arguments": #"{"spoken_label":"Tony"}"#,
+            ])
+        )
+        #expect(
+            complete == .toolCall(
+                VoiceToolCall(
+                    callID: "complete-call",
+                    kind: .completeVisitorEnrollment(
+                        try VoiceMemberAddress(spokenLabel: "Tony")
+                    )
+                )
+            )
+        )
+
+        let invalidCalls: [[String: Any]] = [
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "begin-extra",
+                "name": "begin_visitor_enrollment",
+                "arguments": #"{"consent":true}"#,
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "complete-missing",
+                "name": "complete_visitor_enrollment",
+                "arguments": "{}",
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "complete-extra",
+                "name": "complete_visitor_enrollment",
+                "arguments": #"{"spoken_label":"Tony","member_id":"must-not-cross"}"#,
+            ],
+            [
+                "type": "response.function_call_arguments.done",
+                "call_id": "complete-empty",
+                "name": "complete_visitor_enrollment",
+                "arguments": #"{"spoken_label":"  "}"#,
+            ],
+        ]
+
+        for fixture in invalidCalls {
+            let callID = try #require(fixture["call_id"] as? String)
             #expect(
                 OpenAIRealtimeWireDecoder.decode(try jsonData(fixture))
                     == .toolCall(

@@ -1,4 +1,5 @@
 import Foundation
+import LumiApplication
 import LumiDomain
 
 #if canImport(SQLite3)
@@ -150,6 +151,101 @@ actor SQLiteFaceEmbeddingStore {
         try step(statement, expecting: SQLITE_DONE)
     }
 
+    func commitVisitorEnrollment(
+        memberID: MemberID,
+        address: VoiceMemberAddress,
+        consentedAt: Date,
+        completedAt: Date,
+        embeddings: [FaceEmbedding]
+    ) throws(SQLiteFaceEmbeddingStoreError) {
+        guard
+            embeddings.count == VisitorEnrollmentToolCallRouter.requiredSampleCount,
+            consentedAt.timeIntervalSinceReferenceDate.isFinite,
+            completedAt.timeIntervalSinceReferenceDate.isFinite
+        else {
+            throw .invalidEmbedding
+        }
+
+        let records: [FaceEmbeddingRecord]
+        do {
+            records = try embeddings.map { embedding in
+                FaceEmbeddingRecord(
+                    memberID: memberID,
+                    modelVersion: embedding.modelVersion,
+                    embedding: try SFaceEmbeddingRecordCodec.encode(embedding),
+                    createdAt: completedAt
+                )
+            }
+        } catch {
+            throw .invalidEmbedding
+        }
+
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let profileStatement = try prepare(
+                "INSERT INTO local_member_profiles "
+                    + "(member_id, spoken_label, consented_at, completed_at) "
+                    + "VALUES (?, ?, ?, ?);"
+            )
+            defer { sqlite3_finalize(profileStatement) }
+            try bind(memberID.rawValue, at: 1, in: profileStatement)
+            try bind(address.spokenLabel, at: 2, in: profileStatement)
+            guard
+                sqlite3_bind_double(
+                    profileStatement,
+                    3,
+                    consentedAt.timeIntervalSince1970
+                ) == SQLITE_OK,
+                sqlite3_bind_double(
+                    profileStatement,
+                    4,
+                    completedAt.timeIntervalSince1970
+                ) == SQLITE_OK
+            else {
+                throw SQLiteFaceEmbeddingStoreError.operationFailed
+            }
+            try step(profileStatement, expecting: SQLITE_DONE)
+
+            for record in records {
+                try save(record)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            if let error = error as? SQLiteFaceEmbeddingStoreError {
+                throw error
+            }
+            throw .operationFailed
+        }
+    }
+
+    func address(
+        for memberID: MemberID
+    ) throws(SQLiteFaceEmbeddingStoreError) -> VoiceMemberAddress? {
+        let statement = try prepare(
+            "SELECT spoken_label FROM local_member_profiles WHERE member_id = ?;"
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(memberID.rawValue, at: 1, in: statement)
+
+        let result = sqlite3_step(statement)
+        if result == SQLITE_DONE { return nil }
+        guard
+            result == SQLITE_ROW,
+            let pointer = sqlite3_column_text(statement, 0),
+            let spokenLabel = pointer.withMemoryRebound(
+                to: CChar.self,
+                capacity: 1,
+                { String(validatingCString: $0) }
+            ),
+            let address = try? VoiceMemberAddress(spokenLabel: spokenLabel),
+            sqlite3_step(statement) == SQLITE_DONE
+        else {
+            throw .invalidStoredRecord
+        }
+        return address
+    }
+
     private func sFaceRecords(
         memberID: MemberID?
     ) throws(SQLiteFaceEmbeddingStoreError) -> [FaceEmbeddingRecord] {
@@ -298,6 +394,12 @@ actor SQLiteFaceEmbeddingStore {
         guard sqlite3_step(statement) == expectedResult else { throw .operationFailed }
     }
 
+    private func execute(_ sql: String) throws(SQLiteFaceEmbeddingStoreError) {
+        guard sqlite3_exec(connection.pointer, sql, nil, nil, nil) == SQLITE_OK else {
+            throw .operationFailed
+        }
+    }
+
     private static func createSchema(_ database: OpaquePointer) throws(SQLiteFaceEmbeddingStoreError) {
         let sql = """
         PRAGMA journal_mode = WAL;
@@ -310,6 +412,12 @@ actor SQLiteFaceEmbeddingStore {
         );
         CREATE INDEX IF NOT EXISTS face_embeddings_member
             ON face_embeddings(member_id, created_at);
+        CREATE TABLE IF NOT EXISTS local_member_profiles (
+            member_id TEXT PRIMARY KEY,
+            spoken_label TEXT NOT NULL,
+            consented_at REAL NOT NULL,
+            completed_at REAL NOT NULL
+        );
         """
         guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
             throw .operationFailed

@@ -1,4 +1,5 @@
 import Foundation
+import LumiApplication
 import LumiDomain
 @testable import LumiInfrastructure
 import Testing
@@ -223,6 +224,64 @@ struct SQLiteFaceEmbeddingStoreTests {
             )
         }
         #expect(try await store.records(for: member).isEmpty)
+    }
+
+    @Test("visitor enrollment atomically stores profile and exactly three samples")
+    func visitorEnrollmentStoresProfileAndSamples() async throws {
+        let databaseURL = try temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let memberID = try MemberID(rawValue: "local-uuid")
+        let address = try VoiceMemberAddress(spokenLabel: "Tony")
+        let embeddings = try [0, 1, 2].map(makeEmbedding)
+
+        do {
+            let store = try SQLiteFaceEmbeddingStore(databaseURL: databaseURL)
+            try await store.commitVisitorEnrollment(
+                memberID: memberID,
+                address: address,
+                consentedAt: Date(timeIntervalSince1970: 100),
+                completedAt: Date(timeIntervalSince1970: 200),
+                embeddings: embeddings
+            )
+        }
+
+        let reopened = try SQLiteFaceEmbeddingStore(databaseURL: databaseURL)
+        #expect(try await reopened.address(for: memberID) == address)
+        #expect(try await reopened.sFaceSamples(for: memberID) == [
+            StoredFaceEmbeddingSample(memberID: memberID, embedding: embeddings[0]),
+            StoredFaceEmbeddingSample(memberID: memberID, embedding: embeddings[1]),
+            StoredFaceEmbeddingSample(memberID: memberID, embedding: embeddings[2])
+        ])
+    }
+
+    @Test("duplicate local member ID rolls back without adding embeddings")
+    func duplicateVisitorEnrollmentRollsBack() async throws {
+        let databaseURL = try temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let store = try SQLiteFaceEmbeddingStore(databaseURL: databaseURL)
+        let memberID = try MemberID(rawValue: "local-duplicate")
+        let originalAddress = try VoiceMemberAddress(spokenLabel: "Tony")
+        let firstEmbeddings = try [0, 1, 2].map(makeEmbedding)
+        try await store.commitVisitorEnrollment(
+            memberID: memberID,
+            address: originalAddress,
+            consentedAt: Date(timeIntervalSince1970: 100),
+            completedAt: Date(timeIntervalSince1970: 200),
+            embeddings: firstEmbeddings
+        )
+
+        await #expect(throws: SQLiteFaceEmbeddingStoreError.operationFailed) {
+            try await store.commitVisitorEnrollment(
+                memberID: memberID,
+                address: VoiceMemberAddress(spokenLabel: "Ruby"),
+                consentedAt: Date(timeIntervalSince1970: 300),
+                completedAt: Date(timeIntervalSince1970: 400),
+                embeddings: try [3, 4, 5].map(makeEmbedding)
+            )
+        }
+
+        #expect(try await store.address(for: memberID) == originalAddress)
+        #expect(try await store.sFaceSamples(for: memberID).count == 3)
     }
 
     private func makeEmbedding(axis: Int) throws -> FaceEmbedding {

@@ -35,6 +35,7 @@ public actor MockHardwareControlPort: HardwareControlPort {
     private var nextReturnHomeID: UInt64 = 0
     private var pendingMovement: PendingMovement?
     private var completeNextRotation = false
+    private var completeNextReturnHome = false
 
     public init() {}
 
@@ -138,9 +139,14 @@ public actor MockHardwareControlPort: HardwareControlPort {
                     return
                 }
 
-                pendingMovement = .returnHome(
-                    PendingReturnHome(id: requestID, continuation: continuation)
-                )
+                if completeNextReturnHome {
+                    completeNextReturnHome = false
+                    continuation.resume()
+                } else {
+                    pendingMovement = .returnHome(
+                        PendingReturnHome(id: requestID, continuation: continuation)
+                    )
+                }
             }
         }, onCancel: {
             Task { await self.cancelPendingReturnHome(id: requestID) }
@@ -153,6 +159,22 @@ public actor MockHardwareControlPort: HardwareControlPort {
         guard case let .returnHome(pendingReturnHome)? = pendingMovement else { return }
         self.pendingMovement = nil
         pendingReturnHome.continuation.resume()
+    }
+
+    /// Completes the active return-home request, or remembers the arrival
+    /// signal until the coordinator registers its immediately upcoming mock
+    /// request. This is the return-home counterpart to
+    /// `completeCurrentOrNextRotation()`.
+    public func completeCurrentOrNextReturnHome() {
+        switch pendingMovement {
+        case let .returnHome(pendingReturnHome):
+            pendingMovement = nil
+            pendingReturnHome.continuation.resume()
+        case .rotation:
+            return
+        case nil:
+            completeNextReturnHome = true
+        }
     }
 
     /// Fails the pending return-home request with an injected adapter error.
@@ -184,6 +206,7 @@ public actor MockHardwareControlPort: HardwareControlPort {
 
     private func cancelCurrentMovement() {
         completeNextRotation = false
+        completeNextReturnHome = false
         guard let pendingMovement else { return }
         self.pendingMovement = nil
 

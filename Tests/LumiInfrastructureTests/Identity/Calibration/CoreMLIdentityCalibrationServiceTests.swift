@@ -237,6 +237,93 @@ struct CoreMLIdentityCalibrationServiceTests {
         #expect(await pipeline.callCount == 0)
     }
 
+    @Test("concurrent camera leases share one delayed start and stop after the last release")
+    func concurrentCameraLeasesAreSingleFlight() async throws {
+        let source = DelayedStartCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(.noUsableFace)
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        let first = Task { try await service.startCamera() }
+        await source.waitForStartCall(count: 1)
+
+        let second = Task { try await service.startCamera() }
+        for _ in 0..<64 { await Task.yield() }
+        #expect(await source.startCallCount == 1)
+
+        await source.releaseStarts()
+        try await first.value
+        try await second.value
+
+        await service.stopCamera()
+        #expect(await source.stopCallCount == 0)
+        await service.stopCamera()
+        #expect(await source.stopCallCount == 1)
+    }
+
+    @Test("cancelled camera acquisition does not release another owner's lease")
+    func cancelledCameraAcquisitionDoesNotReleaseAnotherLease() async throws {
+        let source = DelayedStartCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(.noUsableFace)
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        let owner = Task { try await service.startCamera() }
+        await source.waitForStartCall(count: 1)
+        await source.releaseStarts()
+        try await owner.value
+
+        let cancelled = Task {
+            withUnsafeCurrentTask { currentTask in
+                currentTask?.cancel()
+            }
+            try await service.startCamera()
+        }
+        await #expect(throws: CancellationError.self) {
+            try await cancelled.value
+        }
+        #expect(await source.stopCallCount == 0)
+
+        await service.stopCamera()
+        #expect(await source.stopCallCount == 1)
+    }
+
+    @Test("a new camera lease waits for a delayed stop before restarting")
+    func cameraLeaseSerializesStopAndNextStart() async throws {
+        let source = DelayedStopCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(.noUsableFace)
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+
+        try await service.startCamera()
+        let stop = Task { await service.stopCamera() }
+        await source.waitForStopCall()
+
+        let next = Task { try await service.startCamera() }
+        for _ in 0..<64 { await Task.yield() }
+        #expect(await source.startCallCount == 1)
+
+        await source.releaseStop()
+        _ = await stop.value
+        try await next.value
+        #expect(await source.startCallCount == 2)
+
+        await service.stopCamera()
+        #expect(await source.stopCallCount == 2)
+    }
+
     @Test("one enrollment capture consumes exactly the next frame and ignores stale frames")
     func enrollmentUsesFreshFrame() async throws {
         let source = RecordingCalibrationFrameSource()
@@ -765,6 +852,29 @@ struct CoreMLIdentityCalibrationServiceTests {
         #expect(await store.saveCallCount == 0)
     }
 
+    @Test("presence capture checks only the fresh face and never queries the gallery")
+    func presenceCaptureSkipsGallery() async throws {
+        let source = RecordingCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+        try await service.startCamera()
+
+        let task = Task { try await service.captureUsableFace() }
+        await source.waitForNextFrameRequest()
+        await source.send(try makeFrame(byte: 3))
+
+        #expect(try await task.value)
+        #expect(await pipeline.callCount == 1)
+        #expect(await store.sFaceSamplesCallCount == 0)
+    }
+
     @Test("reset deletes only the selected temporary member")
     func resetIsScopedToSelectedMember() async throws {
         let source = RecordingCalibrationFrameSource()
@@ -1050,6 +1160,89 @@ private actor RecordingCalibrationFrameSource: IdentityCalibrationFrameSource {
     }
 }
 
+private actor DelayedStartCalibrationFrameSource: IdentityCalibrationFrameSource {
+    private var startContinuations: [CheckedContinuation<Void, Error>] = []
+    private var startCallWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private(set) var startCallCount = 0
+    private(set) var stopCallCount = 0
+
+    func start() async throws {
+        startCallCount += 1
+        let ready = startCallWaiters.filter { startCallCount >= $0.0 }
+        startCallWaiters.removeAll { startCallCount >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+        try await withCheckedThrowingContinuation { continuation in
+            startContinuations.append(continuation)
+        }
+    }
+
+    func stop() async {
+        stopCallCount += 1
+    }
+
+    func nextFrame() async throws -> CameraFrame {
+        throw IdentityCalibrationError.failed
+    }
+
+    func waitForStartCall(count: Int) async {
+        if startCallCount >= count { return }
+        await withCheckedContinuation {
+            startCallWaiters.append((count, $0))
+        }
+    }
+
+    func releaseStarts() {
+        let continuations = startContinuations
+        startContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+}
+
+private actor DelayedStopCalibrationFrameSource: IdentityCalibrationFrameSource {
+    private var delayedStop = true
+    private var pendingStop: CheckedContinuation<Void, Never>?
+    private var stopCallWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var startCallCount = 0
+    private(set) var stopCallCount = 0
+
+    func start() async throws {
+        startCallCount += 1
+    }
+
+    func stop() async {
+        stopCallCount += 1
+        let waiters = stopCallWaiters
+        stopCallWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+
+        guard delayedStop else { return }
+        delayedStop = false
+        await withCheckedContinuation { continuation in
+            pendingStop = continuation
+        }
+    }
+
+    func nextFrame() async throws -> CameraFrame {
+        throw IdentityCalibrationError.failed
+    }
+
+    func waitForStopCall() async {
+        if stopCallCount > 0 { return }
+        await withCheckedContinuation {
+            stopCallWaiters.append($0)
+        }
+    }
+
+    func releaseStop() {
+        pendingStop?.resume()
+        pendingStop = nil
+    }
+}
+
 private actor PreviewingCalibrationFrameSource: IdentityCalibrationFrameSource {
     private var streamPair = AsyncStream<CameraFrame>.makeStream(
         of: CameraFrame.self,
@@ -1196,6 +1389,7 @@ private actor RestartableBufferedCameraAdapter: IdentityCalibrationCameraAdapter
 private actor RecordingCalibrationStore: IdentityCalibrationStore {
     private var samples: [StoredFaceEmbeddingSample] = []
     private(set) var saveCallCount = 0
+    private(set) var sFaceSamplesCallCount = 0
     private(set) var savedMemberIDs: [MemberID] = []
     private(set) var savedDates: [Date] = []
     private(set) var deletedMemberIDs: [MemberID] = []
@@ -1216,7 +1410,8 @@ private actor RecordingCalibrationStore: IdentityCalibrationStore {
     }
 
     func sFaceSamples() async throws -> [StoredFaceEmbeddingSample] {
-        samples
+        sFaceSamplesCallCount += 1
+        return samples
     }
 
     func sFaceSamples(for memberID: MemberID) async throws -> [StoredFaceEmbeddingSample] {
