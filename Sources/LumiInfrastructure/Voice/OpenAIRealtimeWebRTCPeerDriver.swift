@@ -3,13 +3,17 @@ import Foundation
 
 /// The Infrastructure-only peer/media boundary used by the Realtime
 /// transport. WebRTC framework objects never cross this boundary.
-protocol OpenAIRealtimePeerDriver: Sendable {
+protocol OpenAIRealtimePeerDriver: OpenAIRealtimeMicrophoneLevelSource, Sendable {
     func prepare() async throws
     func createLocalOffer() async throws -> String
     func setRemoteAnswer(_ answerSDP: String) async throws
     func send(_ data: Data) async throws
     func eventUpdates() async -> AsyncStream<Data>
     func close() async
+}
+
+extension OpenAIRealtimePeerDriver {
+    func microphoneLevel() async -> Double? { nil }
 }
 
 /// Stable, privacy-safe failures at the WebRTC boundary.
@@ -76,6 +80,7 @@ final class OpenAIRealtimeWebRTCPeerDriver:
 
     private var peerConnection: RTCPeerConnection?
     private var localMicrophoneTrack: RTCAudioTrack?
+    private var localMicrophoneSender: RTCRtpSender?
     private var dataChannel: RTCDataChannel?
     private var pendingOffer: CheckedContinuation<String, any Error>?
     private var pendingRemoteAnswer: CheckedContinuation<Void, any Error>?
@@ -130,7 +135,7 @@ final class OpenAIRealtimeWebRTCPeerDriver:
             with: audioSource,
             trackId: "lumi-microphone"
         )
-        guard peer.add(audioTrack, streamIds: ["lumi"]) != nil else {
+        guard let microphoneSender = peer.add(audioTrack, streamIds: ["lumi"]) else {
             peer.close()
             throw OpenAIRealtimePeerDriverError.microphoneTrackUnavailable
         }
@@ -149,6 +154,7 @@ final class OpenAIRealtimeWebRTCPeerDriver:
         dataChannel.delegate = self
         self.peerConnection = peer
         self.localMicrophoneTrack = audioTrack
+        self.localMicrophoneSender = microphoneSender
         self.dataChannel = dataChannel
         self.isPrepared = true
     }
@@ -238,6 +244,33 @@ final class OpenAIRealtimeWebRTCPeerDriver:
         eventStream
     }
 
+    func microphoneLevel() async -> Double? {
+        guard !isClosed,
+              let peerConnection,
+              let localMicrophoneSender else {
+            return nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            peerConnection.statistics(
+                for: localMicrophoneSender
+            ) { report in
+                let levels = report.statistics.values.compactMap { statistic -> Double? in
+                    guard statistic.type == "media-source",
+                          let value = statistic.values["audioLevel"] as? NSNumber else {
+                        return nil
+                    }
+                    let level = value.doubleValue
+                    guard level.isFinite, (0 ... 1).contains(level) else {
+                        return nil
+                    }
+                    return level
+                }
+                continuation.resume(returning: levels.max())
+            }
+        }
+    }
+
     func close() async {
         handleTerminalEvent()
     }
@@ -261,6 +294,7 @@ final class OpenAIRealtimeWebRTCPeerDriver:
         peerConnection?.close()
         peerConnection = nil
         localMicrophoneTrack = nil
+        localMicrophoneSender = nil
         isPrepared = false
         eventContinuation.finish()
     }
