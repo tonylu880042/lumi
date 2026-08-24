@@ -68,6 +68,9 @@ public actor VoiceToolCallRouter {
                 }
             }
 
+        case .beginVisitorEnrollment, .completeVisitorEnrollment:
+            payload = .failure(.unsupportedTool)
+
         case .unsupported:
             payload = .failure(.unsupportedTool)
 

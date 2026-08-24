@@ -1,3 +1,4 @@
+import Foundation
 import LumiApplication
 import LumiDomain
 import Testing
@@ -279,6 +280,51 @@ struct AssistantSessionCoordinatorTests {
         #expect(await coordinator.voiceRequiresRetry == false)
         await hardware.completeReturnHome()
         #expect(try await end.value == .idle)
+    }
+
+    @Test("ending during member-address lookup prevents stale voice startup")
+    func staleVoiceStartupCannotStartAfterResolverRelease() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = ImmediateRecordingVoice()
+        let resolver = CancellableMemberAddressResolver()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            memberAddressResolver: { memberID in
+                await resolver.resolve(memberID)
+            }
+        )
+        let memberID = try MemberID(rawValue: "resolver-race")
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.9)
+            )
+        )
+
+        let startup = Task { try await coordinator.startVoiceSession() }
+        await resolver.waitForLookup()
+        await hardware.holdReturnHome()
+        let end = Task { try await coordinator.endSession() }
+        #expect(await waitUntil { await hardware.returnHomeCallCount == 1 })
+        #expect(await waitUntil { await resolver.cancellationObserved })
+
+        await resolver.release()
+        await #expect(throws: CancellationError.self) {
+            try await startup.value
+        }
+        #expect(await voice.startCallCount == 0)
+        #expect(await coordinator.state == .greeting)
+
+        await hardware.completeReturnHome()
+        #expect(try await end.value == .idle)
+        #expect(await coordinator.state == .idle)
+        #expect(await voice.stopCallCount == 1)
     }
 
     @Test("queued voice events from the ended generation cannot mutate state")
@@ -1255,6 +1301,48 @@ struct AssistantSessionCoordinatorTests {
         _ = try await coordinator.endSession()
     }
 
+    @Test("unknown voice registers enrollment tools and end clears unnamed samples")
+    func unknownVoiceRunsEnrollmentToolSession() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort()
+        let enrollmentPort = TestVisitorEnrollmentPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            visitorEnrollmentToolCallConfiguration:
+                VisitorEnrollmentToolCallSessionConfiguration(
+                    port: toolPort,
+                    enrollmentPort: enrollmentPort
+                )
+        )
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .unknown
+        )
+
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+        #expect(await toolPort.toolCallUpdatesCallCount == 1)
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+
+        await toolPort.emit(VoiceToolCall(
+            callID: "consented-enrollment",
+            kind: .beginVisitorEnrollment
+        ))
+        await toolPort.waitUntilSentCount(1)
+        #expect(await enrollmentPort.beginCallCount == 1)
+        #expect(await toolPort.sentResults.first?.payload == .enrollmentSamplesCaptured(3))
+
+        _ = try await coordinator.endSession()
+        #expect(await enrollmentPort.cancelCount == 1)
+    }
+
     @Test("runner send failures set retry without changing the assistant state")
     func toolRunnerFailureSetsRetryWithoutChangingState() async throws {
         let hardware = TestHardware()
@@ -1791,6 +1879,58 @@ private actor TestVoice: VoiceSessionPort {
     }
 }
 
+private actor ImmediateRecordingVoice: VoiceSessionPort {
+    private(set) var startCallCount = 0
+    private(set) var stopCallCount = 0
+
+    func start(context _: VoiceContext) async throws {
+        startCallCount += 1
+    }
+
+    func eventUpdates() async -> AsyncStream<VoiceSessionEvent> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+
+    func stop() async {
+        stopCallCount += 1
+    }
+}
+
+private actor CancellableMemberAddressResolver {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var lookupWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var cancellationObserved = false
+
+    func resolve(_: MemberID) async -> VoiceMemberAddress? {
+        for waiter in lookupWaiters { waiter.resume() }
+        lookupWaiters.removeAll()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation = $0 }
+            return nil
+        }, onCancel: {
+            Task { await self.cancelPendingLookup() }
+        })
+    }
+
+    func waitForLookup() async {
+        if continuation != nil { return }
+        await withCheckedContinuation { lookupWaiters.append($0) }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func cancelPendingLookup() {
+        cancellationObserved = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private func makeToolSummary(visits: Int) -> ExerciseSummary {
     ExerciseSummary(
         visitsThisWeek: visits,
@@ -1880,6 +2020,26 @@ private actor TestVoiceToolCallPort: VoiceToolCallPort {
 
     deinit {
         continuation.finish()
+    }
+}
+
+private actor TestVisitorEnrollmentPort: VisitorEnrollmentPort {
+    private(set) var beginCallCount = 0
+    private(set) var cancelCount = 0
+
+    func begin(consentedAt _: Date) async throws -> VisitorEnrollmentBeginResult {
+        beginCallCount += 1
+        return .samplesCaptured(3)
+    }
+
+    func complete(
+        memberID _: MemberID,
+        address _: VoiceMemberAddress,
+        completedAt _: Date
+    ) async throws {}
+
+    func cancel() async {
+        cancelCount += 1
     }
 }
 

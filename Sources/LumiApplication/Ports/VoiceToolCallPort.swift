@@ -6,6 +6,13 @@ public enum VoiceToolCallKind: Equatable, Sendable {
     /// member bound to the current voice session.
     case getMemberWeeklySummary
 
+    /// Starts the current Unknown visitor's explicitly consented enrollment.
+    case beginVisitorEnrollment
+
+    /// Commits the current pending enrollment using only a validated spoken
+    /// address. The generated local member ID never crosses this tool value.
+    case completeVisitorEnrollment(VoiceMemberAddress)
+
     /// Represents a provider tool name that Lumi does not support.
     case unsupported
 
@@ -31,11 +38,15 @@ public enum VoiceToolFailureCode: String, Equatable, Sendable {
     case duplicateCall = "duplicate_call"
     case memberDataUnavailable = "member_data_unavailable"
     case invalidData = "invalid_data"
+    case enrollmentUnavailable = "enrollment_unavailable"
+    case enrollmentNotReady = "enrollment_not_ready"
 }
 
 /// The provider-neutral result payload for one voice tool call.
 public enum VoiceToolResultPayload: Equatable, Sendable {
     case success(MemberWeeklySummaryToolResult)
+    case enrollmentSamplesCaptured(Int)
+    case enrollmentCompleted(VoiceMemberAddress)
     case failure(VoiceToolFailureCode)
 }
 
@@ -57,6 +68,16 @@ public struct VoiceToolResult: Equatable, Sendable {
         switch payload {
         case let .success(summary):
             return summary.jsonData()
+        case let .enrollmentSamplesCaptured(count):
+            return Data(
+                "{\"captured_sample_count\":\(count),\"status\":\"samples_captured\"}"
+                    .utf8
+            )
+        case let .enrollmentCompleted(address):
+            return Data(
+                "{\"spoken_label\":\"\(address.spokenLabel)\",\"status\":\"enrollment_complete\"}"
+                    .utf8
+            )
         case let .failure(code):
             return Data("{\"error\":\"\(code.rawValue)\"}".utf8)
         }

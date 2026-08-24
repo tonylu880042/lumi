@@ -21,9 +21,38 @@ public struct VoiceToolCallSessionConfiguration: Sendable {
     }
 }
 
+/// Application dependencies for the Unknown visitor's consented enrollment
+/// tool session.
+public struct VisitorEnrollmentToolCallSessionConfiguration: Sendable {
+    public let port: any VoiceToolCallPort
+    public let enrollmentPort: any VisitorEnrollmentPort
+
+    public init(
+        port: any VoiceToolCallPort,
+        enrollmentPort: any VisitorEnrollmentPort
+    ) {
+        self.port = port
+        self.enrollmentPort = enrollmentPort
+    }
+}
+
+private enum PreparedVoiceToolCallRunner: Sendable {
+    case returningMember(VoiceToolCallSessionRunner)
+    case visitorEnrollment(VisitorEnrollmentToolCallSessionRunner)
+
+    func run() async throws {
+        switch self {
+        case let .returningMember(runner):
+            try await runner.run()
+        case let .visitorEnrollment(runner):
+            try await runner.run()
+        }
+    }
+}
+
 private struct VoiceStartPreparation: Sendable {
     let events: AsyncStream<VoiceSessionEvent>
-    let toolRunner: VoiceToolCallSessionRunner?
+    let toolRunner: PreparedVoiceToolCallRunner?
 }
 
 /// Owns the active Phase 1 assistant session state and coordinates orientation.
@@ -31,8 +60,11 @@ public actor AssistantSessionCoordinator {
     private let hardware: any HardwareControlPort
     private let identity: any IdentityRecognitionPort
     private let voice: any VoiceSessionPort
-    private let memberAddressResolver: @Sendable (MemberID) -> VoiceMemberAddress?
+    private let memberAddressResolver:
+        @Sendable (MemberID) async -> VoiceMemberAddress?
     private let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
+    private let visitorEnrollmentToolCallConfiguration:
+        VisitorEnrollmentToolCallSessionConfiguration?
     private let reducer: AssistantStateReducer
 
     public private(set) var state: AssistantState
@@ -63,14 +95,18 @@ public actor AssistantSessionCoordinator {
         identity: any IdentityRecognitionPort,
         voice: any VoiceSessionPort,
         memberAddressResolver:
-            @escaping @Sendable (MemberID) -> VoiceMemberAddress? = { _ in nil },
-        voiceToolCallConfiguration: VoiceToolCallSessionConfiguration? = nil
+            @escaping @Sendable (MemberID) async -> VoiceMemberAddress? = { _ in nil },
+        voiceToolCallConfiguration: VoiceToolCallSessionConfiguration? = nil,
+        visitorEnrollmentToolCallConfiguration:
+            VisitorEnrollmentToolCallSessionConfiguration? = nil
     ) {
         self.hardware = hardware
         self.identity = identity
         self.voice = voice
         self.memberAddressResolver = memberAddressResolver
         self.voiceToolCallConfiguration = voiceToolCallConfiguration
+        self.visitorEnrollmentToolCallConfiguration =
+            visitorEnrollmentToolCallConfiguration
         self.reducer = AssistantStateReducer()
         self.state = .idle
         self.recognitionResult = nil
@@ -286,30 +322,46 @@ public actor AssistantSessionCoordinator {
 
         let context: VoiceContext
         let memberID: MemberID?
-        let memberAddress: VoiceMemberAddress?
         switch recognitionResult {
         case let .known(knownMemberID, _):
             context = .returningMember
             memberID = knownMemberID
-            memberAddress = memberAddressResolver(knownMemberID)
         case .unknown:
             context = .visitor
             memberID = nil
-            memberAddress = nil
         }
 
         let voice = voice
+        let memberAddressResolver = memberAddressResolver
         let toolConfiguration = voiceToolCallConfiguration
+        let visitorToolConfiguration = visitorEnrollmentToolCallConfiguration
         let operation = Task<VoiceStartPreparation, Error> {
             try Task.checkCancellation()
+            let memberAddress: VoiceMemberAddress?
+            if let memberID {
+                memberAddress = await memberAddressResolver(memberID)
+                try Task.checkCancellation()
+            } else {
+                memberAddress = nil
+            }
+
             let events = await voice.eventUpdates()
             try Task.checkCancellation()
-            let toolRunner: VoiceToolCallSessionRunner?
+            let toolRunner: PreparedVoiceToolCallRunner?
             if let toolConfiguration, let memberID {
-                toolRunner = await VoiceToolCallSessionRunner.prepare(
-                    port: toolConfiguration.port,
-                    memberID: memberID,
-                    weeklySummaryUseCase: toolConfiguration.weeklySummaryUseCase
+                toolRunner = .returningMember(
+                    await VoiceToolCallSessionRunner.prepare(
+                        port: toolConfiguration.port,
+                        memberID: memberID,
+                        weeklySummaryUseCase: toolConfiguration.weeklySummaryUseCase
+                    )
+                )
+            } else if context == .visitor, let visitorToolConfiguration {
+                toolRunner = .visitorEnrollment(
+                    await VisitorEnrollmentToolCallSessionRunner.prepare(
+                        port: visitorToolConfiguration.port,
+                        enrollmentPort: visitorToolConfiguration.enrollmentPort
+                    )
                 )
             } else {
                 toolRunner = nil
@@ -327,9 +379,9 @@ public actor AssistantSessionCoordinator {
         defer { clearVoiceStartOperation(generation: generation) }
 
         do {
-            try Task.checkCancellation()
             let preparation = try await withTaskCancellationHandler(operation: {
-                try await operation.value
+                try Task.checkCancellation()
+                return try await operation.value
             }, onCancel: {
                 operation.cancel()
             })
@@ -512,7 +564,7 @@ public actor AssistantSessionCoordinator {
     }
 
     private func startVoiceToolCallRunner(
-        _ runner: VoiceToolCallSessionRunner,
+        _ runner: PreparedVoiceToolCallRunner,
         generation: UInt64
     ) {
         voiceToolCallRunnerTask = Task { [weak self] in

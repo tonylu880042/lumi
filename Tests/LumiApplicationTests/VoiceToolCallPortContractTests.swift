@@ -72,6 +72,25 @@ struct VoiceToolCallPortContractTests {
         acceptsSendable(result.payload)
     }
 
+    @Test("visitor enrollment calls carry only validated provider-neutral values")
+    func visitorEnrollmentCallsCarryValidatedValues() throws {
+        let address = try VoiceMemberAddress(spokenLabel: "Tony")
+        let begin = VoiceToolCall(
+            callID: "begin-enrollment",
+            kind: .beginVisitorEnrollment
+        )
+        let complete = VoiceToolCall(
+            callID: "complete-enrollment",
+            kind: .completeVisitorEnrollment(address)
+        )
+
+        #expect(begin.kind == .beginVisitorEnrollment)
+        #expect(complete.kind == .completeVisitorEnrollment(address))
+        #expect(!String(describing: complete).contains("local-member-id"))
+        acceptsSendable(begin)
+        acceptsSendable(complete)
+    }
+
     @Test("every failure code has exact deterministic redacted JSON")
     func failureCodesHaveExactRedactedJSON() {
         let cases: [(VoiceToolFailureCode, String)] = [
@@ -79,7 +98,9 @@ struct VoiceToolCallPortContractTests {
             (.invalidArguments, "invalid_arguments"),
             (.duplicateCall, "duplicate_call"),
             (.memberDataUnavailable, "member_data_unavailable"),
-            (.invalidData, "invalid_data")
+            (.invalidData, "invalid_data"),
+            (.enrollmentUnavailable, "enrollment_unavailable"),
+            (.enrollmentNotReady, "enrollment_not_ready")
         ]
 
         for (code, rawValue) in cases {
