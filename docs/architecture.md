@@ -2,7 +2,7 @@
 
 > File: `docs/architecture.md`
 > Status: Active Architecture Baseline
-> Last updated: 2026-08-21
+> Last updated: 2026-08-24
 > Applies to: iPad App, Identity Recognition, Realtime Voice, Member Data, Smart Rotation Base
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 
@@ -752,6 +752,26 @@ Responsibilities it must not own:
 - hardware control
 - recognition policy
 - application state ownership
+
+### 11.0.1 Controlled barge-in boundary
+
+OpenAI Server VAD identifies speech candidates but does not automatically
+cancel output or create responses. `OpenAIWebRTCTransport` owns the
+Infrastructure-only distinction between assistant playout, active response
+generation, and a candidate input turn. A local detector compares normalized
+microphone level with the current output-echo baseline. It emits the existing
+provider-independent interruption lifecycle only after sustained near-end
+speech is confirmed; rejected echo input never reaches Application and is
+removed from provider conversation state. Speech received during active
+generation but before playout is accepted without level comparison, cancels
+the old generation, and cannot create the next response until that cancellation
+completes. Stale playout arriving during that cancellation race is cleared
+inside Infrastructure and is not emitted as semantic assistant output.
+
+The detector stores no audio samples or transcripts. Domain, Application,
+Presentation, and UI do not receive provider VAD status, WebRTC levels,
+thresholds, or rejected-input reasons. `AssistantSessionCoordinator` remains
+the sole owner of semantic session state.
 
 ## 11.1 Realtime Session Activation
 

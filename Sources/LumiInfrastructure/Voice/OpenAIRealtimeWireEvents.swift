@@ -21,8 +21,10 @@ enum OpenAIRealtimeWireEncoder {
                 "input": [
                     "turn_detection": [
                         "type": "server_vad",
-                        "create_response": true,
-                        "interrupt_response": true,
+                        // Lumi confirms near-end speech locally before it
+                        // cancels output or creates the next response.
+                        "create_response": false,
+                        "interrupt_response": false,
                     ],
                 ],
                 "output": [
@@ -103,6 +105,21 @@ enum OpenAIRealtimeWireEncoder {
         try encode(["type": "response.create"])
     }
 
+    static func responseCancel() throws -> Data {
+        try encode(["type": "response.cancel"])
+    }
+
+    static func outputAudioBufferClear() throws -> Data {
+        try encode(["type": "output_audio_buffer.clear"])
+    }
+
+    static func conversationItemDelete(itemID: String) throws -> Data {
+        try encode([
+            "type": "conversation.item.delete",
+            "item_id": itemID,
+        ])
+    }
+
     private static func encode(_ object: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
@@ -130,12 +147,20 @@ enum OpenAIRealtimeWireDecoder {
             return .inputAudioSpeechStarted
         case "input_audio_buffer.speech_stopped":
             return .inputAudioSpeechStopped
+        case "input_audio_buffer.committed":
+            guard let itemID = object["item_id"] as? String,
+                  !itemID.isEmpty else {
+                return .error
+            }
+            return .inputAudioCommitted(itemID: itemID)
         case "output_audio_buffer.started":
             return .outputAudioStarted
         case "output_audio_buffer.stopped":
             return .outputAudioStopped
         case "output_audio_buffer.cleared":
             return .outputAudioCleared
+        case "response.created":
+            return .responseStarted
         case "response.done":
             return responseDoneEvent(from: object)
         case "response.function_call_arguments.done":
@@ -161,7 +186,7 @@ enum OpenAIRealtimeWireDecoder {
         case "failed", "incomplete":
             return .responseFailed
         case "cancelled", "completed":
-            return nil
+            return .responseCompleted
         default:
             return nil
         }

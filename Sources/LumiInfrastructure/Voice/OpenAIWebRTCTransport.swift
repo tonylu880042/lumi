@@ -85,6 +85,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     private let audioSession: any OpenAIRealtimeAudioSessionController
     private let peerDriver: any OpenAIRealtimePeerDriver
     private let signaling: any OpenAIRealtimeSDPSignaling
+    private let bargeInDetector: any OpenAIRealtimeBargeInDetecting
 
     private let eventStream: AsyncStream<OpenAIRealtimeProviderEvent>
     private let eventContinuation: AsyncStream<OpenAIRealtimeProviderEvent>.Continuation
@@ -98,19 +99,35 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     private var nextOperationID: UInt64 = 0
     private var activeOperationID: UInt64?
     private var cancelActiveOperation: (@Sendable () -> Void)?
+    private var assistantOutputIsActive = false
+    private var responseGenerationIsActive = false
+    private var inputTurnDisposition = InputTurnDisposition.none
+    private var inputSpeechHasStopped = false
+    private var committedInputItemID: String?
+    private var bargeInCandidateGeneration: UInt64 = 0
+    private var bargeInCandidateTask: Task<Void, Never>?
+
+    private enum InputTurnDisposition {
+        case none
+        case candidate
+        case accepted
+        case rejected
+    }
 
     internal init(
         clock: any OpenAIRealtimeClock,
         permission: any OpenAIRealtimeMicrophonePermissionClient,
         audioSession: any OpenAIRealtimeAudioSessionController,
         peerDriver: any OpenAIRealtimePeerDriver,
-        signaling: any OpenAIRealtimeSDPSignaling
+        signaling: any OpenAIRealtimeSDPSignaling,
+        bargeInDetector: any OpenAIRealtimeBargeInDetecting
     ) {
         self.clock = clock
         self.permission = permission
         self.audioSession = audioSession
         self.peerDriver = peerDriver
         self.signaling = signaling
+        self.bargeInDetector = bargeInDetector
 
         let stream = AsyncStream<OpenAIRealtimeProviderEvent>.makeStream(
             of: OpenAIRealtimeProviderEvent.self,
@@ -247,6 +264,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         cancel?()
         eventConsumerTask?.cancel()
         eventConsumerTask = nil
+        cancelBargeInCandidate()
+        await bargeInDetector.assistantOutputEnded()
         await cleanupStartedResources()
         eventContinuation.finish()
     }
@@ -315,7 +334,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         }
 
         guard event == .sessionCreated else {
-            eventContinuation.yield(event)
+            await consumeSessionEvent(event, generation: acceptedGeneration)
             return
         }
 
@@ -347,11 +366,204 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         }
     }
 
+    private func consumeSessionEvent(
+        _ event: OpenAIRealtimeProviderEvent,
+        generation acceptedGeneration: UInt64
+    ) async {
+        switch event {
+        case .responseStarted:
+            responseGenerationIsActive = true
+
+        case .responseCompleted:
+            responseGenerationIsActive = false
+            await settleInputTurnIfPossible(generation: acceptedGeneration)
+
+        case .responseFailed:
+            responseGenerationIsActive = false
+            eventContinuation.yield(event)
+
+        case .outputAudioStarted:
+            guard inputTurnDisposition != .accepted else {
+                do {
+                    try await peerDriver.send(
+                        OpenAIRealtimeWireEncoder.outputAudioBufferClear()
+                    )
+                    try ensureActive(acceptedGeneration)
+                } catch {
+                    await failHandshake(generation: acceptedGeneration)
+                }
+                return
+            }
+            assistantOutputIsActive = true
+            await bargeInDetector.assistantOutputStarted()
+            eventContinuation.yield(event)
+
+        case .outputAudioStopped, .outputAudioCleared:
+            assistantOutputIsActive = false
+            await bargeInDetector.assistantOutputEnded()
+            if inputTurnDisposition == .candidate {
+                rejectPendingCandidate()
+            }
+            eventContinuation.yield(event)
+
+        case .inputAudioSpeechStarted:
+            await beginInputTurn(generation: acceptedGeneration)
+
+        case .inputAudioSpeechStopped:
+            await finishInputSpeech(generation: acceptedGeneration)
+
+        case .inputAudioCommitted(let itemID):
+            committedInputItemID = itemID
+            await settleInputTurnIfPossible(generation: acceptedGeneration)
+
+        default:
+            eventContinuation.yield(event)
+        }
+    }
+
+    private func beginInputTurn(generation acceptedGeneration: UInt64) async {
+        guard inputTurnDisposition == .none else { return }
+
+        cancelBargeInCandidate()
+        inputSpeechHasStopped = false
+        committedInputItemID = nil
+
+        guard assistantOutputIsActive else {
+            inputTurnDisposition = .accepted
+            if responseGenerationIsActive {
+                do {
+                    try await peerDriver.send(
+                        OpenAIRealtimeWireEncoder.responseCancel()
+                    )
+                    try ensureActive(acceptedGeneration)
+                } catch {
+                    await failHandshake(generation: acceptedGeneration)
+                    return
+                }
+            }
+            eventContinuation.yield(.inputAudioSpeechStarted)
+            return
+        }
+
+        inputTurnDisposition = .candidate
+        bargeInCandidateGeneration &+= 1
+        let acceptedCandidateGeneration = bargeInCandidateGeneration
+        bargeInCandidateTask = Task { [weak self] in
+            guard let self else { return }
+            let confirmed = await self.bargeInDetector.confirmInterruption()
+            guard !Task.isCancelled else { return }
+            await self.resolveBargeInCandidate(
+                confirmed: confirmed,
+                candidateGeneration: acceptedCandidateGeneration,
+                transportGeneration: acceptedGeneration
+            )
+        }
+    }
+
+    private func resolveBargeInCandidate(
+        confirmed: Bool,
+        candidateGeneration: UInt64,
+        transportGeneration acceptedGeneration: UInt64
+    ) async {
+        guard isGenerationActive(acceptedGeneration),
+              candidateGeneration == bargeInCandidateGeneration,
+              inputTurnDisposition == .candidate,
+              !inputSpeechHasStopped else {
+            return
+        }
+        bargeInCandidateTask = nil
+
+        guard confirmed else {
+            inputTurnDisposition = .rejected
+            return
+        }
+
+        do {
+            if responseGenerationIsActive {
+                try await peerDriver.send(OpenAIRealtimeWireEncoder.responseCancel())
+                try ensureActive(acceptedGeneration)
+            }
+            try await peerDriver.send(OpenAIRealtimeWireEncoder.outputAudioBufferClear())
+            try ensureActive(acceptedGeneration)
+        } catch {
+            await failHandshake(generation: acceptedGeneration)
+            return
+        }
+
+        inputTurnDisposition = .accepted
+        assistantOutputIsActive = false
+        await bargeInDetector.assistantOutputEnded()
+        eventContinuation.yield(.inputAudioSpeechStarted)
+    }
+
+    private func finishInputSpeech(generation acceptedGeneration: UInt64) async {
+        inputSpeechHasStopped = true
+        switch inputTurnDisposition {
+        case .accepted:
+            eventContinuation.yield(.inputAudioSpeechStopped)
+        case .candidate:
+            rejectPendingCandidate()
+            await bargeInDetector.rejectedInputEnded()
+        case .rejected:
+            await bargeInDetector.rejectedInputEnded()
+        case .none:
+            return
+        }
+        await settleInputTurnIfPossible(generation: acceptedGeneration)
+    }
+
+    private func rejectPendingCandidate() {
+        bargeInCandidateGeneration &+= 1
+        bargeInCandidateTask?.cancel()
+        bargeInCandidateTask = nil
+        inputTurnDisposition = .rejected
+    }
+
+    private func settleInputTurnIfPossible(
+        generation acceptedGeneration: UInt64
+    ) async {
+        guard inputSpeechHasStopped, let itemID = committedInputItemID else {
+            return
+        }
+
+        let data: Data
+        do {
+            switch inputTurnDisposition {
+            case .accepted:
+                guard !responseGenerationIsActive else { return }
+                data = try OpenAIRealtimeWireEncoder.responseCreate()
+            case .rejected:
+                data = try OpenAIRealtimeWireEncoder.conversationItemDelete(
+                    itemID: itemID
+                )
+            case .candidate, .none:
+                return
+            }
+            try await peerDriver.send(data)
+            try ensureActive(acceptedGeneration)
+        } catch {
+            await failHandshake(generation: acceptedGeneration)
+            return
+        }
+
+        inputTurnDisposition = .none
+        inputSpeechHasStopped = false
+        committedInputItemID = nil
+    }
+
+    private func cancelBargeInCandidate() {
+        bargeInCandidateGeneration &+= 1
+        bargeInCandidateTask?.cancel()
+        bargeInCandidateTask = nil
+    }
+
     private func peerEventsFinished(generation acceptedGeneration: UInt64) async {
         guard isGenerationActive(acceptedGeneration) else { return }
         lifecycle = .closed
         generation &+= 1
         eventConsumerTask = nil
+        cancelBargeInCandidate()
+        await bargeInDetector.assistantOutputEnded()
         await cleanupStartedResources()
         eventContinuation.finish()
     }
@@ -361,6 +573,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         lifecycle = .closed
         generation &+= 1
         eventConsumerTask = nil
+        cancelBargeInCandidate()
+        await bargeInDetector.assistantOutputEnded()
         await cleanupStartedResources()
         eventContinuation.yield(.error)
         eventContinuation.finish()
@@ -493,12 +707,16 @@ public struct OpenAIWebRTCTransportFactory: OpenAIRealtimeTransportFactory {
             let peer = await MainActor.run {
                 OpenAIRealtimeWebRTCPeerDriver()
             }
+            let bargeInDetector = OpenAIRealtimeAdaptiveBargeInDetector(
+                levelSource: peer
+            )
             return OpenAIWebRTCTransport(
                 clock: OpenAIRealtimeSystemClock(),
                 permission: OpenAIRealtimeMicrophonePermission(),
                 audioSession: OpenAIRealtimeAudioSession(),
                 peerDriver: peer,
-                signaling: OpenAIRealtimeSDPSignalingClient()
+                signaling: OpenAIRealtimeSDPSignalingClient(),
+                bargeInDetector: bargeInDetector
             )
         }
     }

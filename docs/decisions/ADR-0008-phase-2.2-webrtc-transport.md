@@ -43,19 +43,34 @@ binary slices, size, license, and security implications.
 The selected distribution publishes iOS-device, iOS-Simulator, and macOS
 XCFramework slices and uses the BSD 3-Clause License.
 
-### 3. Use provider-default Server VAD with automatic response and interruption
+### 3. Use Server VAD with Infrastructure-controlled response and interruption
 
 Every fresh provider session receives `session.update` with:
 
 ```text
 turn_detection.type: server_vad
-create_response: true
-interrupt_response: true
+create_response: false
+interrupt_response: false
 ```
 
 Phase 2.2 omits `threshold`, `prefix_padding_ms`, and `silence_duration_ms`.
-Those values must be tuned and approved using physical-iPad evidence rather
-than guessed during implementation.
+The provider therefore identifies speech candidates but cannot cancel output
+or create a response by itself.
+
+Owner amendment (2026-08-24): after increased remote-audio gain exposed false
+interruptions from speaker echo, the product owner selected controlled local
+barge-in. Infrastructure learns three normalized microphone-level samples at
+80 ms intervals while output is active, then requires three candidate samples
+whose median is at least `max(1.8 × baseline, baseline + 0.02)`. Missing or
+invalid statistics fail closed. A confirmed candidate cancels only an actively
+generating response, clears buffered WebRTC playout, and causes one new
+response only after its committed input turn ends and the prior cancellation
+completes. Speech before playout has no output echo, so it is accepted directly
+and cancels any active generation; stale output arriving before cancellation
+completion is cleared without reaching the semantic voice lifecycle. Rejected echo input is
+deleted from provider conversation state. No audio samples, transcripts, or
+level history are persisted. These values are approved pilot tuning and remain
+subject to physical-device acceptance.
 
 ### 4. Request microphone permission just in time
 
@@ -142,8 +157,10 @@ Mandarin quality, and interruption recovery.
 - Implement the credential backend and Live UI in the same slice: rejected
   because endpoint authentication, deployment, and operational behavior are
   separate contracts.
-- Use `semantic_vad` or invent Server VAD thresholds: rejected until physical
-  device testing provides evidence.
+- Use `semantic_vad` or change provider Server VAD thresholds: still rejected.
+  The 2026-08-24 owner amendment instead adds an Infrastructure-local,
+  fail-closed level policy whose pilot values require physical-device
+  acceptance.
 - Keep the microphone active or request permission at app launch: rejected
   because Realtime sessions are event-triggered and microphone access should be
   requested only when needed.

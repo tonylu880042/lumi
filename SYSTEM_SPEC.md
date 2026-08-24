@@ -670,6 +670,19 @@ Capabilities:
 - tool calling
 - conversational reasoning
 
+Owner amendment (2026-08-24): interruption uses controlled local barge-in.
+Provider VAD may identify a speech candidate, but it must not automatically
+cancel output or create the next response. Infrastructure compares sustained
+microphone level with a recent output-echo baseline, fails closed when evidence
+is unavailable, cancels only a response that is still generating, clears any
+remaining playout, and creates the next response only after the accepted input
+is committed and the prior cancellation completes. Speech that starts while a
+response is generating but before playout has no speaker echo to reject and is
+accepted directly; any stale playout that arrives before cancellation completes
+is cleared without advancing semantic speaking state. Rejected echo input is
+removed from provider conversation state.
+No audio sample, transcript, or level history is persisted.
+
 Voice implementation must remain behind:
 
 ```swift

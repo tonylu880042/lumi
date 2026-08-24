@@ -286,11 +286,27 @@ The broker owns the client-secret session request and fixes:
 The App cannot select a model through the broker API. The allowlist contains
 only this approved model.
 
-After WebRTC connection, the existing Phase 2.2 `session.update` remains
-unchanged. It sends the canonical Taiwan Traditional Chinese persona, `marin`,
-provider-default Server VAD, and only the privacy-safe `returningMember` or
-`visitor` greeting context directly to OpenAI. It never sends a member ID,
-name, confidence, embedding, or image.
+After WebRTC connection, the App sends the canonical Taiwan Traditional
+Chinese persona, `marin`, Server VAD, and only the privacy-safe
+`returningMember` or `visitor` greeting context directly to OpenAI. It never
+sends a member ID, name, confidence, embedding, or image.
+
+Owner amendment (2026-08-24, controlled barge-in): Server VAD remains the
+provider speech-candidate signal, but `create_response` and
+`interrupt_response` are both disabled. Infrastructure samples normalized
+WebRTC microphone level while output is playing, learns three baseline samples
+at 80 ms intervals, and requires three candidate samples at the same interval
+whose median is at least `max(1.8 × baseline, baseline + 0.02)`. Missing or
+invalid statistics fail closed. Confirmed near-end speech cancels a response
+only while generation is active, always clears buffered playout, and creates
+the next response only after accepted input is stopped and committed. Rejected
+echo input is deleted from the provider conversation. Speech before playout
+begins has no output echo, so it is accepted directly, cancels an active
+generation, clears any old playout that arrives during the cancellation race,
+and waits for cancellation completion before response creation.
+This policy persists no
+audio, transcript, or level history and remains Infrastructure-only pilot
+tuning subject to physical-device validation.
 
 Owner amendment (2026-08-22): Debug-Live may additionally send one
 Application-validated `VoiceMemberAddress.spokenLabel` directly to OpenAI for

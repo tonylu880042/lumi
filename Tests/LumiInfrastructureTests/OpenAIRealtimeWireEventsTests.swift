@@ -26,8 +26,8 @@ struct OpenAIRealtimeWireEventsTests {
         let input = try object(audio, at: "input")
         let turnDetection = try object(input, at: "turn_detection")
         #expect(turnDetection["type"] as? String == "server_vad")
-        #expect(turnDetection["create_response"] as? Bool == true)
-        #expect(turnDetection["interrupt_response"] as? Bool == true)
+        #expect(turnDetection["create_response"] as? Bool == false)
+        #expect(turnDetection["interrupt_response"] as? Bool == false)
 
         let output = try object(audio, at: "output")
         #expect(output["voice"] as? String == configuration.voice)
@@ -62,7 +62,7 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(defaultData == explicitlyDisabledData)
         #expect(
             String(data: defaultData, encoding: .utf8)
-                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":true,"interrupt_response":true,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","type":"realtime"},"type":"session.update"}"#
+                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":false,"interrupt_response":false,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","type":"realtime"},"type":"session.update"}"#
         )
         #expect(session["tools"] == nil)
         #expect(session["tool_choice"] == nil)
@@ -173,6 +173,33 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(events[1].count == 1)
     }
 
+    @Test("confirmed WebRTC barge-in has ordered cancel and playout clear events")
+    func confirmedBargeInEventsAreMinimal() throws {
+        let events = [
+            try jsonObject(try OpenAIRealtimeWireEncoder.responseCancel()),
+            try jsonObject(try OpenAIRealtimeWireEncoder.outputAudioBufferClear()),
+        ]
+
+        #expect(events.map { $0["type"] as? String } == [
+            "response.cancel",
+            "output_audio_buffer.clear",
+        ])
+        #expect(events.allSatisfy { $0.count == 1 })
+    }
+
+    @Test("rejected echo input can be removed by opaque committed item ID")
+    func rejectedInputDeleteUsesOnlyOpaqueItemID() throws {
+        let event = try jsonObject(
+            try OpenAIRealtimeWireEncoder.conversationItemDelete(
+                itemID: "opaque-input-item"
+            )
+        )
+
+        #expect(event["type"] as? String == "conversation.item.delete")
+        #expect(event["item_id"] as? String == "opaque-input-item")
+        #expect(event.keys.sorted() == ["item_id", "type"])
+    }
+
     @Test("function call output encodes exact result JSON and opaque call ID")
     func functionCallOutputUsesExactResultPayload() throws {
         let result = VoiceToolResult(
@@ -221,8 +248,30 @@ struct OpenAIRealtimeWireEventsTests {
         }
     }
 
-    @Test("response.done only reports failed and incomplete responses")
-    func responseDoneStatusesDecode() throws {
+    @Test("committed input keeps only the opaque item ID inside Infrastructure")
+    func committedInputDecodesOpaqueItemID() throws {
+        let decoded = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "input_audio_buffer.committed",
+                "item_id": "opaque-input-item",
+                "previous_item_id": "ignored-provider-metadata",
+            ])
+        )
+
+        #expect(decoded == .inputAudioCommitted(itemID: "opaque-input-item"))
+        #expect(OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "input_audio_buffer.committed",
+                "item_id": "",
+            ])
+        ) == .error)
+    }
+
+    @Test("response lifecycle distinguishes active completion from failures")
+    func responseLifecycleStatusesDecode() throws {
+        let started = OpenAIRealtimeWireDecoder.decode(
+            try jsonData(["type": "response.created"])
+        )
         let failed = OpenAIRealtimeWireDecoder.decode(
             try jsonData([
                 "type": "response.done",
@@ -248,10 +297,11 @@ struct OpenAIRealtimeWireEventsTests {
             ])
         )
 
+        #expect(started == .responseStarted)
         #expect(failed == .responseFailed)
         #expect(incomplete == .responseFailed)
-        #expect(cancelled == nil)
-        #expect(completed == nil)
+        #expect(cancelled == .responseCompleted)
+        #expect(completed == .responseCompleted)
     }
 
     @Test("finalized function calls map only exact empty arguments")

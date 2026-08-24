@@ -605,6 +605,7 @@ struct OpenAIWebRTCTransportTests {
         await peer.emit(rawEvent(type: "session.created"))
         await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
         await peer.emit(rawEvent(type: "input_audio_buffer.speech_stopped"))
+        await peer.emit(rawCommittedInput(itemID: "forwarded-turn"))
         await peer.emit(rawEvent(type: "output_audio_buffer.started"))
         await peer.emit(rawEvent(type: "output_audio_buffer.stopped"))
         await peer.emit(rawEvent(type: "output_audio_buffer.cleared"))
@@ -636,6 +637,212 @@ struct OpenAIWebRTCTransportTests {
 
         await transport.close()
         #expect(await iterator.next() == nil)
+    }
+
+    @Test("speaker echo candidate never interrupts and its committed input is deleted")
+    func rejectedEchoDoesNotInterruptAssistant() async throws {
+        let peer = RecordingPeerDriver()
+        let detector = ControlledBargeInDetector()
+        let transport = makeTransport(peer: peer, bargeInDetector: detector)
+        let recorder = ProviderEventRecorder()
+        let updates = await transport.eventUpdates()
+        let recordingTask = Task {
+            for await event in updates { await recorder.append(event) }
+        }
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        await peer.emit(rawEvent(type: "response.created"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        #expect(await waitUntil { await recorder.events.count == 2 })
+
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        #expect(await waitUntil { await detector.confirmationRequestCount == 1 })
+        #expect(await recorder.events == [.sessionCreated, .outputAudioStarted])
+        #expect(await peer.sentData.count == 2)
+
+        await detector.resolveConfirmation(false)
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_stopped"))
+        await peer.emit(rawCommittedInput(itemID: "echo-item"))
+
+        #expect(await waitUntil { await peer.sentData.count == 3 })
+        #expect(await recorder.events == [.sessionCreated, .outputAudioStarted])
+        let expectedDelete = try OpenAIRealtimeWireEncoder
+            .conversationItemDelete(itemID: "echo-item")
+        #expect(await peer.sentData.last == expectedDelete)
+
+        await transport.close()
+        _ = await recordingTask.result
+    }
+
+    @Test("completed generation with buffered playout clears audio without invalid cancel")
+    func bufferedPlayoutBargeInDoesNotCancelCompletedResponse() async throws {
+        let peer = RecordingPeerDriver()
+        let detector = ControlledBargeInDetector()
+        let transport = makeTransport(peer: peer, bargeInDetector: detector)
+        let updates = await transport.eventUpdates()
+        let recorder = ProviderEventRecorder()
+        let recordingTask = Task {
+            for await event in updates { await recorder.append(event) }
+        }
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        await peer.emit(rawEvent(type: "response.created"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        await peer.emit(rawResponseDone(status: "completed"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        #expect(await waitUntil { await detector.confirmationRequestCount == 1 })
+
+        await detector.resolveConfirmation(true)
+
+        #expect(await waitUntil { await peer.sentData.count == 3 })
+        let expectedClear = try OpenAIRealtimeWireEncoder.outputAudioBufferClear()
+        let unexpectedCancel = try OpenAIRealtimeWireEncoder.responseCancel()
+        #expect(await peer.sentData.last == expectedClear)
+        #expect(await peer.sentData.contains(unexpectedCancel) == false)
+        #expect(await waitUntil {
+            await recorder.events.contains(.inputAudioSpeechStarted)
+        })
+
+        await transport.close()
+        _ = await recordingTask.result
+    }
+
+    @Test("confirmed near-end speech cancels output then creates one response after commit")
+    func confirmedBargeInControlsInterruptionAndResponse() async throws {
+        let peer = RecordingPeerDriver()
+        let detector = ControlledBargeInDetector()
+        let transport = makeTransport(peer: peer, bargeInDetector: detector)
+        let recorder = ProviderEventRecorder()
+        let updates = await transport.eventUpdates()
+        let recordingTask = Task {
+            for await event in updates { await recorder.append(event) }
+        }
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        await peer.emit(rawEvent(type: "response.created"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        #expect(await waitUntil { await detector.confirmationRequestCount == 1 })
+
+        await detector.resolveConfirmation(true)
+        #expect(await waitUntil { await peer.sentData.count == 4 })
+        #expect(await peer.sentData.suffix(2) == [
+            try OpenAIRealtimeWireEncoder.responseCancel(),
+            try OpenAIRealtimeWireEncoder.outputAudioBufferClear(),
+        ])
+        #expect(await waitUntil {
+            await recorder.events.contains(.inputAudioSpeechStarted)
+        })
+
+        await peer.emit(rawEvent(type: "output_audio_buffer.cleared"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_stopped"))
+        await peer.emit(rawCommittedInput(itemID: "accepted-item"))
+
+        for _ in 0 ..< 20 { await Task.yield() }
+        #expect(await peer.sentData.count == 4)
+        await peer.emit(rawResponseDone(status: "cancelled"))
+
+        #expect(await waitUntil { await peer.sentData.count == 5 })
+        let expectedResponse = try OpenAIRealtimeWireEncoder.responseCreate()
+        #expect(await peer.sentData.last == expectedResponse)
+        #expect(await recorder.events == [
+            .sessionCreated,
+            .outputAudioStarted,
+            .inputAudioSpeechStarted,
+            .outputAudioCleared,
+            .inputAudioSpeechStopped,
+        ])
+
+        await transport.close()
+        _ = await recordingTask.result
+    }
+
+    @Test("duplicate speech-start events do not restart one barge-in decision")
+    func duplicateSpeechStartedKeepsOneBargeInDecision() async throws {
+        let peer = RecordingPeerDriver()
+        let detector = ControlledBargeInDetector()
+        let transport = makeTransport(peer: peer, bargeInDetector: detector)
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        await peer.emit(rawEvent(type: "response.created"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        #expect(await waitUntil { await detector.confirmationRequestCount == 1 })
+
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        for _ in 0 ..< 20 { await Task.yield() }
+
+        #expect(await detector.confirmationRequestCount == 1)
+        await transport.close()
+    }
+
+    @Test("speech before playout cancels generation and waits for cancellation completion")
+    func prePlayoutSpeechCancelsGenerationBeforeNewResponse() async throws {
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+        let recorder = ProviderEventRecorder()
+        let recordingTask = Task {
+            for await event in updates { await recorder.append(event) }
+        }
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: OpenAIRealtimeConfiguration(),
+            purpose: .initial
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        await peer.emit(rawEvent(type: "response.created"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+
+        #expect(await waitUntil { await peer.sentData.count == 3 })
+        let expectedCancel = try OpenAIRealtimeWireEncoder.responseCancel()
+        #expect(await peer.sentData.last == expectedCancel)
+        #expect(await waitUntil {
+            await recorder.events.contains(.inputAudioSpeechStarted)
+        })
+
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        #expect(await waitUntil { await peer.sentData.count == 4 })
+        let expectedClear = try OpenAIRealtimeWireEncoder.outputAudioBufferClear()
+        #expect(await peer.sentData.last == expectedClear)
+        #expect(await recorder.events == [
+            .sessionCreated,
+            .inputAudioSpeechStarted,
+        ])
+
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_stopped"))
+        await peer.emit(rawCommittedInput(itemID: "pre-playout-input"))
+        for _ in 0 ..< 20 { await Task.yield() }
+        #expect(await peer.sentData.count == 4)
+
+        await peer.emit(rawResponseDone(status: "cancelled"))
+        #expect(await waitUntil { await peer.sentData.count == 5 })
+        let expectedResponse = try OpenAIRealtimeWireEncoder.responseCreate()
+        #expect(await peer.sentData.last == expectedResponse)
+
+        await transport.close()
+        _ = await recordingTask.result
     }
 
     @Test("send failure before readiness publishes error, never readiness, and finishes")
@@ -842,14 +1049,16 @@ private func makeTransport(
     permission: any OpenAIRealtimeMicrophonePermissionClient = RecordingPermission(),
     audio: any OpenAIRealtimeAudioSessionController = RecordingAudioController(),
     peer: any OpenAIRealtimePeerDriver = RecordingPeerDriver(),
-    signaling: any OpenAIRealtimeSDPSignaling = RecordingSignaling()
+    signaling: any OpenAIRealtimeSDPSignaling = RecordingSignaling(),
+    bargeInDetector: any OpenAIRealtimeBargeInDetecting = NeverConfirmBargeInDetector()
 ) -> OpenAIWebRTCTransport {
     OpenAIWebRTCTransport(
         clock: clock,
         permission: permission,
         audioSession: audio,
         peerDriver: peer,
-        signaling: signaling
+        signaling: signaling,
+        bargeInDetector: bargeInDetector
     )
 }
 
@@ -859,6 +1068,12 @@ private func rawEvent(type: String) -> Data {
 
 private func rawResponseDone(status: String) -> Data {
     Data("{\"type\":\"response.done\",\"response\":{\"status\":\"\(status)\"}}".utf8)
+}
+
+private func rawCommittedInput(itemID: String) -> Data {
+    Data(
+        "{\"type\":\"input_audio_buffer.committed\",\"item_id\":\"\(itemID)\"}".utf8
+    )
 }
 
 private func makeSecret(
@@ -913,6 +1128,52 @@ private actor Trace {
 
     func append(_ value: String) {
         values.append(value)
+    }
+}
+
+private actor ProviderEventRecorder {
+    private(set) var events: [OpenAIRealtimeProviderEvent] = []
+
+    func append(_ event: OpenAIRealtimeProviderEvent) {
+        events.append(event)
+    }
+}
+
+private actor NeverConfirmBargeInDetector: OpenAIRealtimeBargeInDetecting {
+    func assistantOutputStarted() {}
+    func assistantOutputEnded() {}
+    func confirmInterruption() async -> Bool { false }
+    func rejectedInputEnded() {}
+}
+
+private actor ControlledBargeInDetector: OpenAIRealtimeBargeInDetecting {
+    private let decisions: AsyncStream<Bool>
+    private let continuation: AsyncStream<Bool>.Continuation
+    private(set) var confirmationRequestCount = 0
+
+    init() {
+        let pair = AsyncStream<Bool>.makeStream(
+            of: Bool.self,
+            bufferingPolicy: .unbounded
+        )
+        decisions = pair.stream
+        continuation = pair.continuation
+    }
+
+    func assistantOutputStarted() {}
+    func assistantOutputEnded() {}
+    func rejectedInputEnded() {}
+
+    func confirmInterruption() async -> Bool {
+        confirmationRequestCount += 1
+        for await decision in decisions {
+            return decision
+        }
+        return false
+    }
+
+    func resolveConfirmation(_ decision: Bool) {
+        continuation.yield(decision)
     }
 }
 

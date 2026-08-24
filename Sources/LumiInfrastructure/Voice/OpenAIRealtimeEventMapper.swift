@@ -8,9 +8,12 @@ public enum OpenAIRealtimeProviderEvent: Equatable, Sendable {
     case sessionCreated
     case inputAudioSpeechStarted
     case inputAudioSpeechStopped
+    case inputAudioCommitted(itemID: String)
     case outputAudioStarted
     case outputAudioStopped
     case outputAudioCleared
+    case responseStarted
+    case responseCompleted
     case responseFailed
     case toolCall(VoiceToolCall)
     case error
@@ -51,6 +54,9 @@ actor OpenAIRealtimeEventMapper {
             isResponseReadyArmed = true
             return [.voice(.userSpeechEnded)]
 
+        case .inputAudioCommitted:
+            return []
+
         case .outputAudioStarted:
             isOutputActive = true
             guard isResponseReadyArmed else { return [] }
@@ -60,6 +66,9 @@ actor OpenAIRealtimeEventMapper {
 
         case .outputAudioStopped, .outputAudioCleared:
             isOutputActive = false
+            return []
+
+        case .responseStarted, .responseCompleted:
             return []
 
         case .responseFailed, .error:
