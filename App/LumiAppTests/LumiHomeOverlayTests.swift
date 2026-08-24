@@ -52,6 +52,11 @@ struct LumiHomeOverlayTests {
         #expect(LumiHomeViewIntent.showsHintsByDefault)
     }
 
+    @Test("native volume control reserves a visible slider width")
+    func nativeVolumeSliderWidth() {
+        #expect(SystemVolumeControl.viewIntent.sliderWidth == 260)
+    }
+
     @Test("selected Stitch direction keeps settings, caption, and native volume controls")
     func selectedDirectionStructure() throws {
         let contentSource = try source(named: "ContentView.swift")
