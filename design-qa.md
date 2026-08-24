@@ -61,4 +61,38 @@ capture, recognition thresholds, or known/unknown decisions. The 2026-08-22
 Scheme A flow supersedes its camera-first entry while preserving its capture
 surface after member confirmation.
 
+## 2026-08-25 — Lumi Home, Stitch option 1
+
+Reference: Google Stitch option 1, “Lumi Home — Face Caption”
+`/tmp/lumi-stitch-face-caption-actual.png`
+
+Implementation screenshot:
+`/tmp/lumi-home-known-implementation.png`
+
+Same-state comparison input:
+
+- `.build/design-qa/lumi-home-stitch-option-1-vs-implementation.png`
+
+Viewport: 1290×2796 pixels at 3× (430×932 points), portrait, iPhone 16 Plus
+Simulator on iOS 18.4. Compared state: known visitor, three enrolled members.
+
+The implementation preserves option 1's pale background, centered Lumi face,
+single top-right settings affordance, two-line recognition caption, and bottom
+system-volume control. The Avatar remains deliberately larger than the Stitch
+thumbnail because the selected direction was requested on top of Lumi's
+existing large-eye interface rather than as a literal replacement Avatar.
+
+The settings sheet was exercised through the Simulator accessibility tree:
+turning `顯示應用提示` off removed the recognition caption while leaving the
+settings and volume controls available, and turning it back on restored the
+caption. The setting is backed by `@AppStorage` and therefore persists between
+launches. The enrolled count is the number of distinct locally enrolled member
+IDs, not the number of face samples.
+
+The known-state screenshot uses the real production views with a visual-QA
+state fixture. The fixture suppresses the DEBUG-only authorization-reset button
+and Simulator camera failure card; neither is part of the product-facing home
+composition being compared. The fixture was removed immediately after capture.
+No P0, P1, or P2 visual issue remains in the selected home direction.
+
 final result: passed
