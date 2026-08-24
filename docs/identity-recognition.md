@@ -2,7 +2,7 @@
 
 > File: `identity-recognition.md`
 > Status: In implementation
-> Last updated: 2026-08-22
+> Last updated: 2026-08-23
 > Scope: Milestone 3 — Member Identity Recognition
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 > Decisions: `docs/decisions/ADR-0004-face-match-confidence-policy.md`, `docs/decisions/ADR-0005-development-scope-and-boundaries.md`, `docs/decisions/ADR-0010-sface-embedding-model.md`
@@ -939,9 +939,11 @@ replace the enrollment label with a system-provided preferred name later.
 not provide a member name, visit history, exercise data, or real weekly
 summary. The existing Debug fixture is not remapped to a recognized real ID;
 real member context remains blocked on the separately designed CMS API and
-identity-binding contract. Recognition timeout, automatic continuous
-recognition, formal enrollment/consent, and production thresholds remain
-unresolved product decisions.
+identity-binding contract. At the 44B checkpoint, recognition timeout,
+automatic continuous recognition, formal enrollment/consent, and production
+thresholds were still unresolved; the later 2026-08-23 pilots below supersede
+the first three items for Debug-Live only. Production thresholds remain
+unresolved.
 
 TDD evidence for the original slice: policy 12/12, pilot adapter 7/7, exact
 known/unknown session-to-voice paths 2/2, Debug App composition 27/27, and
@@ -956,6 +958,105 @@ gate built successfully, passed its 4/4 XCTest snapshots, and showed no visible
 Swift Testing failure after the race fixes, but the existing
 `swiftpm-testing-helper` lifecycle hang required interruption (exit 130); no
 clean package-wide pass or total count is claimed.
+
+### Owner-approved conversational enrollment pilot (2026-08-23)
+
+For a Debug-Live visitor whose recognition result is public `unknown`, Lumi may
+say: `我好像還不認識你，可以跟你認識嗎？如果你願意，我會拍幾張照片，下次就記得你啦。`
+Only a clear affirmative response authorizes the provider-neutral
+`begin_visitor_enrollment` tool. The App then captures exactly three newly
+armed, usable camera samples into memory; it does not persist a provisional
+embedding or expose any frame, embedding, score, or raw identity to OpenAI.
+
+After the three samples are ready, Lumi asks `我該怎麼稱呼您呢？`. A valid
+short answer is normalized into the existing `VoiceMemberAddress` contract and
+sent through `complete_visitor_enrollment`. The App creates a local UUID-backed
+`MemberID` and atomically stores the local spoken label, consent timestamp, and
+all three SFace embeddings. The label is not a primary key and duplicate labels
+do not merge identities. Tool output confirms only capture/completion status
+and the voluntarily provided spoken label; it never returns the generated ID.
+
+Refusal performs no enrollment. Cancellation, visitor departure, session end,
+capture failure, or failure to complete naming discards all in-memory samples.
+The assistant may retry a failed capture only after explaining the failure; it
+must never infer consent or invent a name. This pilot does not create or bind a
+Curves CMS account, does not upload biometric data, and does not enable Release
+enrollment. A future CMS binding must map the local UUID to a system member ID
+without changing the user-visible name flow.
+
+The Debug-Live implementation is now connected end to end: the Unknown voice
+session alone receives the two enrollment tools; Application sequences and
+cleans them up; the existing camera/Vision/YuNet/SFace service holds three
+pending embeddings in memory; SQLite atomically writes the generated local
+profile, consent time, and three samples; and later recognition resolves the
+stored spoken label for both the on-device greeting and privacy-safe voice
+context. Known sessions retain only the weekly-summary tool, and Release builds
+receive neither enrollment tools nor the conversational enrollment port.
+
+TDD evidence: visitor router `10/10`, visitor session runner `3/3`, Core ML plus
+SQLite enrollment `13/13`, Realtime wire `14/14`, combined Realtime/router/
+coordinator `121/121`, and full hosted Debug-Live App `92/92`. Generic unsigned
+Simulator Debug, Mock Release, and Release-Live builds plus `swift build -c
+release` succeeded. The exact package `swift test` run passed `4/4` XCTest
+snapshots and showed no visible Swift Testing failure, including every new
+enrollment test, but the known `swiftpm-testing-helper` lifecycle hang required
+interruption and prevented a clean aggregate pass/count claim. No physical
+camera or natural voice enrollment claim is made by these automated gates.
+
+### Owner-approved continuous welcome pilot (2026-08-23)
+
+The product owner approved replacing the visible Debug-Live session controls
+with an automatic visitor loop. Once an authorized App reaches the Avatar,
+Debug-Live automatically waits for one usable face, runs the existing
+three-observation 44B recognition policy, and starts the appropriate Realtime
+voice session without an operator button. The Avatar shows its recognizing
+state while waiting. The manual simulator panel and calibration entry are not
+part of this visitor surface; device reset remains a compact administrative
+gear action.
+
+One arrival may produce only one greeting. Lumi rearms only after the presence
+monitor observes ten continuous seconds with no usable face; any usable face
+inside that interval resets the absence timer. After departure, Application
+ends the session through the existing `visitorLeft` path, returns the Avatar to
+idle, and begins waiting again. Cancellation stops the camera and preserves
+`CancellationError`; stage errors use one redacted failure. This is a
+Debug-Live field workflow, not a Release threshold or representative-store
+accuracy claim.
+
+Presence observation runs the camera-to-embedding face gate only. It does not
+load SQLite enrollment samples or rank the 800-member gallery on every waiting
+frame; the gallery is queried only by the existing three-observation identity
+decision after an arrival.
+
+For a known member with a validated spoken label, the local UI still exposes
+`<名稱>，歡迎回來～`, while Realtime instructions require the first spoken
+sentence to start with `<名稱>，歡迎回來`. Lumi may then choose exactly one of
+`漂亮姊姊`, `寶貝`, or `公主殿下` and add one short positive sentence. It must
+not stack the nicknames or use them to infer age or private data. An unknown
+visitor begins with `漂亮姊姊，我好像還不認識妳` before the existing disclosure,
+spoken consent, three-sample enrollment, and naming flow.
+
+The ready Avatar also embeds Apple's native
+[`MPVolumeView`](https://developer.apple.com/documentation/mediaplayer/mpvolumeview)
+volume slider. This changes the user's system output volume; Lumi does not
+attempt to write
+[`AVAudioSession.outputVolume`](https://developer.apple.com/documentation/avfaudio/avaudiosession/outputvolume),
+which is read-only. Existing Live audio routing continues to prefer the speaker
+through
+[`.defaultToSpeaker`](https://developer.apple.com/documentation/avfaudio/avaudiosession/categoryoptions-swift.struct/defaulttospeaker).
+The slider changes volume only—it does not alter recognition confidence,
+microphone gain, the OpenAI voice, or audio-session routing policy.
+
+TDD and integration evidence for this amendment: the focused presence,
+identity-service, Realtime, and deterministic-hardware suites passed `80/80`;
+the continuous App flow passed `21/21`; and the complete hosted App target
+passed `99/99` in both Mock Debug and Debug-Live. Swift Release plus unsigned
+Mock Debug, Debug-Live, and Release-Live Simulator builds succeeded. The exact
+package `swift test` run passed `4/4` XCTest snapshots and showed no visible
+Swift Testing failure, but the known `swiftpm-testing-helper` lifecycle hang
+again required interruption, so no clean full-package aggregate exit or count
+is claimed. These automated gates do not replace physical-device voice-volume,
+camera-presence, or natural-conversation validation.
 
 ### Important Rule
 

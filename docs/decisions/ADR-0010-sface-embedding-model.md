@@ -548,6 +548,25 @@ failure after the race fixes, but the existing testing-helper lifecycle hang
 required interruption (exit 130); it is not recorded as a clean package-wide
 pass.
 
+### 1.13 Continuous recognition and proactive welcome pilot (2026-08-23)
+
+The product owner approved a Debug-Live kiosk loop using the existing 44B
+policy rather than a separate recognition threshold. App automatically waits
+for one usable face, performs the three-observation identity decision, starts
+the matching returning-member or visitor voice context, and accepts no second
+arrival until ten continuous seconds without a usable face have elapsed. A
+usable face resets that absence interval. The existing coordinator owns
+session transitions; the new presence port observes only arrival/departure and
+does not expose frames, embeddings, scores, or identity.
+
+This loop does not change SFace, YuNet, the SQLite gallery, the 0.70/0.20 pilot
+gates, or the unknown-over-guessing rule. It removes the visible manual pilot
+panel from the visitor surface and keeps reset/calibration as administrative
+controls. Realtime may preserve a validated known label and add exactly one
+approved playful nickname; unknown visitors retain the explicit consented
+enrollment gate. User volume adjustment is delegated to Apple's native
+`MPVolumeView`; it is not an embedding or recognition responsibility.
+
 ### 2. Convert reproducibly to Core ML
 
 `Tools/ModelConversion/build_sface_coreml.py` downloads only when explicitly

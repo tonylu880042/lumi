@@ -842,6 +842,17 @@ Enrollment must not silently occur for passersby.
 
 Consent and identity confirmation must be explicitly defined before production.
 
+For the owner-approved Debug-Live conversational pilot, an Unknown visitor is
+offered enrollment only after Lumi clearly says that it will capture face
+features so it can remember the visitor next time. A clear affirmative answer
+authorizes exactly three automatic samples for that attempt. The samples remain
+pending until Lumi asks how to address the visitor and receives a valid short
+spoken label. Only then does the App create a local UUID-backed `MemberID` and
+atomically persist the label, consent timestamp, and three embeddings. The
+spoken label is never the identity key. Refusal, cancellation, departure,
+session end, capture failure, or failure to provide a valid label discards all
+pending samples and stores no enrollment.
+
 ---
 
 # 22. Member Data Integration

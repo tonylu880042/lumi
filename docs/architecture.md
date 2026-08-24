@@ -797,6 +797,31 @@ picker and use `general`. The selected direction is disabled after startup;
 startup failure leaves it available for retry, and confirmed return to `idle`
 resets it to `general`. Direction choice has no telemetry and is not persisted.
 
+### 11.3 Conversational Unknown-visitor enrollment pilot
+
+Debug-Live may offer a public-Unknown visitor the owner-approved enrollment
+conversation. The provider may request only two normalized Application tools:
+
+```text
+begin_visitor_enrollment
+complete_visitor_enrollment(spoken_label)
+```
+
+The first tool is legal only for the current Unknown/visitor session after the
+assistant has disclosed that it will capture face features and the visitor has
+clearly agreed. Infrastructure automatically captures exactly three fresh,
+usable samples into an in-memory pending enrollment. The second tool accepts a
+validated `VoiceMemberAddress`, creates a local UUID-backed `MemberID`, and
+atomically persists the local profile, consent timestamp, and all three
+embeddings. Tool results never contain the generated `MemberID`, embeddings,
+images, or recognition scores.
+
+The spoken label is display data, never an identity key. Refusal needs no tool
+call. Cancellation, session end, visitor departure, failed capture, or missing
+or invalid naming discards the pending samples. Release composition, existing
+known-member weekly-summary routing, production thresholds, and CMS account
+binding remain unchanged.
+
 ---
 
 # 12. Tool Calling Architecture

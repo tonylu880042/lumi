@@ -286,6 +286,21 @@ Debug-Live may also show the same validated label locally as
 `<spokenLabel>，歡迎回來～` after recognition and before voice startup; unknown,
 invalid-label, and Release paths stay anonymous.
 
+Owner amendment (2026-08-23): the Debug-Live visitor surface automatically
+starts recognition and voice after one usable arrival, then rearms only after
+ten continuous seconds without a usable face. A known session must begin its
+spoken greeting with the validated `<名稱>，歡迎回來`; it may then use exactly
+one of `漂亮姊姊`, `寶貝`, or `公主殿下` with a short positive sentence. An
+unknown enrollment-capable session begins with
+`漂亮姊姊，我好像還不認識妳` and retains the existing disclosure and explicit
+consent gate. These phrases do not add member data to the broker request and do
+not authorize fabricated profile or exercise facts.
+
+The same Debug-Live surface exposes Apple's native `MPVolumeView` so the user
+can change system output volume. `AVAudioSession.outputVolume` remains
+read-only; the App does not set it programmatically. The existing
+`.defaultToSpeaker` route preference remains unchanged.
+
 ## 7. App Credential Source and Failure Mapping
 
 The concrete client-secret source is an Infrastructure adapter. It receives an

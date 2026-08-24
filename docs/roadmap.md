@@ -2,7 +2,7 @@
 
 > File: `roadmap.md`
 > Status: Active
-> Last updated: 2026-08-22
+> Last updated: 2026-08-23
 > Development principles: Clean Architecture + TDD + Ask-if-Unclear
 
 ## 1. Roadmap Goal
@@ -707,8 +707,9 @@ A person approaching left/center/right causes Lumi to orient approximately towar
 
 ## 9. Milestone 3 — Member Identity Recognition
 
-**Status: In progress — 42A DEBUG physical calibration and photo-library
-import fallback implemented; physical-iPad validation pending**
+**Status: In progress — Debug-Live recognition and consented conversational
+enrollment pilot implemented; physical conversational validation, production
+thresholds, backup, and CMS binding pending**
 
 > **Apple Vision / Core ML member recognition begins here.**
 
@@ -734,6 +735,15 @@ only the embedding; return import ranks the full gallery and never saves
 photos. Picker items and encoded/decoded image data are never persisted or
 logged, and Release builds omit the tool. Physical-iPad quality and production
 recognition policy remain pending.
+
+The 44B and conversational-enrollment checkpoints now connect that local graph
+to the Debug-Live session. A public Unknown visitor may be offered enrollment
+only after a disclosure and clear spoken consent. Three fresh usable samples
+remain in memory until the visitor supplies a valid spoken address; the App
+then generates a local UUID and atomically persists the profile, consent time,
+and three embeddings. A later recognized UUID resolves to the stored address
+for `<名稱>，歡迎回來～`. No photo, embedding, confidence, raw ID, or CMS identity
+crosses the Realtime tool boundary. Release remains unchanged.
 
 ### I0 — Identity Port Validation
 Verify:
@@ -1072,7 +1082,15 @@ Milestone 3      Vision + Core ML Identity Recognition
                  2-of-3 fresh observations → returning-member voice context;
                  safe enrollment ID may be a temporary spoken address in
                  Debug-Live only (owner Option A, 2026-08-22).
-                 Production thresholds and CMS identity binding remain pending.
+                 2026-08-23: consented Unknown-visitor enrollment now captures
+                 3 in-memory samples, asks for a spoken address, and atomically
+                 stores a local UUID profile in Debug-Live.
+                 2026-08-23: Debug-Live now stays in continuous recognition,
+                 proactively starts the known/unknown voice greeting once per
+                 arrival, rearms after 10 continuous face-free seconds, and
+                 exposes a native system-output volume slider.
+                 Physical voice/camera validation, backup, production
+                 thresholds, legal consent copy, and CMS binding remain pending.
 
 Milestone 4      Real Curves Member API
 Milestone 5      Integrated Store MVP
