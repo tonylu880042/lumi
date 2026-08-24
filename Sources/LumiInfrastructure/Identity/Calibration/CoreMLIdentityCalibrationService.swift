@@ -78,6 +78,7 @@ protocol VisitorEnrollmentStore: Sendable {
 /// recognition decision to its caller.
 public actor CoreMLIdentityCalibrationService:
     IdentityCalibrationPort,
+    IdentityEnrollmentSummaryPort,
     VisitorEnrollmentPort,
     VoiceMemberAddressRepository
 {
@@ -220,6 +221,22 @@ public actor CoreMLIdentityCalibrationService:
             let address = try await visitorEnrollmentStore.address(for: memberID)
             try Task.checkCancellation()
             return address
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
+    public func enrolledMemberCount() async throws -> Int {
+        do {
+            try Task.checkCancellation()
+            let samples = try await store.sFaceSamples()
+            try Task.checkCancellation()
+            return Set(samples.map(\.memberID)).count
         } catch let cancellation as CancellationError {
             throw cancellation
         } catch {

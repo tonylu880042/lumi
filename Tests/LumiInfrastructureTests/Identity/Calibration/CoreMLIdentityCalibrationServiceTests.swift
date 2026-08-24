@@ -6,6 +6,37 @@ import Testing
 
 @Suite("Core ML identity calibration service")
 struct CoreMLIdentityCalibrationServiceTests {
+    @Test("enrolled member count deduplicates multiple face samples per member")
+    func enrolledMemberCountDeduplicatesSamples() async throws {
+        let firstMember = try MemberID(rawValue: "member-a")
+        let secondMember = try MemberID(rawValue: "member-b")
+        let store = RecordingCalibrationStore()
+        await store.seed([
+            StoredFaceEmbeddingSample(
+                memberID: firstMember,
+                embedding: try makeEmbedding(axis: 0)
+            ),
+            StoredFaceEmbeddingSample(
+                memberID: firstMember,
+                embedding: try makeEmbedding(axis: 1)
+            ),
+            StoredFaceEmbeddingSample(
+                memberID: secondMember,
+                embedding: try makeEmbedding(axis: 2)
+            ),
+        ])
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: PreviewingCalibrationFrameSource(),
+            embeddingPipeline: RecordingCalibrationEmbeddingPipeline(
+                .success(try makeEmbedding(axis: 0))
+            ),
+            store: store
+        )
+
+        #expect(try await service.enrolledMemberCount() == 2)
+        #expect(await store.sFaceSamplesCallCount == 1)
+    }
+
     @Test("concrete camera source discards a buffered frame before arming")
     func concreteFrameSourceDiscardsBufferedFrame() async throws {
         let adapter = BufferedCameraAdapter()
