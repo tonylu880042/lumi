@@ -43,6 +43,18 @@ struct VoiceSessionPortContractTests {
         acceptsSendable(event)
     }
 
+    @Test("assistant output lifecycle is payload-free and equatable")
+    func assistantOutputLifecycleIsPayloadFreeAndEquatable() {
+        let events: [VoiceSessionEvent] = [
+            .assistantOutputStarted,
+            .assistantOutputEnded,
+        ]
+
+        #expect(events == [.assistantOutputStarted, .assistantOutputEnded])
+        #expect(events.allSatisfy { Mirror(reflecting: $0).children.isEmpty })
+        acceptsSendable(events)
+    }
+
     @Test("authorization-required error is payload-free and equatable")
     func authorizationRequiredIsPayloadFreeAndEquatable() {
         let error = VoiceSessionAuthorizationError.authorizationRequired

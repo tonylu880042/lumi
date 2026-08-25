@@ -2,7 +2,7 @@ import Foundation
 @testable import LumiInfrastructure
 import Testing
 
-@Suite("Vision face detector")
+@Suite("Vision face detector", .serialized)
 struct VisionFaceDetectorTests {
     @Test("returns zero observations without inventing a face")
     func returnsZeroObservations() async throws {

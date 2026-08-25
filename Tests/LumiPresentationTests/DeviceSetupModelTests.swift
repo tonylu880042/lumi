@@ -3,7 +3,7 @@ import Observation
 import Testing
 @testable import LumiPresentation
 
-@Suite("Device setup model")
+@Suite("Device setup model", .serialized)
 @MainActor
 struct DeviceSetupModelTests {
     private let validToken = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"

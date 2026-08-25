@@ -137,6 +137,8 @@ into provider-independent `VoiceSessionEvent` values. In particular:
 - the initial greeting does not emit a duplicate `.responseReady`
 - the first playable response audio is represented by
   `output_audio_buffer.started`
+- output start and stop/clear map to payload-free
+  `.assistantOutputStarted` / `.assistantOutputEnded` lifecycle events
 - speech beginning while output is active emits only
   `.assistantInterrupted`
 
@@ -259,8 +261,8 @@ Required coverage:
 - exactly one initial `response.create` per Lumi session
 - automatic reconnect configures the fresh session without replaying greeting
 - all event mappings in section 4, including future and malformed events
-- first-playable-audio and interruption behavior remain compatible with the
-  existing mapper tests
+- first-playable-audio, output lifecycle, and interruption behavior remain
+  compatible with the existing mapper tests
 - task cancellation cancels signaling and releases peer, audio, and data-channel
   resources
 - repeated `close()` performs cleanup at most once

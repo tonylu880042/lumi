@@ -383,6 +383,41 @@ struct SessionSimulationModelTests {
         #expect(model.isContinuousExperienceRunning)
     }
 
+    @Test("continuous experience waits for voice readiness before monitoring departure")
+    func continuousExperienceWaitsForVoiceReadiness() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = DeferredStartVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        await voice.waitForStartCall()
+
+        for _ in 0..<256 {
+            await Task.yield()
+        }
+        #expect(await presence.departureRequestCount == 0)
+
+        await voice.completeStart()
+        await presence.waitForDepartureRequest()
+        #expect(await presence.departureRequestCount == 1)
+
+        model.stopContinuousExperience()
+    }
+
     @Test("continuous experience publishes enrolled count and recognition display state")
     func continuousExperiencePublishesHomeStatus() async throws {
         let hardware = MockHardwareControlPort()
@@ -464,6 +499,45 @@ struct SessionSimulationModelTests {
         #expect(diagnostics.contains(.stageStarted(.finishSession)))
         #expect(await voice.startContexts == [.visitor])
         #expect(await hardware.returnHomeCallCount == 1)
+    }
+
+    @Test("confirmed departure cannot stop active assistant audio")
+    func continuousDepartureWaitsForAssistantOutputToEnd() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort(
+            automaticallyCompletesInitialOutput: false
+        )
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        await voice.emit(.assistantOutputStarted)
+        await presence.waitForDepartureRequest()
+        await presence.signalDeparture()
+
+        for _ in 0..<256 {
+            await Task.yield()
+        }
+        #expect(await voice.stopCallCount == 0)
+        #expect(model.assistantState == .speaking)
+
+        await voice.emit(.assistantOutputEnded)
+        try #require(await waitUntilCurrent { model.assistantState == .idle })
+        #expect(await voice.stopCallCount == 1)
     }
 
     @Test("a stopped continuous generation cannot clear a freshly restarted loop")
@@ -628,8 +702,8 @@ struct SessionSimulationModelTests {
         model.stopContinuousExperience()
     }
 
-    @Test("automatic departure failure returns home before offering retry")
-    func continuousDepartureFailureReturnsHome() async throws {
+    @Test("departure monitor failure preserves the active conversation")
+    func continuousDepartureFailurePreservesConversation() async throws {
         let hardware = MockHardwareControlPort()
         let identity = ImmediateIdentityRecognitionPort(result: .unknown)
         let voice = ImmediateVoiceSessionPort()
@@ -661,8 +735,9 @@ struct SessionSimulationModelTests {
         await stopped.value
 
         #expect(model.errorMessage != nil)
-        #expect(model.assistantState == .idle)
-        #expect(await hardware.returnHomeCallCount == 1)
+        #expect(model.assistantState == .speaking)
+        #expect(await voice.stopCallCount == 0)
+        #expect(await hardware.returnHomeCallCount == 0)
     }
 
     @Test("Authorization-required startup invokes routing exactly once")
@@ -918,13 +993,19 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
     }
 
     private let startBehavior: StartBehavior
+    private let automaticallyCompletesInitialOutput: Bool
     private(set) var startCallCount = 0
+    private(set) var stopCallCount = 0
     private(set) var startContexts: [VoiceContext] = []
     private var continuation: AsyncStream<VoiceSessionEvent>.Continuation?
     private var startCallWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(startBehavior: StartBehavior = .success) {
+    init(
+        startBehavior: StartBehavior = .success,
+        automaticallyCompletesInitialOutput: Bool = true
+    ) {
         self.startBehavior = startBehavior
+        self.automaticallyCompletesInitialOutput = automaticallyCompletesInitialOutput
     }
 
     func start(context: VoiceContext) async throws {
@@ -937,6 +1018,10 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
         }
         switch startBehavior {
         case .success:
+            if automaticallyCompletesInitialOutput {
+                continuation?.yield(.assistantOutputStarted)
+                continuation?.yield(.assistantOutputEnded)
+            }
             return
         case .authorizationRequired:
             throw VoiceSessionAuthorizationError.authorizationRequired
@@ -970,8 +1055,58 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
     }
 
     func stop() async {
+        stopCallCount += 1
         continuation?.finish()
         continuation = nil
+    }
+}
+
+private actor DeferredStartVoiceSessionPort: VoiceSessionPort {
+    private var startContinuation: CheckedContinuation<Void, Error>?
+    private var startCallWaiters: [CheckedContinuation<Void, Never>] = []
+    private var eventContinuation: AsyncStream<VoiceSessionEvent>.Continuation?
+
+    func start(context _: VoiceContext) async throws {
+        let waiters = startCallWaiters
+        startCallWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        try await withCheckedThrowingContinuation {
+            startContinuation = $0
+        }
+    }
+
+    func waitForStartCall() async {
+        if startContinuation != nil { return }
+        await withCheckedContinuation { waiter in
+            if startContinuation != nil {
+                waiter.resume()
+            } else {
+                startCallWaiters.append(waiter)
+            }
+        }
+    }
+
+    func completeStart() {
+        startContinuation?.resume()
+        startContinuation = nil
+    }
+
+    func eventUpdates() async -> AsyncStream<VoiceSessionEvent> {
+        let pair = AsyncStream<VoiceSessionEvent>.makeStream(
+            of: VoiceSessionEvent.self,
+            bufferingPolicy: .unbounded
+        )
+        eventContinuation = pair.continuation
+        return pair.stream
+    }
+
+    func stop() async {
+        startContinuation?.resume(throwing: CancellationError())
+        startContinuation = nil
+        eventContinuation?.finish()
+        eventContinuation = nil
     }
 }
 
@@ -997,6 +1132,7 @@ private actor ControlledVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
     private var departureWaiters: [CheckedContinuation<Void, Never>] = []
     private var stopCallCount = 0
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var departureRequestCount = 0
 
     func waitForVisitor() async throws {
         arrivalRequestCount += 1
@@ -1007,6 +1143,7 @@ private actor ControlledVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
     }
 
     func waitForDeparture() async throws {
+        departureRequestCount += 1
         for waiter in departureWaiters { waiter.resume() }
         departureWaiters.removeAll()
         try await withCheckedThrowingContinuation { departureContinuation = $0 }

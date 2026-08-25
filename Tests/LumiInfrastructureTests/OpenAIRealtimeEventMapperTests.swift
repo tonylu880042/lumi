@@ -48,9 +48,9 @@ struct OpenAIRealtimeEventMapperTests {
     func speechStartedInterruptsActiveAssistantOutput() async {
         let mapper = OpenAIRealtimeEventMapper()
 
-        #expect(await mapper.map(.outputAudioStarted).isEmpty)
+        #expect(await mapper.map(.outputAudioStarted) == [.voice(.assistantOutputStarted)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.assistantInterrupted)])
-        #expect(await mapper.map(.outputAudioStopped).isEmpty)
+        #expect(await mapper.map(.outputAudioStopped) == [.voice(.assistantOutputEnded)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
     }
 
@@ -59,7 +59,10 @@ struct OpenAIRealtimeEventMapperTests {
         let mapper = OpenAIRealtimeEventMapper()
 
         #expect(await mapper.map(.inputAudioSpeechStopped) == [.voice(.userSpeechEnded)])
-        #expect(await mapper.map(.outputAudioStarted) == [.voice(.responseReady)])
+        #expect(await mapper.map(.outputAudioStarted) == [
+            .voice(.responseReady),
+            .voice(.assistantOutputStarted),
+        ])
         #expect(await mapper.map(.outputAudioStarted).isEmpty)
     }
 
@@ -67,9 +70,9 @@ struct OpenAIRealtimeEventMapperTests {
     func initialGreetingOutputDoesNotAnnounceResponseReadiness() async {
         let mapper = OpenAIRealtimeEventMapper()
 
-        #expect(await mapper.map(.outputAudioStarted).isEmpty)
+        #expect(await mapper.map(.outputAudioStarted) == [.voice(.assistantOutputStarted)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.assistantInterrupted)])
-        #expect(await mapper.map(.outputAudioCleared).isEmpty)
+        #expect(await mapper.map(.outputAudioCleared) == [.voice(.assistantOutputEnded)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
     }
 
@@ -77,12 +80,12 @@ struct OpenAIRealtimeEventMapperTests {
     func outputEndEventsClearActiveState() async {
         let mapper = OpenAIRealtimeEventMapper()
 
-        #expect(await mapper.map(.outputAudioStarted).isEmpty)
-        #expect(await mapper.map(.outputAudioStopped).isEmpty)
+        #expect(await mapper.map(.outputAudioStarted) == [.voice(.assistantOutputStarted)])
+        #expect(await mapper.map(.outputAudioStopped) == [.voice(.assistantOutputEnded)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
 
-        #expect(await mapper.map(.outputAudioStarted).isEmpty)
-        #expect(await mapper.map(.outputAudioCleared).isEmpty)
+        #expect(await mapper.map(.outputAudioStarted) == [.voice(.assistantOutputStarted)])
+        #expect(await mapper.map(.outputAudioCleared) == [.voice(.assistantOutputEnded)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
     }
 

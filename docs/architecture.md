@@ -387,9 +387,12 @@ protocol VoiceSessionPort: Sendable {
 ```
 
 In Phase 1, `start(context:)` completes only when the voice session is ready.
-The coordinator is the sole consumer of typed `userSpeechStarted`,
-`userSpeechEnded`, `responseReady`, and payload-free `failure` events. A
-failure leaves the semantic state unchanged so its legal action can be retried.
+The coordinator is the sole consumer of typed `assistantOutputStarted`,
+`assistantOutputEnded`, `userSpeechStarted`, `userSpeechEnded`, `responseReady`,
+and payload-free `failure` events. Output lifecycle events do not enter Domain;
+they let Application delay an internally requested session end until audible
+assistant output reaches a provider-confirmed boundary. A failure leaves the
+semantic state unchanged so its legal action can be retried.
 `VoiceContext` distinguishes only a returning member from a generic visitor;
 it carries no member identity, confidence, or private profile data. The
 separate optional `VoiceMemberAddress` is a narrow Application value containing

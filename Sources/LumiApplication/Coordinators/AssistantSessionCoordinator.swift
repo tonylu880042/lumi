@@ -77,6 +77,10 @@ public actor AssistantSessionCoordinator {
     private var authorizationSubscribers: [
         UInt64: AsyncStream<Void>.Continuation
     ] = [:]
+    private var nextVoiceTurnCompletionSubscriberID: UInt64 = 0
+    private var voiceTurnCompletionSubscribers: [
+        UInt64: AsyncStream<Bool>.Continuation
+    ] = [:]
     private var identityRecognitionInProgress = false
     private var voiceSessionStartInProgress = false
     private var voiceEventConsumerTask: Task<Void, Never>?
@@ -89,6 +93,9 @@ public actor AssistantSessionCoordinator {
     private var identityOperationGeneration: UInt64?
     private var voiceStartOperation: Task<VoiceStartPreparation, Error>?
     private var voiceStartOperationGeneration: UInt64?
+    private var voiceSessionIsActive = false
+    private var assistantOutputHasStarted = false
+    private var assistantOutputIsActive = false
 
     public init(
         hardware: any HardwareControlPort,
@@ -151,6 +158,24 @@ public actor AssistantSessionCoordinator {
         }
         authorizationSubscribers[subscriberID] = pair.continuation
         return pair.stream
+    }
+
+    /// Ends a session only after the current conversational turn reaches a
+    /// provider-confirmed audio boundary.
+    ///
+    /// While a live voice session is greeting, listening, thinking, or
+    /// producing audio, internal callers such as departure monitoring must use
+    /// this operation so a camera result cannot truncate assistant speech.
+    @discardableResult
+    public func endSessionAfterCurrentVoiceTurnCompletes() async throws -> AssistantState {
+        let updates = voiceTurnCompletionUpdates()
+        for await canEndWithoutTruncatingVoice in updates {
+            try Task.checkCancellation()
+            if canEndWithoutTruncatingVoice {
+                return try await endSession()
+            }
+        }
+        throw CancellationError()
     }
 
     /// Confirms a visitor from the idle state and returns the resulting state.
@@ -390,6 +415,9 @@ public actor AssistantSessionCoordinator {
                 throw CancellationError()
             }
 
+            voiceSessionIsActive = true
+            assistantOutputHasStarted = false
+            assistantOutputIsActive = false
             _ = try transition(.voiceSessionReady)
             voiceRequiresRetry = false
             startVoiceEventConsumer(preparation.events, generation: generation)
@@ -478,6 +506,9 @@ public actor AssistantSessionCoordinator {
             throw error
         }
 
+        voiceSessionIsActive = false
+        assistantOutputHasStarted = false
+        assistantOutputIsActive = false
         _ = try transition(.sessionEnded)
         recognitionResult = nil
         voiceRequiresRetry = false
@@ -492,6 +523,7 @@ public actor AssistantSessionCoordinator {
 
         state = nextState
         publish(nextState)
+        publishVoiceTurnCompletionReadiness()
         return nextState
     }
 
@@ -513,6 +545,49 @@ public actor AssistantSessionCoordinator {
 
     private func removeAuthorizationSubscriber(id: UInt64) {
         authorizationSubscribers.removeValue(forKey: id)
+    }
+
+    private func voiceTurnCompletionUpdates() -> AsyncStream<Bool> {
+        let subscriberID = nextVoiceTurnCompletionSubscriberID
+        nextVoiceTurnCompletionSubscriberID &+= 1
+
+        let pair = AsyncStream<Bool>.makeStream(
+            of: Bool.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        pair.continuation.onTermination = { @Sendable [weak self] _ in
+            Task { [weak self] in
+                await self?.removeVoiceTurnCompletionSubscriber(id: subscriberID)
+            }
+        }
+        voiceTurnCompletionSubscribers[subscriberID] = pair.continuation
+        pair.continuation.yield(canEndWithoutTruncatingVoice)
+        return pair.stream
+    }
+
+    private var canEndWithoutTruncatingVoice: Bool {
+        guard voiceSessionIsActive || voiceSessionStartInProgress else {
+            return true
+        }
+        guard state == .speaking else { return false }
+        return assistantOutputHasStarted && !assistantOutputIsActive
+    }
+
+    private func publishVoiceTurnCompletionReadiness() {
+        let value = canEndWithoutTruncatingVoice
+        var terminatedSubscribers: [UInt64] = []
+        for (id, continuation) in voiceTurnCompletionSubscribers {
+            if case .terminated = continuation.yield(value) {
+                terminatedSubscribers.append(id)
+            }
+        }
+        for id in terminatedSubscribers {
+            voiceTurnCompletionSubscribers.removeValue(forKey: id)
+        }
+    }
+
+    private func removeVoiceTurnCompletionSubscriber(id: UInt64) {
+        voiceTurnCompletionSubscribers.removeValue(forKey: id)
     }
 
     private func clearOrientationOperation(generation: UInt64) {
@@ -595,17 +670,30 @@ public actor AssistantSessionCoordinator {
         guard generation == sessionGeneration, !ending else { return }
 
         switch event {
+        case .assistantOutputStarted:
+            assistantOutputHasStarted = true
+            assistantOutputIsActive = true
+            publishVoiceTurnCompletionReadiness()
+        case .assistantOutputEnded:
+            assistantOutputIsActive = false
+            publishVoiceTurnCompletionReadiness()
         case .failure:
             voiceRequiresRetry = true
         case .authorizationRequired:
             publishAuthorizationRequired()
         case .assistantInterrupted:
+            assistantOutputHasStarted = false
+            assistantOutputIsActive = false
             applyVoiceTransition(.userSpeechStarted)
         case .userSpeechStarted:
+            assistantOutputHasStarted = false
+            assistantOutputIsActive = false
             applyVoiceTransition(.userSpeechStarted)
         case .userSpeechEnded:
             applyVoiceTransition(.userSpeechEnded)
         case .responseReady:
+            assistantOutputHasStarted = false
+            assistantOutputIsActive = false
             applyVoiceTransition(.responseReady)
         }
     }
@@ -653,6 +741,9 @@ public actor AssistantSessionCoordinator {
             continuation.finish()
         }
         for continuation in authorizationSubscribers.values {
+            continuation.finish()
+        }
+        for continuation in voiceTurnCompletionSubscribers.values {
             continuation.finish()
         }
     }

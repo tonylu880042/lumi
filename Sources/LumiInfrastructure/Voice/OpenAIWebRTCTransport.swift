@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// A clock boundary kept inside Infrastructure so credential lifetime checks
 /// remain deterministic without introducing a timeout or safety margin.
@@ -73,6 +74,11 @@ public enum OpenAIWebRTCTransportError:
 /// stable stream. Framework and raw provider payloads never leave
 /// Infrastructure.
 actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
+    private static let diagnostics = Logger(
+        subsystem: "com.curves.lumi",
+        category: "realtime-barge-in"
+    )
+
     private enum Lifecycle {
         case idle
         case connecting
@@ -372,23 +378,30 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     ) async {
         switch event {
         case .responseStarted:
+            Self.diagnostics.notice("provider response-started")
             responseGenerationIsActive = true
 
         case .responseCompleted:
+            Self.diagnostics.notice("provider response-completed")
             responseGenerationIsActive = false
             await settleInputTurnIfPossible(generation: acceptedGeneration)
 
         case .responseFailed:
+            Self.diagnostics.notice("provider response-failed")
             responseGenerationIsActive = false
             eventContinuation.yield(event)
 
         case .outputAudioStarted:
+            Self.diagnostics.notice(
+                "provider output-started input-accepted=\(self.inputTurnDisposition == .accepted)"
+            )
             guard inputTurnDisposition != .accepted else {
                 do {
                     try await peerDriver.send(
                         OpenAIRealtimeWireEncoder.outputAudioBufferClear()
                     )
                     try ensureActive(acceptedGeneration)
+                    Self.diagnostics.notice("action output-clear reason=late-output")
                 } catch {
                     await failHandshake(generation: acceptedGeneration)
                 }
@@ -399,6 +412,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
             eventContinuation.yield(event)
 
         case .outputAudioStopped, .outputAudioCleared:
+            Self.diagnostics.notice("provider output-ended")
             assistantOutputIsActive = false
             await bargeInDetector.assistantOutputEnded()
             if inputTurnDisposition == .candidate {
@@ -407,12 +421,17 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
             eventContinuation.yield(event)
 
         case .inputAudioSpeechStarted:
+            Self.diagnostics.notice(
+                "provider speech-started output-active=\(self.assistantOutputIsActive) response-active=\(self.responseGenerationIsActive)"
+            )
             await beginInputTurn(generation: acceptedGeneration)
 
         case .inputAudioSpeechStopped:
+            Self.diagnostics.notice("provider speech-stopped")
             await finishInputSpeech(generation: acceptedGeneration)
 
         case .inputAudioCommitted(let itemID):
+            Self.diagnostics.notice("provider input-committed")
             committedInputItemID = itemID
             await settleInputTurnIfPossible(generation: acceptedGeneration)
 
@@ -430,12 +449,14 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
 
         guard assistantOutputIsActive else {
             inputTurnDisposition = .accepted
+            Self.diagnostics.notice("input accepted reason=no-active-output")
             if responseGenerationIsActive {
                 do {
                     try await peerDriver.send(
                         OpenAIRealtimeWireEncoder.responseCancel()
                     )
                     try ensureActive(acceptedGeneration)
+                    Self.diagnostics.notice("action response-cancel reason=pre-playout-speech")
                 } catch {
                     await failHandshake(generation: acceptedGeneration)
                     return
@@ -446,6 +467,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         }
 
         inputTurnDisposition = .candidate
+        Self.diagnostics.notice("input candidate reason=active-output")
         bargeInCandidateGeneration &+= 1
         let acceptedCandidateGeneration = bargeInCandidateGeneration
         bargeInCandidateTask = Task { [weak self] in
@@ -474,6 +496,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         bargeInCandidateTask = nil
 
         guard confirmed else {
+            Self.diagnostics.notice("input rejected reason=echo-policy")
             inputTurnDisposition = .rejected
             return
         }
@@ -482,15 +505,18 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
             if responseGenerationIsActive {
                 try await peerDriver.send(OpenAIRealtimeWireEncoder.responseCancel())
                 try ensureActive(acceptedGeneration)
+                Self.diagnostics.notice("action response-cancel reason=confirmed-barge-in")
             }
             try await peerDriver.send(OpenAIRealtimeWireEncoder.outputAudioBufferClear())
             try ensureActive(acceptedGeneration)
+            Self.diagnostics.notice("action output-clear reason=confirmed-barge-in")
         } catch {
             await failHandshake(generation: acceptedGeneration)
             return
         }
 
         inputTurnDisposition = .accepted
+        Self.diagnostics.notice("input accepted reason=confirmed-barge-in")
         assistantOutputIsActive = false
         await bargeInDetector.assistantOutputEnded()
         eventContinuation.yield(.inputAudioSpeechStarted)
@@ -532,10 +558,12 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
             case .accepted:
                 guard !responseGenerationIsActive else { return }
                 data = try OpenAIRealtimeWireEncoder.responseCreate()
+                Self.diagnostics.notice("action response-create reason=accepted-input")
             case .rejected:
                 data = try OpenAIRealtimeWireEncoder.conversationItemDelete(
                     itemID: itemID
                 )
+                Self.diagnostics.notice("action input-delete reason=rejected-echo")
             case .candidate, .none:
                 return
             }

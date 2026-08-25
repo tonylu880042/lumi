@@ -2,7 +2,7 @@ import Foundation
 @testable import LumiInfrastructure
 import Testing
 
-@Suite("YuNet face candidate pipeline")
+@Suite("YuNet face candidate pipeline", .serialized)
 struct YuNetFaceCandidatePipelineTests {
     @Test("passes the preprocessed tensor to inference and returns empty output")
     func passesPreprocessedTensorForEmptyOutput() async throws {

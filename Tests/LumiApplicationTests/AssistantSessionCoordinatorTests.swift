@@ -3,7 +3,7 @@ import LumiApplication
 import LumiDomain
 import Testing
 
-@Suite("Assistant session coordinator")
+@Suite("Assistant session coordinator", .serialized)
 struct AssistantSessionCoordinatorTests {
     @Test("ends an active session only after confirmed home arrival")
     func endSessionWaitsForConfirmedHomeArrival() async throws {
@@ -1148,6 +1148,115 @@ struct AssistantSessionCoordinatorTests {
         #expect(await coordinator.voiceRequiresRetry == false)
     }
 
+    @Test("protected end waits until active assistant output completes")
+    func protectedEndWaitsForAssistantOutputCompletion() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        try await enterSpeaking(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            result: .unknown
+        )
+
+        await voice.emit(.assistantOutputStarted)
+        let ending = Task {
+            try await coordinator.endSessionAfterCurrentVoiceTurnCompletes()
+        }
+
+        for _ in 0..<256 {
+            await Task.yield()
+        }
+        #expect(await voice.stopCallCount == 0)
+        #expect(await coordinator.state == .speaking)
+
+        await voice.emit(.assistantOutputEnded)
+        #expect(try await ending.value == .idle)
+        #expect(await voice.stopCallCount == 1)
+    }
+
+    @Test("protected end remains blocked through listening and thinking")
+    func protectedEndWaitsAcrossConversationStates() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        try await enterSpeaking(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            result: .unknown
+        )
+
+        await voice.emit(.assistantOutputStarted)
+        await voice.emit(.assistantInterrupted)
+        #expect(await waitUntil { await coordinator.state == .listening })
+
+        let ending = Task {
+            try await coordinator.endSessionAfterCurrentVoiceTurnCompletes()
+        }
+        await voice.emit(.assistantOutputEnded)
+        await voice.emit(.userSpeechEnded)
+        #expect(await waitUntil { await coordinator.state == .thinking })
+        for _ in 0..<256 { await Task.yield() }
+        #expect(await voice.stopCallCount == 0)
+
+        await voice.emit(.responseReady)
+        await voice.emit(.assistantOutputStarted)
+        #expect(await waitUntil { await coordinator.state == .speaking })
+        for _ in 0..<256 { await Task.yield() }
+        #expect(await voice.stopCallCount == 0)
+
+        await voice.emit(.assistantOutputEnded)
+        #expect(try await ending.value == .idle)
+        #expect(await voice.stopCallCount == 1)
+    }
+
+    @Test("output lifecycle and unexpected provider events cannot reset speaking")
+    func internalVoiceEventsPreserveSpeaking() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        try await enterSpeaking(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            result: .unknown
+        )
+
+        await voice.emit(.assistantOutputStarted)
+        await voice.emit(.assistantOutputEnded)
+        for _ in 0..<64 { await Task.yield() }
+        #expect(await coordinator.state == .speaking)
+        #expect(await coordinator.voiceRequiresRetry == false)
+
+        await voice.emit(.userSpeechEnded)
+        #expect(await waitUntil { await coordinator.voiceRequiresRetry })
+        #expect(await coordinator.state == .speaking)
+
+        await voice.emit(.responseReady)
+        for _ in 0..<64 { await Task.yield() }
+        #expect(await coordinator.state == .speaking)
+    }
+
     @Test("marks voice failure and illegal events retryable without changing state")
     func voiceFailureAndIllegalEventsPreserveStateAndPermitRetry() async throws {
         let hardware = TestHardware()
@@ -1533,7 +1642,7 @@ private func enterSpeaking(
 private func waitUntil(
     _ condition: @escaping @Sendable () async -> Bool
 ) async -> Bool {
-    for _ in 0..<64 {
+    for _ in 0..<4_096 {
         if await condition() { return true }
         await Task.yield()
     }

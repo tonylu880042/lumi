@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// Compares sustained near-end microphone evidence with the residual echo
 /// learned while Realtime output is already playing.
@@ -67,11 +68,17 @@ protocol OpenAIRealtimeBargeInDetecting: Sendable {
     func rejectedInputEnded() async
 }
 
-/// Learns the post-AEC microphone level while assistant audio is playing, then
-/// compares a sustained candidate against that local echo baseline. The pilot
-/// samples three times at 80 ms intervals in each phase: short noise cannot
-/// interrupt, and unavailable/invalid statistics fail closed.
+/// Maintains the most recent post-AEC microphone levels while assistant audio
+/// is playing, then compares a sustained candidate against that local echo
+/// baseline. The pilot uses three samples at 80 ms intervals in each phase:
+/// short noise cannot interrupt, startup transients age out, and unavailable
+/// or invalid statistics fail closed.
 actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
+    private static let diagnostics = Logger(
+        subsystem: "com.curves.lumi",
+        category: "realtime-barge-in"
+    )
+
     private enum PilotTuning {
         static let sampleInterval = Duration.milliseconds(80)
         static let sampleCount = 3
@@ -99,6 +106,7 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
     }
 
     func assistantOutputStarted() {
+        Self.diagnostics.notice("detector output-started")
         outputGeneration &+= 1
         outputIsActive = true
         baselineLevels.removeAll(keepingCapacity: true)
@@ -106,6 +114,7 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
     }
 
     func assistantOutputEnded() {
+        Self.diagnostics.notice("detector output-ended")
         outputGeneration &+= 1
         outputIsActive = false
         baselineTask?.cancel()
@@ -114,7 +123,10 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
     }
 
     func confirmInterruption() async -> Bool {
-        guard outputIsActive else { return false }
+        guard outputIsActive else {
+            Self.diagnostics.notice("decision rejected reason=output-inactive")
+            return false
+        }
         let acceptedGeneration = outputGeneration
         baselineTask?.cancel()
         baselineTask = nil
@@ -132,6 +144,8 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
                 }
                 if let level = await levelSource.microphoneLevel() {
                     candidate.append(level)
+                } else {
+                    Self.diagnostics.notice("candidate level=unavailable")
                 }
             }
         } catch {
@@ -142,10 +156,14 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
               outputGeneration == acceptedGeneration else {
             return false
         }
-        return PilotTuning.policy.confirmsInterruption(
+        let confirmed = PilotTuning.policy.confirmsInterruption(
             baselineLevels: baseline,
             candidateLevels: candidate
         )
+        Self.diagnostics.notice(
+            "decision confirmed=\(confirmed) baseline-count=\(baseline.count) candidate-count=\(candidate.count)"
+        )
+        return confirmed
     }
 
     func rejectedInputEnded() {
@@ -156,18 +174,20 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
 
     private func startBaselineSampling(generation acceptedGeneration: UInt64) {
         baselineTask?.cancel()
+        let levelSource = levelSource
+        let sleeper = sleeper
         baselineTask = Task { [weak self] in
-            guard let self else { return }
-            for _ in 0 ..< PilotTuning.sampleCount {
+            while !Task.isCancelled {
                 guard !Task.isCancelled else { return }
-                if let level = await self.levelSource.microphoneLevel() {
+                if let level = await levelSource.microphoneLevel() {
+                    guard let self else { return }
                     await self.recordBaseline(
                         level,
                         generation: acceptedGeneration
                     )
                 }
                 do {
-                    try await self.sleeper.sleep(for: PilotTuning.sampleInterval)
+                    try await sleeper.sleep(for: PilotTuning.sampleInterval)
                 } catch {
                     return
                 }
@@ -178,5 +198,10 @@ actor OpenAIRealtimeAdaptiveBargeInDetector: OpenAIRealtimeBargeInDetecting {
     private func recordBaseline(_ level: Double, generation: UInt64) {
         guard outputIsActive, outputGeneration == generation else { return }
         baselineLevels.append(level)
+        if baselineLevels.count > PilotTuning.sampleCount {
+            baselineLevels.removeFirst(
+                baselineLevels.count - PilotTuning.sampleCount
+            )
+        }
     }
 }

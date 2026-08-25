@@ -479,7 +479,7 @@ final class SessionSimulationModel: ObservableObject {
                       self.continuousExperienceGeneration == acceptedGeneration else {
                     return
                 }
-                if self.canEndSession {
+                if self.canEndSession, stage != .waitForDeparture {
                     try? await self.finishAutomaticVisit()
                 }
                 guard self.continuousExperienceGeneration == acceptedGeneration else {
@@ -615,13 +615,24 @@ final class SessionSimulationModel: ObservableObject {
         try Task.checkCancellation()
         receive(await coordinator.state)
         await applyRecognitionResult(result)
-        startVoiceSession(direction: .general)
+        _ = await authorizationRegistrationTask?.value
+        try Task.checkCancellation()
+
+        do {
+            let speaking = try await coordinator.startVoiceSession(direction: .general)
+            try Task.checkCancellation()
+            receive(speaking)
+        } catch let error as VoiceSessionAuthorizationError {
+            guard error == .authorizationRequired else { throw error }
+            onAuthorizationRequired()
+            throw CancellationError()
+        }
     }
 
     private func finishAutomaticVisit() async throws {
         guard canEndSession else { return }
         let updates = await coordinator.stateUpdates()
-        endSession(cause: .visitorLeft)
+        endSession(cause: .visitorLeft, protectsVoiceOutput: true)
         await hardware.completeCurrentOrNextReturnHome()
 
         for await state in updates {
@@ -965,14 +976,21 @@ final class SessionSimulationModel: ObservableObject {
     /// of its child operation so the old App wrapper is not cancelled first
     /// (which could otherwise recover orientation before `endSession` obtains
     /// the actor); generation checks keep that wrapper from writing stale UI.
-    func endSession(cause: EndSessionCause) {
+    func endSession(
+        cause: EndSessionCause,
+        protectsVoiceOutput: Bool = false
+    ) {
         guard canEndSession else { return }
         let operationID = beginEndAction(.ending(cause))
         let coordinator = coordinator
         let hardware = hardware
         actionTask = Task { [weak self] in
             let endTask = Task {
-                try await coordinator.endSession()
+                if protectsVoiceOutput {
+                    return try await coordinator
+                        .endSessionAfterCurrentVoiceTurnCompletes()
+                }
+                return try await coordinator.endSession()
             }
 
             do {

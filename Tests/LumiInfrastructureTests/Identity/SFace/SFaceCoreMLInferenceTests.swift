@@ -3,7 +3,7 @@ import Foundation
 @testable import LumiInfrastructure
 import Testing
 
-@Suite("SFace Core ML inference")
+@Suite("SFace Core ML inference", .serialized)
 struct SFaceCoreMLInferenceTests {
     @Test("converts BGRA pixels to exact RGB NCHW and ignores alpha")
     func convertsBGRAtoRGBNCHWAndIgnoresAlpha() async throws {

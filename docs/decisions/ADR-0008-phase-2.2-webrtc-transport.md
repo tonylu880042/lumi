@@ -57,20 +57,23 @@ Phase 2.2 omits `threshold`, `prefix_padding_ms`, and `silence_duration_ms`.
 The provider therefore identifies speech candidates but cannot cancel output
 or create a response by itself.
 
-Owner amendment (2026-08-24): after increased remote-audio gain exposed false
-interruptions from speaker echo, the product owner selected controlled local
-barge-in. Infrastructure learns three normalized microphone-level samples at
-80 ms intervals while output is active, then requires three candidate samples
+Owner amendment (2026-08-24, hardened 2026-08-25): after increased remote-audio
+gain exposed false interruptions from speaker echo, the product owner selected
+controlled local barge-in. Infrastructure continuously retains the latest
+three normalized microphone-level samples at 80 ms intervals while output is
+active, so low or unstable startup samples are replaced by the current residual
+echo level. It then requires three candidate samples
 whose median is at least `max(1.8 × baseline, baseline + 0.02)`. Missing or
 invalid statistics fail closed. A confirmed candidate cancels only an actively
 generating response, clears buffered WebRTC playout, and causes one new
 response only after its committed input turn ends and the prior cancellation
 completes. Speech before playout has no output echo, so it is accepted directly
 and cancels any active generation; stale output arriving before cancellation
-completion is cleared without reaching the semantic voice lifecycle. Rejected echo input is
-deleted from provider conversation state. No audio samples, transcripts, or
-level history are persisted. These values are approved pilot tuning and remain
-subject to physical-device acceptance.
+completion is cleared without reaching the semantic voice lifecycle. Rejected
+echo input is deleted from provider conversation state. No audio samples,
+transcripts, or
+individual level values are logged or persisted. These values are approved
+pilot tuning and remain subject to physical-device acceptance.
 
 ### 4. Request microphone permission just in time
 

@@ -3,7 +3,7 @@ import CoreML
 @testable import LumiInfrastructure
 import Testing
 
-@Suite("YuNet Core ML raw inference")
+@Suite("YuNet Core ML raw inference", .serialized)
 struct YuNetCoreMLRawInferenceTests {
     @Test("returns exactly twelve tensors in canonical graph order")
     func canonicalizesRawOutputs() async throws {

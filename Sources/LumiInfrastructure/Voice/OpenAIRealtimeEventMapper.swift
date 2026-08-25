@@ -58,15 +58,21 @@ actor OpenAIRealtimeEventMapper {
             return []
 
         case .outputAudioStarted:
+            guard !isOutputActive else { return [] }
             isOutputActive = true
-            guard isResponseReadyArmed else { return [] }
-
-            isResponseReadyArmed = false
-            return [.voice(.responseReady)]
+            if isResponseReadyArmed {
+                isResponseReadyArmed = false
+                return [
+                    .voice(.responseReady),
+                    .voice(.assistantOutputStarted),
+                ]
+            }
+            return [.voice(.assistantOutputStarted)]
 
         case .outputAudioStopped, .outputAudioCleared:
+            guard isOutputActive else { return [] }
             isOutputActive = false
-            return []
+            return [.voice(.assistantOutputEnded)]
 
         case .responseStarted, .responseCompleted:
             return []

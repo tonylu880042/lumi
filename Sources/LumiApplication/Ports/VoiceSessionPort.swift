@@ -53,6 +53,10 @@ public enum VoiceMemberAddressError: Error, Equatable, Sendable {
 /// coordinator uses `.failure` for generic retry behavior and
 /// `.authorizationRequired` for device setup routing.
 public enum VoiceSessionEvent: Equatable, Sendable {
+    /// Assistant audio reached the device output path.
+    case assistantOutputStarted
+    /// The current assistant audio output finished or was cleared.
+    case assistantOutputEnded
     /// The user started speaking while the assistant was producing audio.
     ///
     /// Provider adapters emit this event instead of also emitting

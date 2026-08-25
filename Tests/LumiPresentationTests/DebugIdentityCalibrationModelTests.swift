@@ -6,7 +6,7 @@ import LumiDomain
 import Testing
 @testable import LumiPresentation
 
-@Suite("DEBUG identity calibration presentation model")
+@Suite("DEBUG identity calibration presentation model", .serialized)
 @MainActor
 struct DebugIdentityCalibrationModelTests {
     @Test("starts stopped and exposes only presentation-owned values")

@@ -58,10 +58,7 @@ struct OpenAIRealtimeBargeInPolicyTests {
 
     @Test("adaptive detector samples a completed echo baseline before confirming speech")
     func adaptiveDetectorConfirmsSustainedNearEndSpeech() async {
-        let source = ScriptedMicrophoneLevelSource(levels: [
-            0.02, 0.03, 0.04,
-            0.17, 0.19, 0.18,
-        ])
+        let source = MutableMicrophoneLevelSource(level: 0.03)
         let sleeper = YieldingCountingBargeInSleeper()
         let detector = OpenAIRealtimeAdaptiveBargeInDetector(
             levelSource: source,
@@ -69,18 +66,16 @@ struct OpenAIRealtimeBargeInPolicyTests {
         )
 
         await detector.assistantOutputStarted()
-        #expect(await waitUntil { await sleeper.sleepCount >= 3 })
+        #expect(await waitUntil { await source.requestCount >= 3 })
+        await source.setLevel(0.18)
 
         #expect(await detector.confirmInterruption())
-        #expect(await source.requestCount == 6)
+        #expect(await source.requestCount >= 6)
     }
 
     @Test("adaptive detector rejects residual output echo")
     func adaptiveDetectorRejectsResidualEcho() async {
-        let source = ScriptedMicrophoneLevelSource(levels: [
-            0.10, 0.11, 0.12,
-            0.11, 0.12, 0.13,
-        ])
+        let source = MutableMicrophoneLevelSource(level: 0.11)
         let sleeper = YieldingCountingBargeInSleeper()
         let detector = OpenAIRealtimeAdaptiveBargeInDetector(
             levelSource: source,
@@ -88,25 +83,51 @@ struct OpenAIRealtimeBargeInPolicyTests {
         )
 
         await detector.assistantOutputStarted()
-        #expect(await waitUntil { await sleeper.sleepCount >= 3 })
+        #expect(await waitUntil { await source.requestCount >= 3 })
+        await source.setLevel(0.12)
 
         #expect(await detector.confirmInterruption() == false)
-        #expect(await source.requestCount == 6)
+        #expect(await source.requestCount >= 6)
+    }
+
+    @Test("adaptive detector replaces low startup samples with current output echo")
+    func adaptiveDetectorRefreshesLowStartupBaseline() async {
+        let source = MutableMicrophoneLevelSource(level: 0.001)
+        let sleeper = YieldingCountingBargeInSleeper()
+        let detector = OpenAIRealtimeAdaptiveBargeInDetector(
+            levelSource: source,
+            sleeper: sleeper
+        )
+
+        await detector.assistantOutputStarted()
+        #expect(await waitUntil { await source.requestCount >= 3 })
+
+        await source.setLevel(0.10)
+        let baselineWasRefreshed = await waitUntil {
+            await source.requestCount >= 6
+        }
+        await source.setLevel(0.12)
+
+        #expect(baselineWasRefreshed)
+        #expect(await detector.confirmInterruption() == false)
     }
 }
 
-private actor ScriptedMicrophoneLevelSource: OpenAIRealtimeMicrophoneLevelSource {
-    private let levels: [Double?]
+private actor MutableMicrophoneLevelSource: OpenAIRealtimeMicrophoneLevelSource {
+    private var level: Double?
     private(set) var requestCount = 0
 
-    init(levels: [Double?]) {
-        self.levels = levels
+    init(level: Double?) {
+        self.level = level
     }
 
     func microphoneLevel() -> Double? {
-        defer { requestCount += 1 }
-        guard requestCount < levels.count else { return nil }
-        return levels[requestCount]
+        requestCount += 1
+        return level
+    }
+
+    func setLevel(_ level: Double?) {
+        self.level = level
     }
 }
 

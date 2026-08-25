@@ -66,6 +66,26 @@ Infrastructure emits only `assistantInterrupted`, not a duplicate
 `speaking → listening` Domain transition, so no provider or interruption type
 enters Domain.
 
+### 4.1 Owner amendment — 2026-08-25 output completion guards internal session end
+
+`VoiceSessionEvent` also exposes payload-free `assistantOutputStarted` and
+`assistantOutputEnded` events. They are Application lifecycle signals, not new
+Domain states: the coordinator remains the sole voice-event consumer and uses
+them only to protect an internally requested end from truncating audible
+assistant output.
+
+Departure monitoring may continue using the approved presence debounce, but
+after it confirms departure it must wait through greeting, listening, thinking,
+or active output until the current assistant turn reaches a provider-confirmed
+output end. A confirmed user interruption still follows the existing
+`speaking → listening` transition. Explicit, controlled `endSession()` remains
+available for user/system teardown; only the continuous departure path uses the
+protected completion operation.
+
+A departure-monitor error is not departure evidence: it stops the automatic
+presence loop and exposes the existing privacy-safe retry UI while preserving
+the active conversation and device orientation.
+
 ### 5. Unexpected disconnect reconnects once
 
 An unexpected transport disconnect triggers at most one automatic reconnect.

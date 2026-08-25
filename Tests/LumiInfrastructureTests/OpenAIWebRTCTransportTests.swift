@@ -673,7 +673,20 @@ struct OpenAIWebRTCTransportTests {
         #expect(await recorder.events == [.sessionCreated, .outputAudioStarted])
         let expectedDelete = try OpenAIRealtimeWireEncoder
             .conversationItemDelete(itemID: "echo-item")
+        let unexpectedCancel = try OpenAIRealtimeWireEncoder.responseCancel()
+        let unexpectedClear = try OpenAIRealtimeWireEncoder.outputAudioBufferClear()
         #expect(await peer.sentData.last == expectedDelete)
+        #expect(await peer.sentData.contains(unexpectedCancel) == false)
+        #expect(await peer.sentData.contains(unexpectedClear) == false)
+
+        let mapper = OpenAIRealtimeEventMapper()
+        var semanticEvents: [OpenAIRealtimeMappedEvent] = []
+        for event in await recorder.events {
+            semanticEvents.append(contentsOf: await mapper.map(event))
+        }
+        #expect(
+            semanticEvents.contains(.voice(.assistantInterrupted)) == false
+        )
 
         await transport.close()
         _ = await recordingTask.result

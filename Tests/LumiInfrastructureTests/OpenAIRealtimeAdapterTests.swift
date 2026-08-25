@@ -36,12 +36,15 @@ struct OpenAIRealtimeAdapterTests {
         await transport.emit(.inputAudioSpeechStopped)
         await transport.emit(.outputAudioStarted)
 
-        #expect(await waitUntil { await recorder.count == 4 })
+        #expect(await waitUntil { await recorder.count == 7 })
         #expect(await recorder.events == [
+            .assistantOutputStarted,
             .assistantInterrupted,
+            .assistantOutputEnded,
             .userSpeechStarted,
             .userSpeechEnded,
             .responseReady,
+            .assistantOutputStarted,
         ])
 
         await adapter.stop()

@@ -85,6 +85,38 @@ func userSpeechStartedAdvancesSpeakingToListening() throws {
     )
 }
 
+@Test("speaking accepts only confirmed user speech or controlled session end")
+func speakingRejectsUnexpectedInternalEvents() throws {
+    let reducer = AssistantStateReducer()
+    let unexpectedEvents: [AssistantSessionEvent] = [
+        .personConfirmed(direction: .center),
+        .beginOrientation,
+        .rotationCompleted,
+        .orientationFailed(direction: .center),
+        .identityResolved(.unknown),
+        .voiceSessionReady,
+        .userSpeechEnded,
+        .responseReady,
+    ]
+
+    for event in unexpectedEvents {
+        do {
+            _ = try reducer.reduce(.speaking, event: event)
+            Issue.record("Expected speaking to reject \(event)")
+        } catch {
+            #expect(error.sourceState == .speaking)
+            #expect(error.event == event)
+        }
+    }
+
+    #expect(
+        try reducer.reduce(.speaking, event: .userSpeechStarted) == .listening
+    )
+    #expect(
+        try reducer.reduce(.speaking, event: .sessionEnded) == .idle
+    )
+}
+
 @Test("user speech end advances listening to thinking")
 func userSpeechEndedAdvancesListeningToThinking() throws {
     let reducer = AssistantStateReducer()
