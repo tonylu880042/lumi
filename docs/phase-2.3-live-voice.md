@@ -116,13 +116,24 @@ to finish, and only then begins the next visitor wait. This prevents a new
 arrival wait from overlapping the monitor operation that is still stopping.
 
 The loop writes privacy-safe local Console diagnostics through an injectable
-App-local callback whose default sink is OSLog/Console. The only event payload
-is one of these stage slugs: `wait-for-arrival`,
-`welcome-identity-and-voice`, `wait-for-departure`, or `finish-session`, with
-`started` or `failed` status. The UI continues to show only
-`自動辨識暫時無法使用，請再試一次。`; diagnostics never include a member name
-or ID, spoken label, embedding, photo, transcript, or raw error. Cancellation
-and an explicit stop are not reported as stage failures.
+App-local callback whose default sink is OSLog/Console. Lifecycle stage slugs
+remain `wait-for-arrival`, `welcome-identity-and-voice`,
+`wait-for-departure`, and `finish-session`.
+
+Owner amendment (2026-08-25): each stage also reports fixed operation slugs
+with `started`, `succeeded`, `cancelled`, or `failed` status. The operation
+slugs are `wait-for-arrival`, `confirm-presence`, `orient-to-visitor`,
+`recognize-visitor`, `start-voice-session`, `wait-for-departure`, and
+`finish-session`. Infrastructure writes a second fixed diagnostic chain for
+model loading, camera permission/configuration, AVFoundation interruption and
+runtime-error categories, presence camera-start versus face-capture failure,
+and Vision/YuNet/alignment/SFace pipeline stages.
+
+The UI continues to show only `自動辨識暫時無法使用，請再試一次。` Diagnostics
+are closed, payload-free categories: they never include a member name or ID,
+spoken label, image, embedding, transcript, model input, framework error text,
+or raw provider error. Cancellation and an explicit stop are not reported as
+stage failures.
 
 ## 4. Device Provisioning and Keychain Contract
 

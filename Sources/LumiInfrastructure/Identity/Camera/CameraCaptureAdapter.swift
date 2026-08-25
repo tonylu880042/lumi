@@ -50,6 +50,7 @@ actor CameraCaptureAdapter {
 
     private let permission: any CameraPermissionClient
     private let backend: any CameraCaptureBackend
+    private let diagnosticSink: IdentityDiagnosticSink
 
     private var phase: Phase = .idle
     private var nextGeneration: UInt64 = 0
@@ -62,10 +63,13 @@ actor CameraCaptureAdapter {
 
     init(
         permission: any CameraPermissionClient,
-        backend: any CameraCaptureBackend
+        backend: any CameraCaptureBackend,
+        diagnosticSink: @escaping IdentityDiagnosticSink =
+            IdentityDiagnostics.record
     ) {
         self.permission = permission
         self.backend = backend
+        self.diagnosticSink = diagnosticSink
     }
 
     /// Starts one capture generation and returns its bounded frame stream.
@@ -76,7 +80,9 @@ actor CameraCaptureAdapter {
     /// `CancellationError`.
     func start() async throws -> AsyncStream<CameraFrame> {
         try Task.checkCancellation()
+        diagnosticSink(.cameraStartRequested)
         guard case .idle = phase else {
+            diagnosticSink(.cameraStartFailedAlreadyRunning)
             throw CameraCaptureAdapterError.alreadyRunning
         }
 
@@ -127,6 +133,7 @@ actor CameraCaptureAdapter {
 
             activeRun = run
             phase = .running(generation)
+            diagnosticSink(.cameraStartSucceeded)
             return streamPair.stream
         } catch {
             let cancelled = error is CancellationError
@@ -134,9 +141,12 @@ actor CameraCaptureAdapter {
                 || startupCancellationRequested
             finishGeneration(generation)
             if cancelled {
+                diagnosticSink(.cameraStartCancelled)
                 throw CancellationError()
             }
-            throw map(error)
+            let mappedError = map(error)
+            diagnosticSink(diagnosticEvent(for: mappedError))
+            throw mappedError
         }
     }
 
@@ -144,6 +154,7 @@ actor CameraCaptureAdapter {
     /// an already-issued run stop to finish before returning.
     func stop() async {
         guard let generation = activeGeneration else { return }
+        diagnosticSink(.cameraStopRequested)
 
         startupCancellationRequested = true
         switch phase {
@@ -173,6 +184,7 @@ actor CameraCaptureAdapter {
         stopIssued = true
         await run.stop()
         finishGeneration(generation)
+        diagnosticSink(.cameraStopSucceeded)
     }
 
     private func streamTerminated(generation: UInt64) async {
@@ -230,5 +242,22 @@ actor CameraCaptureAdapter {
         }
 
         return .captureFailed
+    }
+
+    private func diagnosticEvent(
+        for error: CameraCaptureAdapterError
+    ) -> IdentityDiagnosticEvent {
+        switch error {
+        case .alreadyRunning:
+            .cameraStartFailedAlreadyRunning
+        case .permissionDenied:
+            .cameraStartFailedPermissionDenied
+        case .permissionRestricted:
+            .cameraStartFailedPermissionRestricted
+        case .cameraUnavailable:
+            .cameraStartFailedUnavailable
+        case .captureFailed:
+            .cameraStartFailedCapture
+        }
     }
 }

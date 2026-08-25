@@ -118,13 +118,15 @@ struct SFaceFrameEmbeddingPipelineTests {
 
     @Test("Vision failure is redacted and prevents later stages")
     func redactsVisionFailure() async throws {
+        let diagnostics = SFacePipelineDiagnosticRecorder()
         let vision = RecordingVisionDetector(.failure)
         let yuNet = RecordingYuNetDetector(.values([]))
         let embedding = RecordingEmbeddingInferrer(.success(try makeEmbedding()))
         let pipeline = makePipeline(
             vision: vision,
             yuNet: yuNet,
-            embedding: embedding
+            embedding: embedding,
+            diagnosticSink: diagnostics.record
         )
 
         await #expect(throws: SFaceFrameEmbeddingPipelineError.failed) {
@@ -132,10 +134,12 @@ struct SFaceFrameEmbeddingPipelineTests {
         }
         #expect(await yuNet.callCount == 0)
         #expect(await embedding.callCount == 0)
+        #expect(diagnostics.events == [.framePipelineFailedVision])
     }
 
     @Test("YuNet failure is redacted and prevents crop and inference")
     func redactsYuNetFailure() async throws {
+        let diagnostics = SFacePipelineDiagnosticRecorder()
         let face = try makeFace(
             rect: try makeRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
             confidence: 0.7,
@@ -147,7 +151,8 @@ struct SFaceFrameEmbeddingPipelineTests {
         let pipeline = makePipeline(
             vision: vision,
             yuNet: yuNet,
-            embedding: embedding
+            embedding: embedding,
+            diagnosticSink: diagnostics.record
         )
 
         await #expect(throws: SFaceFrameEmbeddingPipelineError.failed) {
@@ -155,10 +160,12 @@ struct SFaceFrameEmbeddingPipelineTests {
         }
         #expect(await yuNet.callCount == 1)
         #expect(await embedding.callCount == 0)
+        #expect(diagnostics.events == [.framePipelineFailedYuNet])
     }
 
     @Test("degenerate paired landmarks fail closed before inference")
     func redactsCropFailure() async throws {
+        let diagnostics = SFacePipelineDiagnosticRecorder()
         let vision = try makeFace(
             rect: try makeRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
             confidence: 0.7,
@@ -173,23 +180,27 @@ struct SFaceFrameEmbeddingPipelineTests {
         let pipeline = makePipeline(
             vision: RecordingVisionDetector(.values([vision])),
             yuNet: RecordingYuNetDetector(.values([degenerate])),
-            embedding: embedding
+            embedding: embedding,
+            diagnosticSink: diagnostics.record
         )
 
         await #expect(throws: SFaceFrameEmbeddingPipelineError.failed) {
             _ = try await pipeline.embedding(for: makeFrame())
         }
         #expect(await embedding.callCount == 0)
+        #expect(diagnostics.events == [.framePipelineFailedAlignment])
     }
 
     @Test("SFace inference failure is redacted after the crop")
     func redactsEmbeddingFailure() async throws {
+        let diagnostics = SFacePipelineDiagnosticRecorder()
         let (vision, candidate) = try makePair()
         let embedding = RecordingEmbeddingInferrer(.failure)
         let pipeline = makePipeline(
             vision: RecordingVisionDetector(.values([vision])),
             yuNet: RecordingYuNetDetector(.values([candidate])),
-            embedding: embedding
+            embedding: embedding,
+            diagnosticSink: diagnostics.record
         )
 
         await #expect(throws: SFaceFrameEmbeddingPipelineError.failed) {
@@ -197,6 +208,7 @@ struct SFaceFrameEmbeddingPipelineTests {
         }
         #expect(await embedding.callCount == 1)
         #expect(await embedding.receivedFace != nil)
+        #expect(diagnostics.events == [.framePipelineFailedSFace])
     }
 
     @Test("pipeline redacts errors without exposing underlying payload")
@@ -302,12 +314,15 @@ struct SFaceFrameEmbeddingPipelineTests {
     private func makePipeline(
         vision: any VisionFaceDetecting,
         yuNet: any YuNetFaceCandidateDetecting,
-        embedding: any SFaceEmbeddingInferring
+        embedding: any SFaceEmbeddingInferring,
+        diagnosticSink: @escaping IdentityDiagnosticSink =
+            IdentityDiagnostics.record
     ) -> SFaceFrameEmbeddingPipeline {
         SFaceFrameEmbeddingPipeline(
             visionDetector: vision,
             yuNetDetector: yuNet,
-            sFaceInference: embedding
+            sFaceInference: embedding,
+            diagnosticSink: diagnosticSink
         )
     }
 
@@ -402,6 +417,23 @@ struct SFaceFrameEmbeddingPipelineTests {
             modelVersion: SFaceCoreMLInference.modelVersion,
             components: [1] + Array(repeating: Float.zero, count: 127)
         )
+    }
+}
+
+private final class SFacePipelineDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [IdentityDiagnosticEvent] = []
+
+    var events: [IdentityDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(_ event: IdentityDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(event)
     }
 }
 

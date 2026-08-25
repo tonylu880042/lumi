@@ -928,8 +928,23 @@ public enum CoreMLIdentityCalibrationFactory {
         yuNetModelURL: URL,
         databaseURL: URL
     ) async throws -> CoreMLIdentityCalibrationService {
+        try await load(
+            sFaceModelURL: sFaceModelURL,
+            yuNetModelURL: yuNetModelURL,
+            databaseURL: databaseURL,
+            diagnosticSink: IdentityDiagnostics.record
+        )
+    }
+
+    static func load(
+        sFaceModelURL: URL,
+        yuNetModelURL: URL,
+        databaseURL: URL,
+        diagnosticSink: @escaping IdentityDiagnosticSink
+    ) async throws -> CoreMLIdentityCalibrationService {
         do {
             try Task.checkCancellation()
+            diagnosticSink(.identityFactoryLoadStarted)
             guard isCompiledModelURL(
                 sFaceModelURL,
                 expectedName: "SFace"
@@ -937,26 +952,58 @@ public enum CoreMLIdentityCalibrationFactory {
                 yuNetModelURL,
                 expectedName: "YuNet"
             ) else {
+                diagnosticSink(.identityFactoryFailedInvalidModelResources)
                 throw IdentityCalibrationError.failed
             }
 
             let configuration = MLModelConfiguration()
-            let sFaceModel = try await MLModel.load(
-                contentsOf: sFaceModelURL,
-                configuration: configuration
-            )
+            let sFaceModel: MLModel
+            do {
+                sFaceModel = try await MLModel.load(
+                    contentsOf: sFaceModelURL,
+                    configuration: configuration
+                )
+            } catch let cancellation as CancellationError {
+                throw cancellation
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                diagnosticSink(.identityFactoryFailedSFaceModelLoad)
+                throw error
+            }
             try Task.checkCancellation()
-            let yuNetModel = try await MLModel.load(
-                contentsOf: yuNetModelURL,
-                configuration: configuration
-            )
+            let yuNetModel: MLModel
+            do {
+                yuNetModel = try await MLModel.load(
+                    contentsOf: yuNetModelURL,
+                    configuration: configuration
+                )
+            } catch let cancellation as CancellationError {
+                throw cancellation
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                diagnosticSink(.identityFactoryFailedYuNetModelLoad)
+                throw error
+            }
             try Task.checkCancellation()
 
-            let sFaceInference = try SFaceCoreMLInference(model: sFaceModel)
-            let yuNetInference = try YuNetCoreMLRawInference(model: yuNetModel)
-            let postprocessor = try YuNetPostprocessor(
-                configuration: .validationDefault
-            )
+            let sFaceInference: SFaceCoreMLInference
+            do {
+                sFaceInference = try SFaceCoreMLInference(model: sFaceModel)
+            } catch {
+                diagnosticSink(.identityFactoryFailedSFaceConfiguration)
+                throw error
+            }
+            let yuNetInference: YuNetCoreMLRawInference
+            let postprocessor: YuNetPostprocessor
+            do {
+                yuNetInference = try YuNetCoreMLRawInference(model: yuNetModel)
+                postprocessor = try YuNetPostprocessor(
+                    configuration: .validationDefault
+                )
+            } catch {
+                diagnosticSink(.identityFactoryFailedYuNetConfiguration)
+                throw error
+            }
             let yuNetCandidates = YuNetFaceCandidatePipeline(
                 inference: yuNetInference,
                 postprocessor: postprocessor
@@ -968,7 +1015,13 @@ public enum CoreMLIdentityCalibrationFactory {
             )
 
 #if canImport(SQLite3)
-            let store = try SQLiteFaceEmbeddingStore(databaseURL: databaseURL)
+            let store: SQLiteFaceEmbeddingStore
+            do {
+                store = try SQLiteFaceEmbeddingStore(databaseURL: databaseURL)
+            } catch {
+                diagnosticSink(.identityFactoryFailedDatabase)
+                throw error
+            }
 #if os(iOS)
             let permission = AVFoundationCameraPermissionClient()
 #else
@@ -984,13 +1037,16 @@ public enum CoreMLIdentityCalibrationFactory {
             let frameSource = IdentityCalibrationCameraFrameSource(
                 adapter: cameraAdapter
             )
-            return CoreMLIdentityCalibrationService(
+            let service = CoreMLIdentityCalibrationService(
                 frameSource: frameSource,
                 embeddingPipeline: embeddingPipeline,
                 store: store,
                 visitorEnrollmentStore: store
             )
+            diagnosticSink(.identityFactoryLoadSucceeded)
+            return service
 #else
+            diagnosticSink(.identityFactoryFailedDatabase)
             throw IdentityCalibrationError.failed
 #endif
         } catch let cancellation as CancellationError {

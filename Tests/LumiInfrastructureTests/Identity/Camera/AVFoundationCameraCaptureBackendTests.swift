@@ -4,6 +4,58 @@ import Testing
 
 @Suite("AVFoundation camera capture backend")
 struct AVFoundationCameraCaptureBackendTests {
+    @Test("records exact redacted driver startup failures")
+    func recordsDriverFailureDiagnostics() async {
+        let cases: [(RecordingCaptureDriver.Failure, IdentityDiagnosticEvent)] = [
+            (.noFrontCamera, .cameraBackendFailedNoFrontCamera),
+            (.cannotAddInput, .cameraBackendFailedCannotAddInput),
+            (.cannotAddOutput, .cameraBackendFailedCannotAddOutput),
+            (.unsupportedPixelFormat, .cameraBackendFailedUnsupportedPixelFormat),
+            (.unsupportedRotation, .cameraBackendFailedUnsupportedRotation),
+            (.cannotGuaranteeNonMirrored, .cameraBackendFailedMirroring),
+            (.unexpected, .cameraBackendFailedUnexpected),
+        ]
+
+        for (failure, expected) in cases {
+            let diagnostics = CameraBackendDiagnosticRecorder()
+            let backend = AVFoundationCameraCaptureBackend(
+                driver: RecordingCaptureDriver(failure: failure),
+                diagnosticSink: diagnostics.record
+            )
+
+            await #expect(throws: (any Error).self) {
+                try await backend.start { _ in }
+            }
+            #expect(diagnostics.events == [expected])
+        }
+    }
+
+    @Test("records capture interruptions and runtime termination reasons")
+    func recordsRuntimeEvents() async throws {
+        let diagnostics = CameraBackendDiagnosticRecorder()
+        let driver = RecordingCaptureDriver()
+        let backend = AVFoundationCameraCaptureBackend(
+            driver: driver,
+            diagnosticSink: diagnostics.record
+        )
+        let run = try await backend.start { _ in }
+
+        await driver.emitEvent(.interrupted(.background))
+        await driver.emitEvent(.interruptionEnded)
+        await driver.emitEvent(.runtimeError(.mediaServicesWereReset))
+        await driver.emitEvent(.runtimeError(.unknown))
+        await driver.emitEvent(.unsupportedRuntimeRotation)
+
+        #expect(diagnostics.events == [
+            .cameraInterruptedBackground,
+            .cameraInterruptionEnded,
+            .cameraRuntimeErrorMediaServicesWereReset,
+            .cameraRuntimeErrorUnknown,
+            .cameraRuntimeRotationUnsupported,
+        ])
+        await run.stop()
+    }
+
     @Test("starts with a front wide-angle BGRA newest-frame plan")
     func startsWithRequiredPlan() async throws {
         let driver = RecordingCaptureDriver()
@@ -251,6 +303,23 @@ private final class RecordingFrameSink: @unchecked Sendable {
     }
 }
 
+private final class CameraBackendDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [IdentityDiagnosticEvent] = []
+
+    var events: [IdentityDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(_ event: IdentityDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(event)
+    }
+}
+
 private actor RecordingCaptureDriver: AVFoundationCameraCaptureDriver {
     enum Failure: Error, Equatable, Sendable {
         case noFrontCamera
@@ -266,6 +335,8 @@ private actor RecordingCaptureDriver: AVFoundationCameraCaptureDriver {
     private(set) var lastPlan: AVFoundationCameraCapturePlan?
     private(set) var stopCallCount = 0
     private var frameHandler: (@Sendable (CameraFrame) -> Void)?
+    private var eventHandler:
+        (@Sendable (AVFoundationCameraCaptureDriverEvent) -> Void)?
 
     init(failure: Failure? = nil) {
         self.failure = failure
@@ -273,7 +344,9 @@ private actor RecordingCaptureDriver: AVFoundationCameraCaptureDriver {
 
     func start(
         plan: AVFoundationCameraCapturePlan,
-        frameHandler: @escaping @Sendable (CameraFrame) -> Void
+        frameHandler: @escaping @Sendable (CameraFrame) -> Void,
+        eventHandler: @escaping @Sendable
+            (AVFoundationCameraCaptureDriverEvent) -> Void
     ) async throws -> any AVFoundationCameraCaptureDriverRun {
         lastPlan = plan
         switch failure {
@@ -293,6 +366,7 @@ private actor RecordingCaptureDriver: AVFoundationCameraCaptureDriver {
             throw AVFoundationCameraCaptureDriverError.unexpected
         case nil:
             self.frameHandler = frameHandler
+            self.eventHandler = eventHandler
             return RecordingCaptureRun { [weak self] in
                 await self?.incrementStop()
             }
@@ -301,6 +375,10 @@ private actor RecordingCaptureDriver: AVFoundationCameraCaptureDriver {
 
     func emit(_ frame: CameraFrame) {
         frameHandler?(frame)
+    }
+
+    func emitEvent(_ event: AVFoundationCameraCaptureDriverEvent) {
+        eventHandler?(event)
     }
 
     private func incrementStop() {

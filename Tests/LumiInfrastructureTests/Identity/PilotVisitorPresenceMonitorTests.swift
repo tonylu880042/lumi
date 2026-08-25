@@ -1,5 +1,6 @@
 #if DEBUG
 
+import Foundation
 import LumiApplication
 @testable import LumiInfrastructure
 import Testing
@@ -72,10 +73,12 @@ struct PilotVisitorPresenceMonitorTests {
 
     @Test("monitor failures are payload-free and redact source diagnostics")
     func redactsFailure() async {
+        let diagnostics = PresenceDiagnosticRecorder()
         let source = FailingPresenceEvidenceSource()
         let monitor = PilotVisitorPresenceMonitor(
             source: source,
-            departureAbsenceDuration: .seconds(10)
+            departureAbsenceDuration: .seconds(10),
+            diagnosticSink: diagnostics.record
         )
 
         await #expect(throws: VisitorPresenceMonitoringError.failed) {
@@ -84,6 +87,45 @@ struct PilotVisitorPresenceMonitorTests {
         #expect(VisitorPresenceMonitoringError.failed.description ==
             "Visitor presence monitoring failed.")
         #expect(VisitorPresenceMonitoringError.failed.customMirror.children.isEmpty)
+        #expect(diagnostics.events == [
+            .presenceArrivalStarted,
+            .presenceArrivalFailedFaceCapture,
+        ])
+    }
+
+    @Test("distinguishes camera startup failure from face capture failure")
+    func recordsCameraStartupFailure() async {
+        let diagnostics = PresenceDiagnosticRecorder()
+        let monitor = PilotVisitorPresenceMonitor(
+            source: StartFailingPresenceEvidenceSource(),
+            departureAbsenceDuration: .seconds(10),
+            diagnosticSink: diagnostics.record
+        )
+
+        await #expect(throws: VisitorPresenceMonitoringError.failed) {
+            try await monitor.waitForVisitor()
+        }
+        #expect(diagnostics.events == [
+            .presenceArrivalStarted,
+            .presenceArrivalFailedCameraStart,
+        ])
+    }
+}
+
+private final class PresenceDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [IdentityDiagnosticEvent] = []
+
+    var events: [IdentityDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(_ event: IdentityDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(event)
     }
 }
 
@@ -153,6 +195,14 @@ private actor FailingPresenceEvidenceSource: PilotVisitorPresenceEvidenceSource 
     func captureUsableFace() async throws -> Bool {
         throw PresenceTestError.injected
     }
+}
+
+private actor StartFailingPresenceEvidenceSource:
+    PilotVisitorPresenceEvidenceSource
+{
+    func startCamera() async throws { throw PresenceTestError.injected }
+    func stopCamera() async {}
+    func captureUsableFace() async throws -> Bool { false }
 }
 
 private enum PresenceTestError: Error {

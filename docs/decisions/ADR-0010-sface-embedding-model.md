@@ -635,6 +635,20 @@ until store validation selects all of:
 Until then, fixtures may exercise ranking but the App must not claim that the
 production confidence policy is validated.
 
+### 6. Use closed, payload-free local diagnostics
+
+Debug-Live records fixed OSLog categories at the model factory, camera,
+presence monitor, and frame-pipeline boundaries. Camera events distinguish
+configuration failures, interruption reasons, media-services reset, and
+unsupported runtime rotation. Frame events distinguish Vision, YuNet,
+alignment crop, and SFace inference failures.
+
+These events carry no associated runtime values. They must not contain an
+image, embedding, member name or ID, spoken label, similarity score, framework
+error description, or model input. Application and UI error contracts remain
+payload-free and unchanged; detailed framework diagnosis stays in
+Infrastructure.
+
 ## Consequences
 
 - SFace avoids the ArcFace commercial license cost for the pilot.
@@ -650,6 +664,8 @@ production confidence policy is validated.
   notices and obtain its own legal review; this ADR is technical evidence, not
   legal advice.
 - Physical-iPad and representative-member validation remain blocking gates.
+- Fixed diagnostics make a generic UI failure traceable without widening the
+  privacy or Clean Architecture boundaries.
 
 ## Sources
 

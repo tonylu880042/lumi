@@ -4,6 +4,41 @@ import Testing
 
 @Suite("Camera capture adapter")
 struct CameraCaptureAdapterTests {
+    @Test("records privacy-safe startup and shutdown outcomes")
+    func recordsLifecycleDiagnostics() async throws {
+        let successDiagnostics = CameraAdapterDiagnosticRecorder()
+        let success = CameraCaptureAdapter(
+            permission: RecordingPermissionClient(status: .authorized),
+            backend: RecordingCameraBackend(behavior: .immediate),
+            diagnosticSink: successDiagnostics.record
+        )
+
+        let stream = try await success.start()
+        await success.stop()
+        #expect(successDiagnostics.events == [
+            .cameraStartRequested,
+            .cameraStartSucceeded,
+            .cameraStopRequested,
+            .cameraStopSucceeded,
+        ])
+        _ = stream
+
+        let deniedDiagnostics = CameraAdapterDiagnosticRecorder()
+        let denied = CameraCaptureAdapter(
+            permission: RecordingPermissionClient(status: .denied),
+            backend: RecordingCameraBackend(behavior: .immediate),
+            diagnosticSink: deniedDiagnostics.record
+        )
+
+        await #expect(throws: CameraCaptureAdapterError.permissionDenied) {
+            try await denied.start()
+        }
+        #expect(deniedDiagnostics.events == [
+            .cameraStartRequested,
+            .cameraStartFailedPermissionDenied,
+        ])
+    }
+
     @Test("pre-cancelled start does not request permission or start backend")
     func preCancelledStart() async {
         let permission = RecordingPermissionClient(status: .authorized)
@@ -301,6 +336,23 @@ struct CameraCaptureAdapterTests {
             bytesPerRow: 4,
             orientation: .upright
         )
+    }
+}
+
+private final class CameraAdapterDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [IdentityDiagnosticEvent] = []
+
+    var events: [IdentityDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(_ event: IdentityDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(event)
     }
 }
 

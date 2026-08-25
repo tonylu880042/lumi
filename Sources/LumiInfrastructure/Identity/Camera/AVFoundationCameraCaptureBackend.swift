@@ -40,6 +40,26 @@ enum AVFoundationCameraCaptureDriverError: Error, Equatable, Sendable {
     case unexpected
 }
 
+enum AVFoundationCameraCaptureInterruption: Equatable, Sendable {
+    case background
+    case deviceInUseByAnotherClient
+    case multipleForegroundApps
+    case systemPressure
+    case unknown
+}
+
+enum AVFoundationCameraCaptureRuntimeError: Equatable, Sendable {
+    case mediaServicesWereReset
+    case unknown
+}
+
+enum AVFoundationCameraCaptureDriverEvent: Equatable, Sendable {
+    case interrupted(AVFoundationCameraCaptureInterruption)
+    case interruptionEnded
+    case runtimeError(AVFoundationCameraCaptureRuntimeError)
+    case unsupportedRuntimeRotation
+}
+
 protocol AVFoundationCameraCaptureDriverRun: Sendable {
     func stop() async
 }
@@ -47,7 +67,9 @@ protocol AVFoundationCameraCaptureDriverRun: Sendable {
 protocol AVFoundationCameraCaptureDriver: Sendable {
     func start(
         plan: AVFoundationCameraCapturePlan,
-        frameHandler: @escaping @Sendable (CameraFrame) -> Void
+        frameHandler: @escaping @Sendable (CameraFrame) -> Void,
+        eventHandler: @escaping @Sendable
+            (AVFoundationCameraCaptureDriverEvent) -> Void
     ) async throws -> any AVFoundationCameraCaptureDriverRun
 }
 
@@ -143,9 +165,15 @@ enum AVFoundationCameraFrameConverter {
 /// and is unavailable on macOS, where it reports `.unavailable` if used.
 struct AVFoundationCameraCaptureBackend: CameraCaptureBackend, Sendable {
     private let driver: any AVFoundationCameraCaptureDriver
+    private let diagnosticSink: IdentityDiagnosticSink
 
-    init(driver: any AVFoundationCameraCaptureDriver) {
+    init(
+        driver: any AVFoundationCameraCaptureDriver,
+        diagnosticSink: @escaping IdentityDiagnosticSink =
+            IdentityDiagnostics.record
+    ) {
         self.driver = driver
+        self.diagnosticSink = diagnosticSink
     }
 
     init() {
@@ -154,6 +182,7 @@ struct AVFoundationCameraCaptureBackend: CameraCaptureBackend, Sendable {
 #else
         self.driver = AVFoundationUnavailableCameraCaptureDriver()
 #endif
+        self.diagnosticSink = IdentityDiagnostics.record
     }
 
     func start(
@@ -162,12 +191,17 @@ struct AVFoundationCameraCaptureBackend: CameraCaptureBackend, Sendable {
         do {
             let nativeRun = try await driver.start(
                 plan: .required,
-                frameHandler: frameHandler
+                frameHandler: frameHandler,
+                eventHandler: { event in
+                    diagnosticSink(Self.map(event))
+                }
             )
             return AVFoundationCameraCaptureRun(nativeRun: nativeRun)
         } catch let error as AVFoundationCameraCaptureDriverError {
+            diagnosticSink(Self.diagnosticEvent(for: error))
             throw map(error)
         } catch {
+            diagnosticSink(.cameraBackendFailedUnexpected)
             throw CameraCaptureBackendError.failed
         }
     }
@@ -185,6 +219,52 @@ struct AVFoundationCameraCaptureBackend: CameraCaptureBackend, Sendable {
             return .unavailable
         case .unexpected:
             return .failed
+        }
+    }
+
+    private static func diagnosticEvent(
+        for error: AVFoundationCameraCaptureDriverError
+    ) -> IdentityDiagnosticEvent {
+        switch error {
+        case .noFrontCamera:
+            .cameraBackendFailedNoFrontCamera
+        case .cannotAddInput:
+            .cameraBackendFailedCannotAddInput
+        case .cannotAddOutput:
+            .cameraBackendFailedCannotAddOutput
+        case .unsupportedPixelFormat:
+            .cameraBackendFailedUnsupportedPixelFormat
+        case .unsupportedRotation:
+            .cameraBackendFailedUnsupportedRotation
+        case .cannotGuaranteeNonMirrored:
+            .cameraBackendFailedMirroring
+        case .unexpected:
+            .cameraBackendFailedUnexpected
+        }
+    }
+
+    private static func map(
+        _ event: AVFoundationCameraCaptureDriverEvent
+    ) -> IdentityDiagnosticEvent {
+        switch event {
+        case .interrupted(.background):
+            .cameraInterruptedBackground
+        case .interrupted(.deviceInUseByAnotherClient):
+            .cameraInterruptedDeviceInUse
+        case .interrupted(.multipleForegroundApps):
+            .cameraInterruptedMultipleForegroundApps
+        case .interrupted(.systemPressure):
+            .cameraInterruptedSystemPressure
+        case .interrupted(.unknown):
+            .cameraInterruptedUnknown
+        case .interruptionEnded:
+            .cameraInterruptionEnded
+        case .runtimeError(.mediaServicesWereReset):
+            .cameraRuntimeErrorMediaServicesWereReset
+        case .runtimeError(.unknown):
+            .cameraRuntimeErrorUnknown
+        case .unsupportedRuntimeRotation:
+            .cameraRuntimeRotationUnsupported
         }
     }
 }
@@ -209,7 +289,9 @@ private struct AVFoundationUnavailableCameraCaptureDriver:
 {
     func start(
         plan: AVFoundationCameraCapturePlan,
-        frameHandler: @escaping @Sendable (CameraFrame) -> Void
+        frameHandler: @escaping @Sendable (CameraFrame) -> Void,
+        eventHandler: @escaping @Sendable
+            (AVFoundationCameraCaptureDriverEvent) -> Void
     ) async throws -> any AVFoundationCameraCaptureDriverRun {
         throw AVFoundationCameraCaptureDriverError.noFrontCamera
     }
@@ -235,7 +317,9 @@ private struct AVFoundationNativeCameraCaptureDriver:
 
     func start(
         plan: AVFoundationCameraCapturePlan,
-        frameHandler: @escaping @Sendable (CameraFrame) -> Void
+        frameHandler: @escaping @Sendable (CameraFrame) -> Void,
+        eventHandler: @escaping @Sendable
+            (AVFoundationCameraCaptureDriverEvent) -> Void
     ) async throws -> any AVFoundationCameraCaptureDriverRun {
         try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async {
@@ -243,6 +327,7 @@ private struct AVFoundationNativeCameraCaptureDriver:
                     let run = try AVFoundationNativeCameraCaptureRun(
                         plan: plan,
                         frameHandler: frameHandler,
+                        eventHandler: eventHandler,
                         sessionQueue: self.sessionQueue
                     )
                     continuation.resume(returning: run)
@@ -269,12 +354,19 @@ private final class AVFoundationNativeCameraCaptureRun:
     private let connection: AVCaptureConnection
     private let rotationCoordinator: AVCaptureDevice.RotationCoordinator
     private let sampleDelegate: AVFoundationNativeSampleDelegate
+    private let eventHandler:
+        @Sendable (AVFoundationCameraCaptureDriverEvent) -> Void
     private var rotationObservation: NSKeyValueObservation?
+    private var interruptionObserver: NSObjectProtocol?
+    private var interruptionEndedObserver: NSObjectProtocol?
+    private var runtimeErrorObserver: NSObjectProtocol?
     private var didStop = false
 
     init(
         plan: AVFoundationCameraCapturePlan,
         frameHandler: @escaping @Sendable (CameraFrame) -> Void,
+        eventHandler: @escaping @Sendable
+            (AVFoundationCameraCaptureDriverEvent) -> Void,
         sessionQueue: DispatchQueue
     ) throws {
         self.sessionQueue = sessionQueue
@@ -389,8 +481,14 @@ private final class AVFoundationNativeCameraCaptureRun:
         self.connection = connection
         self.rotationCoordinator = rotationCoordinator
         self.sampleDelegate = sampleDelegate
+        self.eventHandler = eventHandler
         self.rotationObservation = nil
+        self.interruptionObserver = nil
+        self.interruptionEndedObserver = nil
+        self.runtimeErrorObserver = nil
         super.init()
+
+        installSessionObservers()
 
         self.rotationObservation = rotationCoordinator.observe(
             \.videoRotationAngleForHorizonLevelCapture,
@@ -404,6 +502,7 @@ private final class AVFoundationNativeCameraCaptureRun:
 
         session.startRunning()
         guard session.isRunning else {
+            removeSessionObservers()
             rotationObservation?.invalidate()
             rotationObservation = nil
             output.setSampleBufferDelegate(nil, queue: nil)
@@ -421,6 +520,7 @@ private final class AVFoundationNativeCameraCaptureRun:
                 self.didStop = true
                 self.rotationObservation?.invalidate()
                 self.rotationObservation = nil
+                self.removeSessionObservers()
                 self.output.setSampleBufferDelegate(nil, queue: nil)
                 if self.session.isRunning {
                     self.session.stopRunning()
@@ -453,13 +553,113 @@ private final class AVFoundationNativeCameraCaptureRun:
             // existing CameraCaptureRun contract. Stop delivery immediately
             // and require a fresh start, rather than emitting stale orientation.
             didStop = true
+            eventHandler(.unsupportedRuntimeRotation)
             rotationObservation?.invalidate()
             rotationObservation = nil
+            removeSessionObservers()
             output.setSampleBufferDelegate(nil, queue: nil)
             if session.isRunning {
                 session.stopRunning()
             }
         }
+    }
+
+    private func installSessionObservers() {
+        let center = NotificationCenter.default
+        interruptionObserver = center.addObserver(
+            forName: AVCaptureSession.wasInterruptedNotification,
+            object: session,
+            queue: nil
+        ) { [weak self] notification in
+            guard let self else { return }
+            self.sessionQueue.async {
+                guard !self.didStop else { return }
+                self.eventHandler(.interrupted(
+                    Self.interruptionReason(from: notification)
+                ))
+            }
+        }
+        interruptionEndedObserver = center.addObserver(
+            forName: AVCaptureSession.interruptionEndedNotification,
+            object: session,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.sessionQueue.async {
+                guard !self.didStop else { return }
+                self.eventHandler(.interruptionEnded)
+            }
+        }
+        runtimeErrorObserver = center.addObserver(
+            forName: AVCaptureSession.runtimeErrorNotification,
+            object: session,
+            queue: nil
+        ) { [weak self] notification in
+            guard let self else { return }
+            self.sessionQueue.async {
+                guard !self.didStop else { return }
+                self.eventHandler(.runtimeError(
+                    Self.runtimeError(from: notification)
+                ))
+            }
+        }
+    }
+
+    private func removeSessionObservers() {
+        let center = NotificationCenter.default
+        if let interruptionObserver {
+            center.removeObserver(interruptionObserver)
+            self.interruptionObserver = nil
+        }
+        if let interruptionEndedObserver {
+            center.removeObserver(interruptionEndedObserver)
+            self.interruptionEndedObserver = nil
+        }
+        if let runtimeErrorObserver {
+            center.removeObserver(runtimeErrorObserver)
+            self.runtimeErrorObserver = nil
+        }
+    }
+
+    private static func interruptionReason(
+        from notification: Notification
+    ) -> AVFoundationCameraCaptureInterruption {
+        guard let number = notification.userInfo?[
+            AVCaptureSessionInterruptionReasonKey
+        ] as? NSNumber,
+              let reason = AVCaptureSession.InterruptionReason(
+                rawValue: number.intValue
+              )
+        else {
+            return .unknown
+        }
+
+        switch reason {
+        case .videoDeviceNotAvailableInBackground:
+            return .background
+        case .audioDeviceInUseByAnotherClient,
+             .videoDeviceInUseByAnotherClient:
+            return .deviceInUseByAnotherClient
+        case .videoDeviceNotAvailableWithMultipleForegroundApps:
+            return .multipleForegroundApps
+        case .videoDeviceNotAvailableDueToSystemPressure:
+            return .systemPressure
+        @unknown default:
+            return .unknown
+        }
+    }
+
+    private static func runtimeError(
+        from notification: Notification
+    ) -> AVFoundationCameraCaptureRuntimeError {
+        guard let error = notification.userInfo?[AVCaptureSessionErrorKey]
+            as? AVError
+        else {
+            return .unknown
+        }
+        return error.code == .mediaServicesWereReset
+            ? .mediaServicesWereReset
+            : .unknown
     }
 }
 

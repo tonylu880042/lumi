@@ -1555,6 +1555,23 @@ embedding_error
 matching_error
 ```
 
+The Debug-Live local diagnostic contract uses fixed, payload-free categories
+under the `identity-recognition` OSLog category. It must distinguish:
+
+- model resource validation, SFace/YuNet model loading and configuration, and
+  SQLite opening
+- camera permission, front-camera/input/output configuration, BGRA format,
+  mirroring, initial/runtime rotation, interruption, and runtime error
+- interruption reasons limited to backgrounding, another client, multiple
+  foreground apps, system pressure, and unknown
+- `media-services-reset` from other/unknown AVFoundation runtime errors
+- presence arrival/departure and camera-start versus face-capture failure
+- Vision detection, YuNet candidate detection, alignment crop, and SFace
+  embedding stages
+
+No per-frame `no face` event is emitted by this diagnostic chain; expected
+empty frames would create noise and obscure the terminal cause.
+
 Metrics:
 - recognition attempts/day
 - known recognition rate
@@ -1568,6 +1585,8 @@ Never log:
 - raw face images by default
 - face embeddings
 - member names in diagnostic logs
+- member IDs, spoken labels, framework error descriptions, or numeric
+  recognition scores in diagnostic logs
 - full member profiles
 - model inputs unless explicitly enabled in secure development mode
 

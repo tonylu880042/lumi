@@ -114,9 +114,23 @@ final class SessionSimulationModel: ObservableObject {
         case finishSession = "finish-session"
     }
 
+    enum ContinuousExperienceOperation: String, Equatable, Sendable {
+        case waitForArrival = "wait-for-arrival"
+        case confirmPresence = "confirm-presence"
+        case orientToVisitor = "orient-to-visitor"
+        case recognizeVisitor = "recognize-visitor"
+        case startVoiceSession = "start-voice-session"
+        case waitForDeparture = "wait-for-departure"
+        case finishSession = "finish-session"
+    }
+
     enum ContinuousExperienceDiagnostic: Equatable, Sendable {
         case stageStarted(ContinuousExperienceStage)
         case stageFailed(ContinuousExperienceStage)
+        case operationStarted(ContinuousExperienceOperation)
+        case operationSucceeded(ContinuousExperienceOperation)
+        case operationCancelled(ContinuousExperienceOperation)
+        case operationFailed(ContinuousExperienceOperation)
     }
 
     /// Presentation-safe identity status for the ready Avatar overlay.
@@ -438,6 +452,12 @@ final class SessionSimulationModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
 
+            let recordDiagnostic:
+                @MainActor (ContinuousExperienceDiagnostic) -> Void = {
+                    [weak self] diagnostic in
+                    self?.recordContinuousExperienceDiagnostic(diagnostic)
+                }
+
             var stage = ContinuousExperienceStage.waitForArrival
             do {
                 while !Task.isCancelled {
@@ -445,22 +465,41 @@ final class SessionSimulationModel: ObservableObject {
                     self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                     await self?.refreshEnrollmentSummary()
                     try Task.checkCancellation()
-                    try await visitorPresenceMonitor.waitForVisitor()
+                    try await Self.runContinuousOperation(
+                        .waitForArrival,
+                        record: recordDiagnostic
+                    ) {
+                        try await visitorPresenceMonitor.waitForVisitor()
+                    }
                     try Task.checkCancellation()
 
                     stage = .welcomeIdentityAndVoice
                     self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
-                    try await self?.runAutomaticWelcome()
+                    guard self != nil else { throw CancellationError() }
+                    try await self?.runAutomaticWelcome(
+                        recordDiagnostic: recordDiagnostic
+                    )
                     try Task.checkCancellation()
 
                     stage = .waitForDeparture
                     self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
-                    try await visitorPresenceMonitor.waitForDeparture()
+                    try await Self.runContinuousOperation(
+                        .waitForDeparture,
+                        record: recordDiagnostic
+                    ) {
+                        try await visitorPresenceMonitor.waitForDeparture()
+                    }
                     try Task.checkCancellation()
 
                     stage = .finishSession
                     self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
-                    try await self?.finishAutomaticVisit()
+                    try await Self.runContinuousOperation(
+                        .finishSession,
+                        record: recordDiagnostic
+                    ) { [weak self] in
+                        guard let self else { throw CancellationError() }
+                        try await self.finishAutomaticVisit()
+                    }
                 }
             } catch is CancellationError {
                 // An explicit stop owns monitor teardown and waits for this
@@ -509,6 +548,45 @@ final class SessionSimulationModel: ObservableObject {
             continuousExperienceLogger.error(
                 "continuous stage failed: \(stage.rawValue, privacy: .public)"
             )
+        case let .operationStarted(operation):
+            continuousExperienceLogger.info(
+                "continuous operation started: \(operation.rawValue, privacy: .public)"
+            )
+        case let .operationSucceeded(operation):
+            continuousExperienceLogger.info(
+                "continuous operation succeeded: \(operation.rawValue, privacy: .public)"
+            )
+        case let .operationCancelled(operation):
+            continuousExperienceLogger.notice(
+                "continuous operation cancelled: \(operation.rawValue, privacy: .public)"
+            )
+        case let .operationFailed(operation):
+            continuousExperienceLogger.error(
+                "continuous operation failed: \(operation.rawValue, privacy: .public)"
+            )
+        }
+    }
+
+    private static func runContinuousOperation<Value>(
+        _ operation: ContinuousExperienceOperation,
+        record: @MainActor (ContinuousExperienceDiagnostic) -> Void,
+        action: () async throws -> Value
+    ) async throws -> Value {
+        record(.operationStarted(operation))
+        do {
+            let value = try await action()
+            record(.operationSucceeded(operation))
+            return value
+        } catch let cancellation as CancellationError {
+            record(.operationCancelled(operation))
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                record(.operationCancelled(operation))
+                throw CancellationError()
+            }
+            record(.operationFailed(operation))
+            throw error
         }
     }
 
@@ -594,39 +672,62 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
-    private func runAutomaticWelcome() async throws {
+    private func runAutomaticWelcome(
+        recordDiagnostic:
+            @MainActor (ContinuousExperienceDiagnostic) -> Void
+    ) async throws {
         guard assistantState == .idle else { return }
 
-        let detected = try await coordinator.confirmPresence(direction: .center)
+        let detected = try await Self.runContinuousOperation(
+            .confirmPresence,
+            record: recordDiagnostic
+        ) {
+            try await coordinator.confirmPresence(direction: .center)
+        }
         receive(detected)
 
-        let orientationTask = Task {
-            try await coordinator.beginOrientation()
+        let recognizing = try await Self.runContinuousOperation(
+            .orientToVisitor,
+            record: recordDiagnostic
+        ) {
+            let orientationTask = Task {
+                try await coordinator.beginOrientation()
+            }
+            await hardware.completeCurrentOrNextRotation()
+            return try await withTaskCancellationHandler(operation: {
+                try await orientationTask.value
+            }, onCancel: {
+                orientationTask.cancel()
+            })
         }
-        await hardware.completeCurrentOrNextRotation()
-        let recognizing = try await withTaskCancellationHandler(operation: {
-            try await orientationTask.value
-        }, onCancel: {
-            orientationTask.cancel()
-        })
         receive(recognizing)
 
-        let result = try await coordinator.recognizeVisitor()
+        let result = try await Self.runContinuousOperation(
+            .recognizeVisitor,
+            record: recordDiagnostic
+        ) {
+            try await coordinator.recognizeVisitor()
+        }
         try Task.checkCancellation()
         receive(await coordinator.state)
         await applyRecognitionResult(result)
         _ = await authorizationRegistrationTask?.value
         try Task.checkCancellation()
 
-        do {
-            let speaking = try await coordinator.startVoiceSession(direction: .general)
-            try Task.checkCancellation()
-            receive(speaking)
-        } catch let error as VoiceSessionAuthorizationError {
-            guard error == .authorizationRequired else { throw error }
-            onAuthorizationRequired()
-            throw CancellationError()
+        let speaking = try await Self.runContinuousOperation(
+            .startVoiceSession,
+            record: recordDiagnostic
+        ) {
+            do {
+                return try await coordinator.startVoiceSession(direction: .general)
+            } catch let error as VoiceSessionAuthorizationError {
+                guard error == .authorizationRequired else { throw error }
+                onAuthorizationRequired()
+                throw CancellationError()
+            }
         }
+        try Task.checkCancellation()
+        receive(speaking)
     }
 
     private func finishAutomaticVisit() async throws {

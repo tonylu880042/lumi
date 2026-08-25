@@ -6,6 +6,16 @@ import Testing
 
 @Suite("Core ML identity calibration service")
 struct CoreMLIdentityCalibrationServiceTests {
+    @Test("identity diagnostics are fixed payload-free categories")
+    func identityDiagnosticsArePayloadFree() {
+        let events = IdentityDiagnosticEvent.allCases
+
+        #expect(Set(events.map(\.rawValue)).count == events.count)
+        for event in events {
+            #expect(Mirror(reflecting: event).children.isEmpty)
+        }
+    }
+
     @Test("enrolled member count deduplicates multiple face samples per member")
     func enrolledMemberCountDeduplicatesSamples() async throws {
         let firstMember = try MemberID(rawValue: "member-a")
@@ -960,6 +970,7 @@ struct CoreMLIdentityCalibrationServiceTests {
 
     @Test("factory rejects non-bundled model URLs without compiling or downloading")
     func factoryRejectsInvalidURLs() async {
+        let diagnostics = IdentityFactoryDiagnosticRecorder()
         let invalidSFace = URL(fileURLWithPath: "/tmp/not-sface.mlmodelc")
         let invalidYuNet = URL(fileURLWithPath: "/tmp/not-yunet.mlmodelc")
         let database = URL(fileURLWithPath: "/tmp/identity-calibration.sqlite")
@@ -968,9 +979,14 @@ struct CoreMLIdentityCalibrationServiceTests {
             _ = try await CoreMLIdentityCalibrationFactory.load(
                 sFaceModelURL: invalidSFace,
                 yuNetModelURL: invalidYuNet,
-                databaseURL: database
+                databaseURL: database,
+                diagnosticSink: diagnostics.record
             )
         }
+        #expect(diagnostics.events == [
+            .identityFactoryLoadStarted,
+            .identityFactoryFailedInvalidModelResources,
+        ])
     }
 
     @Test("factory accepts only exact existing compiled model resource names")
@@ -1129,6 +1145,23 @@ private actor RecordingCalibrationEmbeddingPipeline:
         case .failure:
             throw MarkerError.marker
         }
+    }
+}
+
+private final class IdentityFactoryDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [IdentityDiagnosticEvent] = []
+
+    var events: [IdentityDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(_ event: IdentityDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(event)
     }
 }
 

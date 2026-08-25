@@ -676,7 +676,8 @@ struct SessionSimulationModelTests {
         model.startContinuousExperience()
         await presence.waitForArrivalRequest()
         #expect(diagnostics == [
-            .stageStarted(.waitForArrival)
+            .stageStarted(.waitForArrival),
+            .operationStarted(.waitForArrival),
         ])
 
         await presence.signalArrival()
@@ -685,11 +686,17 @@ struct SessionSimulationModelTests {
         })
         await presence.waitForDepartureRequest()
         #expect(diagnostics.contains(.stageStarted(.waitForDeparture)))
+        #expect(diagnostics.contains(.operationSucceeded(.confirmPresence)))
+        #expect(diagnostics.contains(.operationSucceeded(.orientToVisitor)))
+        #expect(diagnostics.contains(.operationSucceeded(.recognizeVisitor)))
+        #expect(diagnostics.contains(.operationSucceeded(.startVoiceSession)))
+        #expect(diagnostics.contains(.operationStarted(.waitForDeparture)))
 
         await presence.failDeparture()
         try #require(await waitUntilCurrent {
             diagnostics.contains(.stageFailed(.waitForDeparture))
         })
+        #expect(diagnostics.contains(.operationFailed(.waitForDeparture)))
         try #require(await waitUntilCurrent {
             model.errorMessage == "自動辨識暫時無法使用，請再試一次。"
         })
