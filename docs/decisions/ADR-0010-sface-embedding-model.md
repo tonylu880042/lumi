@@ -649,6 +649,13 @@ error description, or model input. Application and UI error contracts remain
 payload-free and unchanged; detailed framework diagnosis stays in
 Infrastructure.
 
+For the owner-approved Debug-Live presence loop, one frame-pipeline failure is
+treated as a temporarily unusable presence frame and the next fresh frame is
+requested on the same camera lease. The diagnostic stage remains visible, but
+the presence operation does not fail solely because that frame was unusable.
+Camera start/stream failures and every calibration, enrollment, or identity
+pipeline failure keep their existing fail-closed behavior.
+
 ## Consequences
 
 - SFace avoids the ArcFace commercial license cost for the pilot.

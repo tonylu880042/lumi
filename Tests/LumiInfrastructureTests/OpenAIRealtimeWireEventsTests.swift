@@ -33,11 +33,11 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(output["voice"] as? String == configuration.voice)
         #expect(session["voice"] == nil)
 
-        // Provider defaults remain in effect until product-approved tuning is
-        // available from physical-device evidence.
-        #expect(turnDetection["threshold"] == nil)
-        #expect(turnDetection["prefix_padding_ms"] == nil)
-        #expect(turnDetection["silence_duration_ms"] == nil)
+        // Tuned from physical-device evidence to prevent premature turn-taking
+        // and reject ambient room noise in gym environment.
+        #expect(turnDetection["threshold"] as? Double == 0.625)
+        #expect(turnDetection["prefix_padding_ms"] as? Int == 300)
+        #expect(turnDetection["silence_duration_ms"] as? Int == 800)
     }
 
     @Test("session.update default keeps the existing no-tools JSON behavior")
@@ -62,7 +62,7 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(defaultData == explicitlyDisabledData)
         #expect(
             String(data: defaultData, encoding: .utf8)
-                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":false,"interrupt_response":false,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","type":"realtime"},"type":"session.update"}"#
+                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":false,"interrupt_response":false,"prefix_padding_ms":300,"silence_duration_ms":800,"threshold":0.625,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","type":"realtime"},"type":"session.update"}"#
         )
         #expect(session["tools"] == nil)
         #expect(session["tool_choice"] == nil)

@@ -13,6 +13,16 @@ struct RecognitionConfidencePolicyTests {
         #expect(configuration.requiredConfirmations == 2)
     }
 
+    @Test("largeScale1000 configuration pins the 1000-member scale gates")
+    func largeScale1000Configuration() {
+        let configuration = RecognitionConfidencePolicyConfiguration.largeScale1000
+
+        #expect(configuration.acceptThreshold == 0.65)
+        #expect(configuration.minimumMargin == 0.10)
+        #expect(configuration.observationCount == 3)
+        #expect(configuration.requiredConfirmations == 2)
+    }
+
     @Test("two of three clear observations resolve the same member")
     func acceptsTwoOfThree() throws {
         let tony = try MemberID(rawValue: "tony")

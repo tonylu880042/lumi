@@ -135,6 +135,12 @@ spoken label, image, embedding, transcript, model input, framework error text,
 or raw provider error. Cancellation and an explicit stop are not reported as
 stage failures.
 
+Owner amendment (2026-08-25): a frame-pipeline failure during presence-only
+observation is a transient unusable frame, not a terminal continuous-stage
+failure. The presence monitor keeps its camera lease and waits for a newer
+frame. Camera startup and stream failures still use the generic retry UI, while
+calibration, enrollment, and identity decisions retain fail-closed behavior.
+
 ## 4. Device Provisioning and Keychain Contract
 
 ### 4.1 Token properties
@@ -301,6 +307,13 @@ After WebRTC connection, the App sends the canonical Taiwan Traditional
 Chinese persona, `marin`, Server VAD, and only the privacy-safe
 `returningMember` or `visitor` greeting context directly to OpenAI. It never
 sends a member ID, name, confidence, embedding, or image.
+
+Owner amendment (2026-08-25): editable Realtime response wording is centralized
+in `Sources/LumiInfrastructure/Voice/OpenAIConversationPrompts.swift`. The
+catalog owns the base persona, returning-member and visitor wording,
+enrollment-consent conversation, direction prompts, and Debug fixture
+disclosure. Moving the copy does not make prompts runtime-selectable and does
+not move tool schemas, authorization rules, model, voice, or broker behavior.
 
 Owner amendment (2026-08-24, controlled barge-in): Server VAD remains the
 provider speech-candidate signal, but `create_response` and

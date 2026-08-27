@@ -231,6 +231,8 @@ private actor OpenAIRealtimeRTCAudioSessionBackend:
             throw OpenAIRealtimeAudioSessionBackendError.mode
         }
 
+        configureDirectionalInput(on: audioSession.session)
+
         do {
             try audioSession.setActive(true)
         } catch {
@@ -239,6 +241,26 @@ private actor OpenAIRealtimeRTCAudioSessionBackend:
             // lock; cleanup errors are intentionally not surfaced here.
             try? audioSession.setActive(false)
             throw OpenAIRealtimeAudioSessionBackendError.activation
+        }
+    }
+
+    private func configureDirectionalInput(on session: AVAudioSession) {
+        try? session.setPreferredInputOrientation(.portrait)
+
+        guard let inputs = session.availableInputs else { return }
+        for input in inputs where input.portType == .builtInMic {
+            if let dataSources = input.dataSources {
+                if let frontSource = dataSources.first(where: {
+                    $0.orientation == .front || $0.dataSourceName.localizedCaseInsensitiveContains("Front")
+                }) {
+                    if let patterns = frontSource.supportedPolarPatterns, patterns.contains(.cardioid) {
+                        try? frontSource.setPreferredPolarPattern(.cardioid)
+                    }
+                    try? input.setPreferredDataSource(frontSource)
+                }
+            }
+            try? audioSession.setPreferredInput(input)
+            break
         }
     }
 

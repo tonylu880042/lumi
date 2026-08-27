@@ -87,6 +87,7 @@ public actor CoreMLIdentityCalibrationService:
     private let embeddingPipeline: any IdentityCalibrationEmbeddingProducing
     private let store: any IdentityCalibrationStore
     private let visitorEnrollmentStore: (any VisitorEnrollmentStore)?
+    private let enrollmentEvaluationFrameLimit: Int
     private let matcher = BruteForceCosineFaceMatcher()
     private let captureGate = IdentityCalibrationCaptureGate()
     private let cameraLeaseCoordinator: IdentityCalibrationCameraLeaseCoordinator
@@ -102,13 +103,18 @@ public actor CoreMLIdentityCalibrationService:
         store: any IdentityCalibrationStore,
         visitorEnrollmentStore: (any VisitorEnrollmentStore)? = nil,
         photoFrameSource: any IdentityCalibrationPhotoFrameSource =
-            ImageIOIdentityCalibrationPhotoFrameDecoder()
+            ImageIOIdentityCalibrationPhotoFrameDecoder(),
+        enrollmentEvaluationFrameLimit: Int = 30
     ) {
         self.frameSource = frameSource
         self.photoFrameSource = photoFrameSource
         self.embeddingPipeline = embeddingPipeline
         self.store = store
         self.visitorEnrollmentStore = visitorEnrollmentStore
+        self.enrollmentEvaluationFrameLimit = max(
+            VisitorEnrollmentToolCallRouter.requiredSampleCount,
+            enrollmentEvaluationFrameLimit
+        )
         self.cameraLeaseCoordinator = IdentityCalibrationCameraLeaseCoordinator(
             frameSource: frameSource
         )
@@ -140,13 +146,19 @@ public actor CoreMLIdentityCalibrationService:
                     embeddings.reserveCapacity(
                         VisitorEnrollmentToolCallRouter.requiredSampleCount
                     )
-                    for _ in 0..<VisitorEnrollmentToolCallRouter.requiredSampleCount {
+                    var evaluatedFrames = 0
+                    while embeddings.count < VisitorEnrollmentToolCallRouter.requiredSampleCount,
+                          evaluatedFrames < self.enrollmentEvaluationFrameLimit {
                         try self.ensureEnrollmentGeneration(generation)
-                        guard let embedding = try await self.captureEmbeddingWithoutGate() else {
-                            return VisitorEnrollmentBeginResult.noUsableFace
+                        evaluatedFrames += 1
+                        if let embedding = try await self.captureEmbeddingWithoutGate() {
+                            embeddings.append(embedding)
                         }
                         try self.ensureEnrollmentGeneration(generation)
-                        embeddings.append(embedding)
+                    }
+
+                    guard embeddings.count == VisitorEnrollmentToolCallRouter.requiredSampleCount else {
+                        return VisitorEnrollmentBeginResult.noUsableFace
                     }
 
                     self.pendingEnrollment = PendingVisitorEnrollment(
@@ -450,6 +462,14 @@ public actor CoreMLIdentityCalibrationService:
             // Presence owns no semantic side effect. A regular diagnostic
             // capture that is already in flight is simply an absent sample;
             // the monitor will retry without tearing down its camera lease.
+            return false
+        } catch SFaceFrameEmbeddingPipelineError.failed {
+            // Presence is a continuous fresh-frame probe. One frame that
+            // Vision/YuNet/alignment/SFace cannot process is equivalent to no
+            // usable face for this probe; the monitor keeps the camera lease
+            // and waits for the next frame. Calibration and identity capture
+            // keep their existing fail-closed behavior.
+            try Task.checkCancellation()
             return false
         } catch {
             if Task.isCancelled {

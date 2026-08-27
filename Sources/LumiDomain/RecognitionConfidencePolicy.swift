@@ -90,6 +90,14 @@ public struct RecognitionConfidencePolicyConfiguration: Equatable, Sendable {
         requiredConfirmations: 2
     )
 
+    /// High-capacity configuration designed for 256-d / 512-d embeddings supporting 1,000-member gallery scale.
+    public static let largeScale1000 = RecognitionConfidencePolicyConfiguration(
+        validatedAcceptThreshold: 0.65,
+        minimumMargin: 0.10,
+        observationCount: 3,
+        requiredConfirmations: 2
+    )
+
     private init(
         validatedAcceptThreshold: Double,
         minimumMargin: Double,

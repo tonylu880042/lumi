@@ -25,6 +25,9 @@ enum OpenAIRealtimeWireEncoder {
                         // cancels output or creates the next response.
                         "create_response": false,
                         "interrupt_response": false,
+                        "threshold": 0.625,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 800,
                     ],
                 ],
                 "output": [

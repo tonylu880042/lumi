@@ -916,6 +916,35 @@ struct CoreMLIdentityCalibrationServiceTests {
         #expect(await store.sFaceSamplesCallCount == 0)
     }
 
+    @Test("presence treats one frame-pipeline failure as absent and accepts a later fresh face")
+    func presenceRecoversFromTransientFramePipelineFailure() async throws {
+        let source = RecordingCalibrationFrameSource()
+        let pipeline = RecoveringPresenceEmbeddingPipeline(
+            recoveredEmbedding: try makeEmbedding(axis: 0)
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+        try await service.startCamera()
+
+        let failedFrame = Task { try await service.captureUsableFace() }
+        await source.waitForNextFrameRequest()
+        await source.send(try makeFrame(byte: 4))
+
+        #expect(try await failedFrame.value == false)
+
+        let recoveredFrame = Task { try await service.captureUsableFace() }
+        await source.waitForNextFrameRequest()
+        await source.send(try makeFrame(byte: 5))
+
+        #expect(try await recoveredFrame.value)
+        #expect(await pipeline.callCount == 2)
+        #expect(await store.sFaceSamplesCallCount == 0)
+    }
+
     @Test("reset deletes only the selected temporary member")
     func resetIsScopedToSelectedMember() async throws {
         let source = RecordingCalibrationFrameSource()
@@ -1145,6 +1174,26 @@ private actor RecordingCalibrationEmbeddingPipeline:
         case .failure:
             throw MarkerError.marker
         }
+    }
+}
+
+private actor RecoveringPresenceEmbeddingPipeline:
+    IdentityCalibrationEmbeddingProducing
+{
+    private let recoveredEmbedding: FaceEmbedding
+    private(set) var callCount = 0
+
+    init(recoveredEmbedding: FaceEmbedding) {
+        self.recoveredEmbedding = recoveredEmbedding
+    }
+
+    func embedding(for frame: CameraFrame) async throws -> FaceEmbedding? {
+        _ = frame
+        callCount += 1
+        if callCount == 1 {
+            throw SFaceFrameEmbeddingPipelineError.failed
+        }
+        return recoveredEmbedding
     }
 }
 

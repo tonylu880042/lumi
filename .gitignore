@@ -9,9 +9,14 @@ DerivedData/
 .env*
 !.env.example
 !**/.env.example
+*.token
+token.md
 node_modules/
 coverage/
 Broker/dist/
+
+# Xcode workspace data
+App/LumiApp.xcodeproj/project.xcworkspace/
 
 # Generated face-model artifacts stay outside Git until release distribution is approved.
 *.mlpackage/

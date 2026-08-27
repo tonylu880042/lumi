@@ -21,7 +21,7 @@ enum DebugMemberFixture {
     ]
 
     static let promptAddition =
-        "你目前正在 Debug-Live 開發測試。工具回傳的是開發測試資料，不是 Curves 真實會員紀錄；回答時必須先明確說「以下是開發測試資料」。"
+        OpenAIConversationPrompts.debugFixtureDisclosure
 
     static func makeRepository() throws -> MockMemberRepository {
         try MockMemberRepository(records: records)

@@ -1,3 +1,6 @@
+#if canImport(Accelerate)
+import Accelerate
+#endif
 import Foundation
 import LumiDomain
 
@@ -72,10 +75,22 @@ struct BruteForceCosineFaceMatcher: Sendable {
                 )
             }
 
-            let similarity = zip(query.components, sample.embedding.components)
+            let similarity: Double
+#if canImport(Accelerate)
+            var dotProduct: Float = 0
+            vDSP_dotpr(
+                query.components, 1,
+                sample.embedding.components, 1,
+                &dotProduct,
+                vDSP_Length(query.components.count)
+            )
+            similarity = Double(dotProduct)
+#else
+            similarity = zip(query.components, sample.embedding.components)
                 .reduce(Double.zero) { partial, pair in
                     partial + Double(pair.0) * Double(pair.1)
                 }
+#endif
             bestByMember[sample.memberID] = max(
                 bestByMember[sample.memberID] ?? -1,
                 min(1, max(-1, similarity))

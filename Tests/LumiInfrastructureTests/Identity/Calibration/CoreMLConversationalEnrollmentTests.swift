@@ -48,7 +48,44 @@ struct CoreMLConversationalEnrollmentTests {
         )])
     }
 
-    @Test("one unusable frame discards every pending sample")
+    @Test("intermittent blurred frames are skipped and enrollment completes with 3 valid samples")
+    func intermittentBlursAllowEnrollmentToComplete() async throws {
+        let embeddings = try [0, 1, 2].map(makeEmbedding)
+        let frameSource = EnrollmentFrameSource(frames: try makeFrames(count: 5))
+        let pipeline = EnrollmentEmbeddingPipeline(embeddings: [
+            embeddings[0],
+            nil, // simulated shake / motion blur
+            nil, // simulated shake / motion blur
+            embeddings[1],
+            embeddings[2],
+        ])
+        let store = RecordingConversationalEnrollmentStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: frameSource,
+            embeddingPipeline: pipeline,
+            store: store,
+            visitorEnrollmentStore: store,
+            enrollmentEvaluationFrameLimit: 10
+        )
+        let consentedAt = Date(timeIntervalSince1970: 100)
+
+        let result = try await service.begin(consentedAt: consentedAt)
+
+        #expect(result == .samplesCaptured(3))
+        #expect(await pipeline.requestCount == 5)
+        #expect(await store.commits.isEmpty)
+        #expect(await frameSource.stopCount == 1)
+
+        try await service.complete(
+            memberID: MemberID(rawValue: "local-uuid"),
+            address: VoiceMemberAddress(spokenLabel: "Tony"),
+            completedAt: Date(timeIntervalSince1970: 200)
+        )
+        #expect(await store.commits.count == 1)
+        #expect(await store.commits.first?.embeddings == embeddings)
+    }
+
+    @Test("insufficient usable frames within evaluation limit discards pending samples")
     func unusableFrameDiscardsPendingSamples() async throws {
         let frameSource = EnrollmentFrameSource(frames: try makeFrames(count: 3))
         let pipeline = EnrollmentEmbeddingPipeline(embeddings: [
@@ -59,14 +96,15 @@ struct CoreMLConversationalEnrollmentTests {
             frameSource: frameSource,
             embeddingPipeline: pipeline,
             store: store,
-            visitorEnrollmentStore: store
+            visitorEnrollmentStore: store,
+            enrollmentEvaluationFrameLimit: 3
         )
 
         #expect(
             try await service.begin(consentedAt: Date(timeIntervalSince1970: 100))
                 == .noUsableFace
         )
-        #expect(await pipeline.requestCount == 2)
+        #expect(await pipeline.requestCount == 3)
         #expect(await store.commits.isEmpty)
         #expect(await frameSource.stopCount == 1)
 

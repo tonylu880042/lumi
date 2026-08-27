@@ -154,7 +154,7 @@ struct OpenAIRealtimeAdapterTests {
             await source.receivedConfigurations.first?.instructions
         )
         #expect(instructions.contains("tony"))
-        #expect(instructions.contains("第一個句子必須以「tony，歡迎回來」開頭"))
+        #expect(instructions.contains("第一個句子必須以「很開心再見到你tony，」開頭"))
         #expect(instructions.contains("漂亮姊姊"))
         #expect(instructions.contains("寶貝"))
         #expect(instructions.contains("公主殿下"))
@@ -199,11 +199,11 @@ struct OpenAIRealtimeAdapterTests {
             ),
             (
                 .preWorkoutReminder,
-                "本次對話方向是運動前提醒。主動給予簡短、溫柔的運動前提醒；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+                OpenAIConversationPrompts.preWorkoutReminder
             ),
             (
                 .postWorkoutReview,
-                "本次對話方向是運動後 review。主動用簡短、正向的問題引導使用者回顧本次運動；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+                OpenAIConversationPrompts.postWorkoutReview
             ),
         ]
 
@@ -284,7 +284,7 @@ struct OpenAIRealtimeAdapterTests {
         for configuration in configurations {
             #expect(
                 configuration.instructions.contains(
-                    "本次對話方向是運動前提醒。主動給予簡短、溫柔的運動前提醒；若需要會員數據，只能使用工具回傳，不得自行推測或捏造。"
+                    OpenAIConversationPrompts.preWorkoutReminder
                 )
             )
             #expect(configuration.instructions.contains("運動後 review") == false)

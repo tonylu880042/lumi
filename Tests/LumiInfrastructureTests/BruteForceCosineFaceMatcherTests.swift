@@ -113,6 +113,40 @@ struct BruteForceCosineFaceMatcherTests {
         #expect(evidence.secondCandidate != nil)
     }
 
+    @Test("ranks five enrollment samples for each of one thousand members with 256 dimensions")
+    func ranksFiveThousandSamples256Dimensions() throws {
+        let dimension = 256
+        let query = try FaceEmbedding(
+            modelVersion: "intel-0095",
+            components: [1] + Array(repeating: 0, count: dimension - 1)
+        )
+        let expectedID = try MemberID(rawValue: "member-0999")
+        var samples: [StoredFaceEmbeddingSample] = []
+        samples.reserveCapacity(5_000)
+
+        for memberIndex in 0..<1_000 {
+            let memberID = try MemberID(rawValue: String(format: "member-%04d", memberIndex))
+            for sampleIndex in 0..<5 {
+                var components = Array(repeating: Float(0), count: dimension)
+                components[0] = memberIndex == 999 ? 1 : Float(memberIndex + 1) / 1_500
+                components[(memberIndex + sampleIndex) % (dimension - 1) + 1] = 1
+                samples.append(try StoredFaceEmbeddingSample(
+                    memberID: memberID,
+                    embedding: FaceEmbedding(
+                        modelVersion: "intel-0095",
+                        components: components
+                    )
+                ))
+            }
+        }
+
+        let evidence = try BruteForceCosineFaceMatcher().evidence(for: query, against: samples)
+
+        #expect(samples.count == 5_000)
+        #expect(evidence.bestCandidate?.memberID == expectedID)
+        #expect(evidence.secondCandidate != nil)
+    }
+
     @Test("rejects empty, zero, and non-finite embeddings")
     func rejectsInvalidEmbeddings() {
         #expect(throws: FaceEmbeddingError.empty) {

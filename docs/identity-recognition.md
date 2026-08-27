@@ -1034,6 +1034,14 @@ idle, and begins waiting again. Cancellation stops the camera and preserves
 Debug-Live field workflow, not a Release threshold or representative-store
 accuracy claim.
 
+Owner amendment (2026-08-25): presence observation treats a single
+Vision/YuNet/alignment/SFace frame-pipeline failure as one temporarily unusable
+fresh frame and continues waiting on the same camera lease. This prevents a
+visitor moving out of view from terminating the continuous loop. Camera start,
+camera-stream, and cancellation failures retain their existing error behavior;
+manual calibration, enrollment, and identity recognition remain fail-closed on
+pipeline errors. The existing payload-free stage diagnostic is still recorded.
+
 Presence observation runs the camera-to-embedding face gate only. It does not
 load SQLite enrollment samples or rank the 800-member gallery on every waiting
 frame; the gallery is queried only by the existing three-observation identity

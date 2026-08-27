@@ -26,6 +26,34 @@ xcodebuild -project App/LumiApp.xcodeproj \
 
 Before handing off a change, run both commands and report their results.
 
+## Physical iPhone Deployment
+
+Physical-device testing MUST use the Live composition:
+
+- Scheme: `LumiApp-Live`
+- Build configuration: `Debug-Live`
+- Bundle identifier: `com.curves.lumi.live`
+
+Never deploy the `LumiApp` scheme with the `Debug` configuration to a
+physical phone for product testing. That build has bundle identifier
+`com.curves.lumi`, uses Mock adapters, and cannot start automatic face
+recognition.
+
+Build the connected iPhone app with:
+
+```sh
+xcodebuild -project App/LumiApp.xcodeproj \
+  -scheme LumiApp-Live \
+  -configuration Debug-Live \
+  -destination 'platform=iOS,id=<device-udid>' \
+  DEVELOPMENT_TEAM=85867ARTR8 \
+  CODE_SIGN_STYLE=Automatic build
+```
+
+Before installation, read the built app's `CFBundleIdentifier` and require it
+to equal `com.curves.lumi.live`. Install that app and launch
+`com.curves.lumi.live`; do not install or launch `com.curves.lumi`.
+
 ## Architecture
 
 This project MUST follow Clean Architecture.

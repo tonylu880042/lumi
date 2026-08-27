@@ -102,15 +102,8 @@ struct AppCompositionFactory {
             let enablesWeeklySummaryTool: Bool
             let enablesVisitorEnrollmentTools: Bool
 #if DEBUG
-            let baseConfiguration = OpenAIRealtimeConfiguration()
             let repository = try DebugMemberFixture.makeRepository()
-            voiceConfiguration = OpenAIRealtimeConfiguration(
-                model: baseConfiguration.model,
-                voice: baseConfiguration.voice,
-                instructions: baseConfiguration.instructions
-                    + "\n"
-                    + DebugMemberFixture.promptAddition
-            )
+            voiceConfiguration = OpenAIRealtimeConfiguration()
             enablesWeeklySummaryTool = true
             enablesVisitorEnrollmentTools = true
 #else

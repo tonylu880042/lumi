@@ -1,8 +1,41 @@
-import LumiInfrastructure
+import LumiApplication
+@testable import LumiInfrastructure
 import Testing
 
 @Suite("OpenAI Realtime configuration")
 struct OpenAIRealtimeConfigurationTests {
+    @Test("conversation prompt catalog centralizes editable response wording")
+    func conversationPromptCatalogIsCanonical() throws {
+        let address = try VoiceMemberAddress(spokenLabel: "tony")
+
+        #expect(OpenAIConversationPrompts.basePersona ==
+            OpenAIRealtimeConfiguration().instructions)
+        #expect(OpenAIConversationPrompts.returningMember(address: address)
+            .contains("很開心再見到你tony，"))
+        #expect(OpenAIConversationPrompts.anonymousReturningMember
+            .contains("不要說出姓名"))
+        #expect(OpenAIConversationPrompts.enrollmentCapableVisitor
+            .contains("我可以跟你認識嗎？"))
+        #expect(OpenAIConversationPrompts.anonymousVisitor
+            .contains("一般問候"))
+        #expect(OpenAIConversationPrompts.preWorkoutReminder
+            .contains("運動前提醒"))
+        #expect(OpenAIConversationPrompts.preWorkoutReminder
+            .contains("俐落收尾"))
+        #expect(OpenAIConversationPrompts.postWorkoutReview
+            .contains("運動後 review"))
+        #expect(OpenAIConversationPrompts.postWorkoutReview
+            .contains("收尾"))
+        #expect(OpenAIConversationPrompts.debugFixtureDisclosure
+            .contains("以下是開發測試資料"))
+        #expect(OpenAIConversationPrompts.basePersona
+            .contains("35字"))
+        #expect(OpenAIConversationPrompts.basePersona
+            .contains("極短句"))
+        #expect(OpenAIConversationPrompts.enrollmentCapableVisitor
+            .contains("35字"))
+    }
+
     @Test("default configuration uses the Phase 2.1 model, voice, and persona instructions")
     func defaultConfigurationIsCanonical() {
         let configuration = OpenAIRealtimeConfiguration()
