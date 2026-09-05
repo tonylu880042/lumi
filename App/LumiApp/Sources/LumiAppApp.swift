@@ -150,7 +150,7 @@ struct AppCompositionFactory {
                 let service = try await identityServiceLoader.load()
                 return PilotVisitorPresenceMonitor(
                     source: service,
-                    departureAbsenceDuration: .seconds(10)
+                    departureAbsenceDuration: .seconds(3)
                 )
             }
             let memberAddressResolver:

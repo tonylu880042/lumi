@@ -100,9 +100,14 @@ public protocol VoiceSessionPort: Sendable {
 
     /// Ends the current voice session. Calling this repeatedly is safe.
     func stop() async
+
+    /// Pre-warms or prepares underlying voice resources.
+    func prewarm() async
 }
 
 public extension VoiceSessionPort {
+    func prewarm() async {}
+
     /// Preserves the original start contract as the general direction.
     func start(
         context: VoiceContext,

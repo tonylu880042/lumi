@@ -8,6 +8,7 @@ import Foundation
 public enum OpenAIRealtimeConnectionPurpose: Equatable, Sendable {
     case initial
     case reconnect
+    case standby
 }
 
 public protocol OpenAIRealtimeTransport: Sendable {

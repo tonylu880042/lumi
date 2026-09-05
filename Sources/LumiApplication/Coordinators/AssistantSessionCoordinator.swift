@@ -314,6 +314,12 @@ public actor AssistantSessionCoordinator {
         }
     }
 
+    /// Pre-warms the voice adapter resources before voice startup.
+    public func prewarmVoiceSession() async {
+        guard !ending else { return }
+        await voice.prewarm()
+    }
+
     /// Starts a privacy-safe voice session from the greeting state.
     ///
     /// The voice adapter is asked for its event stream before startup so no

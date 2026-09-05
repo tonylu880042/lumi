@@ -475,7 +475,7 @@ public actor CoreMLIdentityCalibrationService:
             if Task.isCancelled {
                 throw CancellationError()
             }
-            throw IdentityCalibrationError.failed
+            return false
         }
     }
 

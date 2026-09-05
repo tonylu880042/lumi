@@ -28,10 +28,12 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
     private var generation: UInt64 = 0
     private var connectionAttemptToken: UInt64 = 0
     private var readyConnectionToken: UInt64?
+    private var standbyReady = false
     private var weeklySummaryToolEnabledForSession = false
     private var visitorEnrollmentToolsEnabledForSession = false
     private var worker: Task<Void, Never>?
     private var currentTransport: (any OpenAIRealtimeTransport)?
+    private var activeSessionConfiguration: OpenAIRealtimeConfiguration?
     private var startContinuation: AsyncThrowingStream<Void, any Error>.Continuation?
 
     private var nextSubscriberID: UInt64 = 0
@@ -92,27 +94,57 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
             break
         }
 
-        phase = .starting
         weeklySummaryToolEnabledForSession =
             supportsWeeklySummaryTool && context == .returningMember
         visitorEnrollmentToolsEnabledForSession =
             supportsVisitorEnrollmentTools && context == .visitor
-        clearToolConnectionReadiness()
-        generation &+= 1
-        let acceptedGeneration = generation
-
-        let readiness = AsyncThrowingStream<Void, any Error>.makeStream()
-        startContinuation = readiness.continuation
         let sessionConfiguration = configuration(
             for: context,
             direction: direction,
             memberAddress: memberAddress
         )
-        worker = Task { [weak self] in
-            await self?.runSession(
-                generation: acceptedGeneration,
-                configuration: sessionConfiguration
-            )
+        activeSessionConfiguration = sessionConfiguration
+
+        if let transport = currentTransport, readyConnectionToken != nil {
+            phase = .active
+            standbyReady = false
+            do {
+                let update = try OpenAIRealtimeWireEncoder.sessionUpdate(
+                    for: sessionConfiguration,
+                    enablesWeeklySummaryTool: weeklySummaryToolEnabledForSession,
+                    enablesVisitorEnrollmentTools: visitorEnrollmentToolsEnabledForSession
+                )
+                let greeting = try OpenAIRealtimeWireEncoder.responseCreate()
+                try await transport.send(update)
+                try await transport.send(greeting)
+                return
+            } catch {
+                phase = .idle
+                currentTransport = nil
+                readyConnectionToken = nil
+                worker?.cancel()
+                worker = nil
+            }
+        }
+
+        let readiness = AsyncThrowingStream<Void, any Error>.makeStream()
+        startContinuation = readiness.continuation
+        phase = .starting
+        standbyReady = false
+        let acceptedGeneration: UInt64
+
+        if worker == nil {
+            clearToolConnectionReadiness()
+            generation &+= 1
+            acceptedGeneration = generation
+            worker = Task { [weak self] in
+                await self?.runSession(
+                    generation: acceptedGeneration,
+                    configuration: sessionConfiguration
+                )
+            }
+        } else {
+            acceptedGeneration = generation
         }
 
         do {
@@ -133,6 +165,24 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
             }
             throw error
         }
+    }
+
+    /// Pre-warms the WebRTC transport in standby mode before conversation starts.
+    public func prewarm() async {
+        guard phase == .idle, worker == nil, currentTransport == nil else { return }
+        generation &+= 1
+        let acceptedGeneration = generation
+        worker = Task { [weak self] in
+            await self?.runStandby(generation: acceptedGeneration)
+        }
+    }
+
+    private func runStandby(generation acceptedGeneration: UInt64) async {
+        _ = await runConnection(
+            generation: acceptedGeneration,
+            configuration: configuration,
+            purpose: .standby
+        )
     }
 
     public func eventUpdates() -> AsyncStream<VoiceSessionEvent> {
@@ -215,6 +265,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
 
         generation &+= 1
         phase = .idle
+        standbyReady = false
         clearSessionToolCapability()
         worker?.cancel()
         worker = nil
@@ -222,6 +273,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
 
         let transport = currentTransport
         currentTransport = nil
+        readyConnectionToken = nil
         await transport?.close()
         finishSubscribers()
         finishToolSubscribers()
@@ -353,7 +405,28 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
                         readyConnectionToken = acceptedConnectionToken
                         if phase == .starting {
                             phase = .active
+                            if purpose == .standby {
+                                let configToApply = activeSessionConfiguration ?? sessionConfiguration
+                                do {
+                                    let update = try OpenAIRealtimeWireEncoder.sessionUpdate(
+                                        for: configToApply,
+                                        enablesWeeklySummaryTool: weeklySummaryToolEnabledForSession,
+                                        enablesVisitorEnrollmentTools: visitorEnrollmentToolsEnabledForSession
+                                    )
+                                    let greeting = try OpenAIRealtimeWireEncoder.responseCreate()
+                                    try await transport.send(update)
+                                    try await transport.send(greeting)
+                                } catch {
+                                    clearToolConnectionReadiness()
+                                    await transport.close()
+                                    currentTransport = nil
+                                    finishStart(throwing: error)
+                                    return .failedBeforeReady(error)
+                                }
+                            }
                             finishStartSuccessfully()
+                        } else if phase == .idle {
+                            standbyReady = true
                         }
                     case .voice(let event):
                         guard connectionReady else {
@@ -406,6 +479,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
         guard acceptedGeneration == generation, phase == .starting else { return }
         generation &+= 1
         phase = .idle
+        standbyReady = false
         clearSessionToolCapability()
         worker?.cancel()
         worker = nil
@@ -413,6 +487,7 @@ public actor OpenAIRealtimeAdapter: VoiceSessionPort, VoiceToolCallPort {
 
         let transport = currentTransport
         currentTransport = nil
+        readyConnectionToken = nil
         await transport?.close()
         finishToolSubscribers()
     }

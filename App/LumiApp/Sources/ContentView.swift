@@ -62,7 +62,9 @@ struct ContentView: View {
     private var renderedAvatarState: AvatarVisualState {
         switch controlsMode {
         case .session:
-            if simulationModel.supportsContinuousExperience,
+            if simulationModel.supportsContinuousExperience, !simulationModel.isAwake {
+                mapper.map(.offline)
+            } else if simulationModel.supportsContinuousExperience,
                simulationModel.isContinuousExperienceRunning,
                simulationModel.assistantState == .idle {
                 mapper.map(.recognizing)
@@ -95,6 +97,16 @@ struct ContentView: View {
             )
             .id(controlsMode)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if simulationModel.supportsContinuousExperience,
+                   !simulationModel.isAwake,
+                   !simulationModel.isWakingUp {
+                    Task {
+                        await simulationModel.wakeUp()
+                    }
+                }
+            }
             .overlay(alignment: AppOverlayLayout.sessionControls.alignment) {
                 if !simulationModel.supportsContinuousExperience {
                     SimulatorControlsView(
@@ -126,31 +138,56 @@ struct ContentView: View {
                 )
             }
 
+            if simulationModel.supportsContinuousExperience, !simulationModel.isAwake {
+                VStack {
+                    Spacer()
+                    Button {
+                        Task { await simulationModel.wakeUp() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles")
+                            Text("點擊喚醒 Lumi")
+                                .font(.headline)
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 14)
+                        .background(
+                            Capsule()
+                                .fill(Color.purple.opacity(0.75))
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                                )
+                        )
+                        .shadow(color: .purple.opacity(0.4), radius: 12, x: 0, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 48)
+                    .transition(.opacity.combined(with: .scale))
+                }
+                .animation(.easeInOut(duration: 0.3), value: simulationModel.isAwake)
+            }
+
             if simulationModel.supportsContinuousExperience,
                let errorMessage = simulationModel.errorMessage {
                 VStack(spacing: 12) {
                     Text(errorMessage)
                         .multilineTextAlignment(.center)
-                    Button(
-                        simulationModel.canStartVoiceSession
-                            ? "重新啟動語音"
-                            : "重新開始辨識"
-                    ) {
-                        if simulationModel.canStartVoiceSession {
-                            simulationModel.startVoiceSession()
-                        } else {
-                            Task {
-                                await simulationModel.restartContinuousExperience()
-                            }
+                        .font(.body)
+                        .foregroundStyle(.primary)
+
+                    Button("重新開始辨識") {
+                        Task {
+                            await simulationModel.restartContinuousExperience()
                         }
                     }
                     .buttonStyle(.borderedProminent)
                 }
-                .padding(18)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                .padding(20)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
                 .padding(.horizontal, 24)
-                .padding(.top, 72)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
 #if DEBUG
             if Self.shouldShowCalibrationEntry(
@@ -189,7 +226,9 @@ struct ContentView: View {
         }
 #endif
         .task {
-            simulationModel.startContinuousExperience()
+            if !simulationModel.supportsContinuousExperience {
+                simulationModel.startContinuousExperience()
+            }
         }
         .onDisappear {
             simulationModel.stopContinuousExperience()

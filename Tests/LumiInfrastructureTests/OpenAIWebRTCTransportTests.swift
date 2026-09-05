@@ -408,6 +408,38 @@ struct OpenAIWebRTCTransportTests {
         ])
     }
 
+    @Test("standby session handshake sends update without greeting and enables immediate send")
+    func standbyHandshakeEnablesImmediateSend() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker"
+        )
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .standby
+        )
+
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+        ])
+
+        let greeting = try OpenAIRealtimeWireEncoder.responseCreate()
+        try await transport.send(greeting)
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+            greeting,
+        ])
+    }
+
     @Test("enabled initial handshake sends the tool schema then greeting")
     func enabledInitialHandshakeSendsToolSchemaAndGreeting() async throws {
         let configuration = OpenAIRealtimeConfiguration(

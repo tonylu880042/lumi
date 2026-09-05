@@ -945,6 +945,33 @@ struct CoreMLIdentityCalibrationServiceTests {
         #expect(await store.sFaceSamplesCallCount == 0)
     }
 
+    @Test("presence treats generic frame error as absent and accepts later face")
+    func presenceRecoversFromTransientFrameSourceFailure() async throws {
+        let source = RecordingCalibrationFrameSource()
+        let pipeline = RecordingCalibrationEmbeddingPipeline(
+            .success(try makeEmbedding(axis: 0))
+        )
+        let store = RecordingCalibrationStore()
+        let service = CoreMLIdentityCalibrationService(
+            frameSource: source,
+            embeddingPipeline: pipeline,
+            store: store
+        )
+        try await service.startCamera()
+
+        let failedFrame = Task { try await service.captureUsableFace() }
+        await source.waitForNextFrameRequest()
+        await source.send(error: IdentityCalibrationError.failed)
+
+        #expect(try await failedFrame.value == false)
+
+        let recoveredFrame = Task { try await service.captureUsableFace() }
+        await source.waitForNextFrameRequest()
+        await source.send(try makeFrame(byte: 6))
+
+        #expect(try await recoveredFrame.value)
+    }
+
     @Test("reset deletes only the selected temporary member")
     func resetIsScopedToSelectedMember() async throws {
         let source = RecordingCalibrationFrameSource()
@@ -1265,6 +1292,12 @@ private actor RecordingCalibrationFrameSource: IdentityCalibrationFrameSource {
         guard let pending else { return }
         self.pending = nil
         pending.resume(returning: frame)
+    }
+
+    func send(error: any Error) {
+        guard let pending else { return }
+        self.pending = nil
+        pending.resume(throwing: error)
     }
 
     private func cancelPending() {

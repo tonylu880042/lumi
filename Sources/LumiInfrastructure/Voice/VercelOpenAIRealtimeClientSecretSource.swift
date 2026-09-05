@@ -76,7 +76,7 @@ enum VercelOpenAIRealtimeClientSecretSourceError:
 /// configuration is consumed by the existing provider adapter after the
 /// credential is returned and never crosses this device-authorization
 /// boundary.
-public struct VercelOpenAIRealtimeClientSecretSource:
+public actor VercelOpenAIRealtimeClientSecretSource:
     OpenAIRealtimeClientSecretSource,
     Sendable
 {
@@ -84,6 +84,7 @@ public struct VercelOpenAIRealtimeClientSecretSource:
     private let store: any DeviceAuthorizationStore
     private let dataLoader: any VercelOpenAIRealtimeClientSecretDataLoader
     private let clock: @Sendable () -> Date
+    private var cachedSecret: OpenAIRealtimeClientSecret?
 
     /// Creates a production source backed by the supplied URLSession.
     public init(
@@ -116,6 +117,11 @@ public struct VercelOpenAIRealtimeClientSecretSource:
     public func clientSecret(
         for _: OpenAIRealtimeConfiguration
     ) async throws -> OpenAIRealtimeClientSecret {
+        let currentTime = clock()
+        if let cachedSecret, cachedSecret.expiresAt > currentTime.addingTimeInterval(30) {
+            return cachedSecret
+        }
+
         try Task.checkCancellation()
         let token = try await loadToken()
         try Task.checkCancellation()
@@ -160,7 +166,9 @@ public struct VercelOpenAIRealtimeClientSecretSource:
             }
         }
 
-        return try decodeSecret(from: data)
+        let secret = try decodeSecret(from: data)
+        self.cachedSecret = secret
+        return secret
     }
 
     private func loadToken() async throws -> DeviceAuthorizationToken {

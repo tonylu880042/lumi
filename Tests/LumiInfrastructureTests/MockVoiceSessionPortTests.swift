@@ -68,6 +68,19 @@ struct MockVoiceSessionPortTests {
         #expect(await voice.hasPendingStart == false)
     }
 
+    @Test("prewarm increments call count without starting session")
+    func prewarmIncrementsCallCount() async {
+        let voice = MockVoiceSessionPort()
+        #expect(await voice.prewarmCallCount == 0)
+        #expect(await voice.isActive == false)
+
+        await voice.prewarm()
+
+        #expect(await voice.prewarmCallCount == 1)
+        #expect(await voice.isActive == false)
+        #expect(await voice.hasPendingStart == false)
+    }
+
     @Test("direction-aware start records focus without an identity payload")
     func directionAwareStartRecordsFocus() async throws {
         let voice = MockVoiceSessionPort()

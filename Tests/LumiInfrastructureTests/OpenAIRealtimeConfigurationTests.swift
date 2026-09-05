@@ -11,7 +11,11 @@ struct OpenAIRealtimeConfigurationTests {
         #expect(OpenAIConversationPrompts.basePersona ==
             OpenAIRealtimeConfiguration().instructions)
         #expect(OpenAIConversationPrompts.returningMember(address: address)
-            .contains("很開心再見到你tony，"))
+            .contains("很開心再見到你tony漂亮姊姊"))
+        #expect(OpenAIConversationPrompts.returningMember(address: address)
+            .contains("嚴禁呼叫任何工具"))
+        #expect(OpenAIConversationPrompts.returningMember(address: address)
+            .contains("只有在會員主動開口詢問"))
         #expect(OpenAIConversationPrompts.anonymousReturningMember
             .contains("不要說出姓名"))
         #expect(OpenAIConversationPrompts.enrollmentCapableVisitor

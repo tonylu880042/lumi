@@ -16,6 +16,7 @@ public actor MockVoiceSessionPort: VoiceSessionPort {
     public private(set) var startDirections: [VoiceConversationDirection] = []
     public private(set) var startCallCount = 0
     public private(set) var stopCallCount = 0
+    public private(set) var prewarmCallCount = 0
     public private(set) var isActive = false
 
     /// Whether a startup request is waiting for explicit completion.
@@ -94,6 +95,10 @@ public actor MockVoiceSessionPort: VoiceSessionPort {
         guard let pendingStart else { return }
         self.pendingStart = nil
         pendingStart.continuation.resume(throwing: error)
+    }
+
+    public func prewarm() async {
+        prewarmCallCount += 1
     }
 
     public func eventUpdates() async -> AsyncStream<VoiceSessionEvent> {

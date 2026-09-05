@@ -154,11 +154,11 @@ struct OpenAIRealtimeAdapterTests {
             await source.receivedConfigurations.first?.instructions
         )
         #expect(instructions.contains("tony"))
-        #expect(instructions.contains("第一個句子必須以「很開心再見到你tony，」開頭"))
+        #expect(instructions.contains("第一個句子必須以「很開心再見到你tony漂亮姊姊」開頭"))
         #expect(instructions.contains("漂亮姊姊"))
-        #expect(instructions.contains("寶貝"))
-        #expect(instructions.contains("公主殿下"))
-        #expect(instructions.contains("只選一個"))
+        #expect(instructions.contains("開場問候階段"))
+        #expect(instructions.contains("工具查詢階段"))
+        #expect(instructions.contains("數據回報階段"))
         for marker in [
             "visits_this_week",
             "activity_met_minutes",
@@ -971,6 +971,51 @@ struct OpenAIRealtimeAdapterTests {
             try OpenAIRealtimeWireEncoder.responseCreate(),
         ])
         await adapter.stop()
+    }
+
+    @Test("prewarm connects transport in standby and start promotes it without reconnecting")
+    func prewarmConnectsStandbyAndStartPromotes() async throws {
+        let transport = TestRealtimeTransport()
+        let source = TestClientSecretSource(secrets: [try makeSecret("prewarm-secret")])
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport])
+        )
+
+        #expect(await source.callCount == 0)
+        #expect(await transport.connectCallCount == 0)
+
+        await adapter.prewarm()
+
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        #expect(await source.callCount == 1)
+        #expect(await transport.connectionPurposes == [.standby])
+
+        await transport.emit(.sessionCreated)
+
+        let start = Task { try await adapter.start(context: .returningMember) }
+        try await start.value
+
+        #expect(await transport.connectCallCount == 1)
+        #expect(await transport.sendCallCount == 2)
+        await adapter.stop()
+        #expect(await transport.closeCallCount == 1)
+    }
+
+    @Test("stop cleanly closes a standby prewarmed transport")
+    func stopClosesStandbyTransport() async throws {
+        let transport = TestRealtimeTransport()
+        let source = TestClientSecretSource(secrets: [try makeSecret("prewarm-secret")])
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport])
+        )
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+
+        await adapter.stop()
+        #expect(await transport.closeCallCount == 1)
     }
 }
 

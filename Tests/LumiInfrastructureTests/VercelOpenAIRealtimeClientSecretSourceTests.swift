@@ -50,6 +50,28 @@ struct VercelOpenAIRealtimeClientSecretSourceTests {
         #expect(request?.httpBody?.description.contains("instructions-marker") != true)
     }
 
+    @Test("caches valid secret and reuses it without duplicate network request")
+    func cachesValidSecretAndReusesIt() async throws {
+        let token = try #require(DeviceAuthorizationToken(rawValue: tokenValue))
+        let store = RecordingDeviceAuthorizationStore(token: token)
+        let loader = RecordingVercelClientSecretDataLoader(
+            result: .success(
+                Data(#"{"value":"client-secret-marker","expiresAt":1700000100}"#.utf8),
+                httpResponse(statusCode: 200, url: endpoint)
+            )
+        )
+        let source = makeSource(store: store, loader: loader)
+        let configuration = OpenAIRealtimeConfiguration()
+
+        let first = try await source.clientSecret(for: configuration)
+        let second = try await source.clientSecret(for: configuration)
+
+        #expect(first.value == "client-secret-marker")
+        #expect(second.value == "client-secret-marker")
+        #expect(await loader.requestCount == 1)
+        #expect(await store.loadCallCount == 1)
+    }
+
     @Test("missing authorization fails before making a broker request")
     func missingTokenRequiresAuthorization() async throws {
         let store = RecordingDeviceAuthorizationStore(token: nil)

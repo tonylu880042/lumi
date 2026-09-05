@@ -194,6 +194,8 @@ final class SessionSimulationModel: ObservableObject {
     @Published private(set) var visitorGreeting: String?
     @Published private(set) var pendingAvatarEvent: AvatarEventCommand?
     @Published private(set) var isContinuousExperienceRunning = false
+    @Published private(set) var isAwake = false
+    @Published private(set) var isWakingUp = false
     @Published private(set) var recognitionDisplayStatus: RecognitionDisplayStatus = .waiting
     @Published private(set) var enrolledMemberCount: Int?
 
@@ -434,6 +436,18 @@ final class SessionSimulationModel: ObservableObject {
         visitorPresenceMonitor != nil && manualIdentity == nil
     }
 
+    /// Performs the wake-up ceremony and warms up pipeline resources.
+    func wakeUp() async {
+        guard !isAwake, !isWakingUp else { return }
+        isWakingUp = true
+        await coordinator.prewarmVoiceSession()
+        isAwake = true
+        isWakingUp = false
+        if supportsContinuousExperience {
+            startContinuousExperience()
+        }
+    }
+
     /// Starts the owner-approved kiosk loop. One usable face arms one welcome;
     /// the monitor must then observe ten continuous seconds without a usable
     /// face before another welcome can be armed.
@@ -441,6 +455,7 @@ final class SessionSimulationModel: ObservableObject {
         guard supportsContinuousExperience, continuousExperienceTask == nil,
               let visitorPresenceMonitor else { return }
 
+        isAwake = true
         errorMessage = nil
         isContinuousExperienceRunning = true
         continuousExperienceGeneration &+= 1
@@ -458,41 +473,80 @@ final class SessionSimulationModel: ObservableObject {
                     self?.recordContinuousExperienceDiagnostic(diagnostic)
                 }
 
-            var stage = ContinuousExperienceStage.waitForArrival
-            do {
-                while !Task.isCancelled {
-                    stage = .waitForArrival
-                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
-                    await self?.refreshEnrollmentSummary()
-                    try Task.checkCancellation()
+            while !Task.isCancelled {
+                var stage = ContinuousExperienceStage.waitForArrival
+                self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                await self?.refreshEnrollmentSummary()
+                try? Task.checkCancellation()
+                guard !Task.isCancelled else { break }
+
+                do {
                     try await Self.runContinuousOperation(
                         .waitForArrival,
                         record: recordDiagnostic
                     ) {
                         try await visitorPresenceMonitor.waitForVisitor()
                     }
-                    try Task.checkCancellation()
+                } catch is CancellationError {
+                    break
+                } catch {
+                    guard !Task.isCancelled else { break }
+                    self?.recordContinuousExperienceDiagnostic(.stageFailed(.waitForArrival))
+                    await visitorPresenceMonitor.stop()
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
+                guard !Task.isCancelled else { break }
 
-                    stage = .welcomeIdentityAndVoice
-                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
-                    guard self != nil else { throw CancellationError() }
+                stage = .welcomeIdentityAndVoice
+                self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                guard self != nil else { break }
+
+                do {
                     try await self?.runAutomaticWelcome(
                         recordDiagnostic: recordDiagnostic
                     )
-                    try Task.checkCancellation()
+                } catch is CancellationError {
+                    break
+                } catch {
+                    guard !Task.isCancelled else { break }
+                    self?.recordContinuousExperienceDiagnostic(.stageFailed(.welcomeIdentityAndVoice))
+                    if self?.canEndSession == true {
+                        try? await self?.finishAutomaticVisit()
+                    }
+                    await visitorPresenceMonitor.stop()
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
+                guard !Task.isCancelled else { break }
 
-                    stage = .waitForDeparture
-                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                stage = .waitForDeparture
+                self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                do {
                     try await Self.runContinuousOperation(
                         .waitForDeparture,
                         record: recordDiagnostic
                     ) {
                         try await visitorPresenceMonitor.waitForDeparture()
                     }
-                    try Task.checkCancellation()
+                } catch is CancellationError {
+                    break
+                } catch {
+                    guard !Task.isCancelled else { break }
+                    self?.recordContinuousExperienceDiagnostic(.stageFailed(stage))
+                    await visitorPresenceMonitor.stop()
+                    guard let self,
+                          self.continuousExperienceGeneration == acceptedGeneration else {
+                        break
+                    }
+                    self.errorMessage = "自動辨識暫時無法使用，請再試一次。"
+                    break
+                }
+                guard !Task.isCancelled else { break }
 
-                    stage = .finishSession
-                    self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                stage = .finishSession
+                self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
+                do {
                     try await Self.runContinuousOperation(
                         .finishSession,
                         record: recordDiagnostic
@@ -500,31 +554,19 @@ final class SessionSimulationModel: ObservableObject {
                         guard let self else { throw CancellationError() }
                         try await self.finishAutomaticVisit()
                     }
-                }
-            } catch is CancellationError {
-                // An explicit stop owns monitor teardown and waits for this
-                // task below. Awaiting that same teardown here would form a
-                // cycle, so the canceled generation simply exits. A
-                // cancellation without an external owner still performs its
-                // own best-effort monitor cleanup.
-                if self?.continuousExperienceTeardownTask == nil {
+                } catch is CancellationError {
+                    break
+                } catch {
+                    guard !Task.isCancelled else { break }
+                    self?.recordContinuousExperienceDiagnostic(.stageFailed(.finishSession))
                     await visitorPresenceMonitor.stop()
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
                 }
-            } catch {
-                guard !Task.isCancelled else { return }
-                self?.recordContinuousExperienceDiagnostic(.stageFailed(stage))
+            }
+
+            if self?.continuousExperienceTeardownTask == nil {
                 await visitorPresenceMonitor.stop()
-                guard let self,
-                      self.continuousExperienceGeneration == acceptedGeneration else {
-                    return
-                }
-                if self.canEndSession, stage != .waitForDeparture {
-                    try? await self.finishAutomaticVisit()
-                }
-                guard self.continuousExperienceGeneration == acceptedGeneration else {
-                    return
-                }
-                self.errorMessage = "自動辨識暫時無法使用，請再試一次。"
             }
             self?.finishContinuousExperience(generation: acceptedGeneration)
         }
@@ -678,6 +720,10 @@ final class SessionSimulationModel: ObservableObject {
     ) async throws {
         guard assistantState == .idle else { return }
 
+        let prewarmTask = Task { [coordinator] in
+            await coordinator.prewarmVoiceSession()
+        }
+
         let detected = try await Self.runContinuousOperation(
             .confirmPresence,
             record: recordDiagnostic
@@ -713,6 +759,7 @@ final class SessionSimulationModel: ObservableObject {
         await applyRecognitionResult(result)
         _ = await authorizationRegistrationTask?.value
         try Task.checkCancellation()
+        _ = await prewarmTask.value
 
         let speaking = try await Self.runContinuousOperation(
             .startVoiceSession,

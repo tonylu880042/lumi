@@ -845,6 +845,22 @@ struct AssistantSessionCoordinatorTests {
         #expect(try await start.value == .speaking)
     }
 
+    @Test("prewarmVoiceSession forwards prewarm request to underlying voice port")
+    func prewarmVoiceSessionForwardsToVoicePort() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+
+        #expect(await voice.prewarmCallCount == 0)
+        await coordinator.prewarmVoiceSession()
+        #expect(await voice.prewarmCallCount == 1)
+    }
+
     @Test("passes explicit directions for known and unknown visitors without identity payload")
     func startsVoiceWithExplicitDirections() async throws {
         let knownHardware = TestHardware()
@@ -1841,6 +1857,7 @@ private actor TestVoice: VoiceSessionPort {
     private(set) var startDirections: [VoiceConversationDirection] = []
     private(set) var startMemberAddresses: [VoiceMemberAddress?] = []
     private(set) var startCallCount = 0
+    private(set) var prewarmCallCount = 0
     private(set) var eventUpdatesCallCount = 0
     private(set) var stopCallCount = 0
     private let log: TestCallLog?
@@ -1939,6 +1956,10 @@ private actor TestVoice: VoiceSessionPort {
         self.pendingStart = nil
         active = true
         pendingStart.continuation.resume()
+    }
+
+    func prewarm() async {
+        prewarmCallCount += 1
     }
 
     func waitForStartRequest() async {

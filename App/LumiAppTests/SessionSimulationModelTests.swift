@@ -383,6 +383,39 @@ struct SessionSimulationModelTests {
         #expect(model.isContinuousExperienceRunning)
     }
 
+    @Test("wakeUp transitions isAwake, calls prewarm, and starts continuous experience")
+    func wakeUpTransitionsStateAndStartsContinuousExperience() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = MockVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        #expect(model.isAwake == false)
+        #expect(model.isWakingUp == false)
+        #expect(model.isContinuousExperienceRunning == false)
+        #expect(await voice.prewarmCallCount == 0)
+
+        await model.wakeUp()
+
+        #expect(model.isAwake == true)
+        #expect(model.isWakingUp == false)
+        #expect(model.isContinuousExperienceRunning == true)
+        #expect(await voice.prewarmCallCount == 1)
+
+        model.stopContinuousExperience()
+    }
+
     @Test("continuous experience waits for voice readiness before monitoring departure")
     func continuousExperienceWaitsForVoiceReadiness() async throws {
         let hardware = MockHardwareControlPort()
@@ -745,6 +778,38 @@ struct SessionSimulationModelTests {
         #expect(model.assistantState == .speaking)
         #expect(await voice.stopCallCount == 0)
         #expect(await hardware.returnHomeCallCount == 0)
+    }
+
+    @Test("transient arrival failure does not stop continuous experience and resumes waiting")
+    func continuousArrivalFailureRecoversAndResumes() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest(count: 1)
+        await presence.failArrival()
+
+        await presence.waitForArrivalRequest(count: 2)
+        #expect(model.isContinuousExperienceRunning)
+
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        #expect(model.isContinuousExperienceRunning)
+
+        model.stopContinuousExperience()
     }
 
     @Test("Authorization-required startup invokes routing exactly once")
@@ -1184,6 +1249,11 @@ private actor ControlledVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
 
     func signalArrival() {
         arrivalContinuation?.resume()
+        arrivalContinuation = nil
+    }
+
+    func failArrival() {
+        arrivalContinuation?.resume(throwing: TestVoiceFailure.injected)
         arrivalContinuation = nil
     }
 
