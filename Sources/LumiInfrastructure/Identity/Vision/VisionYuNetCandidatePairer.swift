@@ -32,6 +32,7 @@ struct VisionYuNetCandidatePairer: Sendable {
             return try DetectedFace(
                 boundingBox: vision.boundingBox,
                 confidence: vision.confidence,
+                pose: vision.pose,
                 alignmentLandmarks: yuNetLandmarks
             )
         } catch {

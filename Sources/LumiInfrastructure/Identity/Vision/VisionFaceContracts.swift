@@ -68,16 +68,50 @@ enum DetectedFaceError: Error, Equatable, Sendable {
     case confidenceOutOfRange
 }
 
+enum FacePoseObservationError: Error, Equatable, Sendable {
+    case nonFiniteYaw
+    case nonFiniteRoll
+}
+
+/// Raw, optional face orientation values emitted by Vision.
+///
+/// Apple exposes `VNFaceObservation.yaw` and `.roll` as optional angles in
+/// radians. A missing value means that the request did not calculate that
+/// angle; this type preserves that absence and applies no facing policy.
+/// Sources:
+/// - https://developer.apple.com/documentation/vision/vnfaceobservation/yaw
+/// - https://developer.apple.com/documentation/vision/vnfaceobservation/roll
+struct FacePoseObservation: Equatable, Sendable {
+    let yawRadians: Double?
+    let rollRadians: Double?
+
+    init(
+        yawRadians: Double?,
+        rollRadians: Double?
+    ) throws(FacePoseObservationError) {
+        if let yawRadians, !yawRadians.isFinite {
+            throw .nonFiniteYaw
+        }
+        if let rollRadians, !rollRadians.isFinite {
+            throw .nonFiniteRoll
+        }
+        self.yawRadians = yawRadians
+        self.rollRadians = rollRadians
+    }
+}
+
 /// Framework-neutral face detection output. It carries no target-selection or
 /// quality policy; those decisions belong to later layers.
 struct DetectedFace: Equatable, Sendable {
     let boundingBox: NormalizedRect
     let confidence: Double
+    let pose: FacePoseObservation?
     let alignmentLandmarks: SFaceAlignmentLandmarks?
 
     init(
         boundingBox: NormalizedRect,
         confidence: Double,
+        pose: FacePoseObservation? = nil,
         alignmentLandmarks: SFaceAlignmentLandmarks? = nil
     ) throws(DetectedFaceError) {
         guard confidence.isFinite else { throw .nonFiniteConfidence }
@@ -86,6 +120,7 @@ struct DetectedFace: Equatable, Sendable {
         }
         self.boundingBox = boundingBox
         self.confidence = confidence
+        self.pose = pose
         self.alignmentLandmarks = alignmentLandmarks
     }
 }

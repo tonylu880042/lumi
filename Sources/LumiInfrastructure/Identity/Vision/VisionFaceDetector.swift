@@ -25,19 +25,25 @@ struct VisionFaceObservationValues: Equatable, Sendable {
     let width: Double
     let height: Double
     let confidence: Double
+    let yawRadians: Double?
+    let rollRadians: Double?
 
     init(
         x: Double,
         y: Double,
         width: Double,
         height: Double,
-        confidence: Double
+        confidence: Double,
+        yawRadians: Double? = nil,
+        rollRadians: Double? = nil
     ) {
         self.x = x
         self.y = y
         self.width = width
         self.height = height
         self.confidence = confidence
+        self.yawRadians = yawRadians
+        self.rollRadians = rollRadians
     }
 }
 
@@ -108,9 +114,23 @@ struct VisionFaceDetector: Sendable {
             return nil
         }
 
+        let pose: FacePoseObservation?
+        if observation.yawRadians == nil, observation.rollRadians == nil {
+            pose = nil
+        } else {
+            guard let rawPose = try? FacePoseObservation(
+                yawRadians: observation.yawRadians,
+                rollRadians: observation.rollRadians
+            ) else {
+                return nil
+            }
+            pose = rawPose
+        }
+
         return try? DetectedFace(
             boundingBox: boundingBox,
             confidence: observation.confidence,
+            pose: pose,
             alignmentLandmarks: nil
         )
     }
@@ -201,7 +221,9 @@ private actor NativeVisionFaceObservationProvider:
                 y: Double(boundingBox.origin.y),
                 width: Double(boundingBox.size.width),
                 height: Double(boundingBox.size.height),
-                confidence: Double(observation.confidence)
+                confidence: Double(observation.confidence),
+                yawRadians: observation.yaw?.doubleValue,
+                rollRadians: observation.roll?.doubleValue
             )
         }
     }

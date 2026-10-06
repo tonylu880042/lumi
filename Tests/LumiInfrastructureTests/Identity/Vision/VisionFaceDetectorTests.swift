@@ -39,7 +39,88 @@ struct VisionFaceDetectorTests {
         #expect(face.boundingBox == expectedBoundingBox)
         #expect(face.boundingBox.coordinateOrigin == .lowerLeft)
         #expect(face.confidence == value.confidence)
+        #expect(face.pose == nil)
         #expect(face.alignmentLandmarks == nil)
+    }
+
+    @Test("preserves optional raw yaw and roll in radians")
+    func preservesRawPoseAngles() async throws {
+        let value = VisionFaceObservationValues(
+            x: 0.2,
+            y: 0.25,
+            width: 0.4,
+            height: 0.5,
+            confidence: 0.75,
+            yawRadians: 0.25,
+            rollRadians: -0.5
+        )
+        let detector = VisionFaceDetector(
+            provider: StaticVisionProvider(values: [value])
+        )
+
+        let face = try #require(
+            try await detector.detect(frame: makeFrame()).first
+        )
+
+        #expect(face.pose?.yawRadians == 0.25)
+        #expect(face.pose?.rollRadians == -0.5)
+    }
+
+    @Test("preserves nil when Vision did not calculate one pose angle")
+    func preservesMissingPoseAngle() async throws {
+        let value = VisionFaceObservationValues(
+            x: 0.2,
+            y: 0.25,
+            width: 0.4,
+            height: 0.5,
+            confidence: 0.75,
+            yawRadians: nil,
+            rollRadians: 0.5
+        )
+        let detector = VisionFaceDetector(
+            provider: StaticVisionProvider(values: [value])
+        )
+
+        let face = try #require(
+            try await detector.detect(frame: makeFrame()).first
+        )
+
+        #expect(face.pose?.yawRadians == nil)
+        #expect(face.pose?.rollRadians == 0.5)
+    }
+
+    @Test("rejects non-finite raw pose values without partial output")
+    func rejectsNonFinitePoseValues() async throws {
+        let malformedValues = [
+            VisionFaceObservationValues(
+                x: 0.2,
+                y: 0.25,
+                width: 0.4,
+                height: 0.5,
+                confidence: 0.75,
+                yawRadians: .nan,
+                rollRadians: nil
+            ),
+            VisionFaceObservationValues(
+                x: 0.2,
+                y: 0.25,
+                width: 0.4,
+                height: 0.5,
+                confidence: 0.75,
+                yawRadians: nil,
+                rollRadians: .infinity
+            )
+        ]
+
+        for malformed in malformedValues {
+            let detector = VisionFaceDetector(
+                provider: StaticVisionProvider(values: [malformed])
+            )
+
+            await #expect(throws: VisionFaceDetectorError.failed) {
+                _ = try await detector.detect(frame: makeFrame())
+            }
+        }
     }
 
     @Test("preserves multiple observation order and confidence boundaries")

@@ -1048,12 +1048,17 @@ frame; the gallery is queried only by the existing three-observation identity
 decision after an arrival.
 
 For a known member with a validated spoken label, the local UI still exposes
-`<名稱>，歡迎回來～`, while Realtime instructions require the first spoken
-sentence to start with `<名稱>，歡迎回來`. Lumi may then choose exactly one of
-`漂亮姊姊`, `寶貝`, or `公主殿下` and add one short positive sentence. It must
-not stack the nicknames or use them to infer age or private data. An unknown
-visitor begins with `漂亮姊姊，我好像還不認識妳` before the existing disclosure,
-spoken consent, three-sample enrollment, and naming flow.
+`<名稱>，歡迎回來～`. Realtime instructions identify that voluntarily provided
+label as optional address data: Lumi may use it naturally and sparingly, but it
+does not require a fixed opening sentence or add another intimate title. If no
+validated label exists, the voice context uses a generic welcome-back greeting.
+An unknown visitor uses a natural generic greeting before the existing
+disclosure, spoken consent, three-sample enrollment, and naming flow. Across
+these contexts, the default is 1–2 short Taiwan Mandarin sentences without a
+rigid character ceiling; Lumi responds to the latest utterance or situation
+before offering encouragement and avoids repeating an opening or address. This
+is prompt guidance rather than a deterministic output guarantee, so the
+natural conversation examples remain pending physical Debug-Live acceptance.
 
 The ready Avatar also embeds Apple's native
 [`MPVolumeView`](https://developer.apple.com/documentation/mediaplayer/mpvolumeview)
