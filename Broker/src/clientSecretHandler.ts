@@ -89,7 +89,8 @@ function canonicalDeviceToken(value: string | null): string | undefined {
   return value;
 }
 
-function parseAuthorizationHeader(value: string | null): string | undefined {
+/** Shared with `usageHandler.ts` so both routes parse and canonicalize the same way. */
+export function parseAuthorizationHeader(value: string | null): string | undefined {
   if (value === null || !AUTHORIZATION_VALUE.test(value)) {
     return undefined;
   }
@@ -97,7 +98,8 @@ function parseAuthorizationHeader(value: string | null): string | undefined {
   return canonicalDeviceToken(value.slice("Bearer ".length));
 }
 
-function digestDeviceToken(token: string): string {
+/** Shared with `usageHandler.ts` so both routes hash device tokens identically. */
+export function digestDeviceToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
