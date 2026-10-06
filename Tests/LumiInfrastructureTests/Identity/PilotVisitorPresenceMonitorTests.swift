@@ -26,7 +26,7 @@ struct PilotVisitorPresenceMonitorTests {
         #expect(await source.stopCount == 1)
     }
 
-    @Test("departure requires ten continuous seconds without a usable face")
+    @Test("departure requires three continuous seconds without a usable face")
     func waitsForContinuousAbsence() async throws {
         let source = PresenceEvidenceSource(results: [
             false,
@@ -36,13 +36,13 @@ struct PilotVisitorPresenceMonitorTests {
         ])
         let clock = SequencePresenceClock(values: [
             .seconds(0),
-            .seconds(4),
+            .seconds(1),
+            .seconds(2),
             .seconds(5),
-            .seconds(15),
         ])
         let monitor = PilotVisitorPresenceMonitor(
             source: source,
-            departureAbsenceDuration: .seconds(10),
+            departureAbsenceDuration: .seconds(3),
             clock: clock
         )
 

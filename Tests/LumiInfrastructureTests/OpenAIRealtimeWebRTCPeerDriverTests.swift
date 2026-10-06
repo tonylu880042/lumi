@@ -5,7 +5,7 @@ import Testing
 
 @Suite("OpenAI Realtime WebRTC peer driver")
 struct OpenAIRealtimeWebRTCPeerDriverTests {
-    @Test("legacy remote audio tracks use the approved 2x gain")
+    @Test("legacy remote audio tracks gain activates only after media promotion")
     @MainActor
     func legacyRemoteAudioUsesApprovedGain() async throws {
         let factory = RTCPeerConnectionFactory()
@@ -23,13 +23,17 @@ struct OpenAIRealtimeWebRTCPeerDriverTests {
         let driver = OpenAIRealtimeWebRTCPeerDriver(factory: factory)
 
         driver.configureRemoteAudio(in: stream)
+        #expect(!track.isEnabled)
+        #expect(track.source.volume == 0)
 
+        try await driver.prepare(mediaEnabled: true)
+        driver.configureRemoteAudio(in: stream)
         #expect(track.isEnabled)
         #expect(track.source.volume == 2.0)
         await driver.close()
     }
 
-    @Test("Unified Plan receiver audio tracks use the approved 2x gain")
+    @Test("Unified Plan receiver audio tracks gain activates only after media promotion")
     @MainActor
     func unifiedPlanRemoteAudioUsesApprovedGain() async throws {
         let factory = RTCPeerConnectionFactory()
@@ -46,9 +50,27 @@ struct OpenAIRealtimeWebRTCPeerDriverTests {
         let driver = OpenAIRealtimeWebRTCPeerDriver(factory: factory)
 
         driver.configureRemoteAudioTrack(receiverTrack)
+        #expect(!track.isEnabled)
+        #expect(track.source.volume == 0)
 
+        try await driver.prepare(mediaEnabled: true)
+        driver.configureRemoteAudioTrack(receiverTrack)
         #expect(track.isEnabled)
         #expect(track.source.volume == 2.0)
+        await driver.close()
+    }
+
+    @Test("standby preparation disables the local track before offer creation")
+    @MainActor
+    func standbyPreparationDisablesLocalTrackBeforeOffer() async throws {
+        let driver = OpenAIRealtimeWebRTCPeerDriver()
+
+        try await driver.prepare(mediaEnabled: false)
+        let offer = try await driver.createLocalOffer()
+
+        #expect(offer.contains("m=audio"))
+        #expect(!driver.localMicrophoneTrackEnabled)
+
         await driver.close()
     }
 

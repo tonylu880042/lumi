@@ -65,7 +65,7 @@ public actor PilotVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
 
     public init(
         source: any PilotVisitorPresenceEvidenceSource,
-        departureAbsenceDuration: Duration
+        departureAbsenceDuration: Duration = .seconds(3)
     ) {
         self.source = source
         self.departureAbsenceDuration = departureAbsenceDuration

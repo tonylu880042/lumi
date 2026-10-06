@@ -40,7 +40,7 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await recorder.events == [
             .assistantOutputStarted,
             .assistantInterrupted,
-            .assistantOutputEnded,
+            .assistantOutputCleared,
             .userSpeechStarted,
             .userSpeechEnded,
             .responseReady,
@@ -49,6 +49,626 @@ struct OpenAIRealtimeAdapterTests {
 
         await adapter.stop()
         await observer.value
+    }
+
+    @Test("memory capability survives the transport existential boundary")
+    func memoryCapabilityIsForwardedToInitialConnection() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("memory-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesMemberMemoryTool: true
+        )
+
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .general,
+                memberAddress: nil,
+                memoryContext: VoiceMemberMemoryContext(highlight: .frequentMeeting)
+            )
+        }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        #expect(await transport.connectionMemberMemoryToolFlags == [true])
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await adapter.stop()
+    }
+
+    @Test("reconnect preserves session-only exercise disclosure without replaying opener")
+    func reconnectPreservesSessionOnlyExerciseDisclosureWithoutReplayingOpener() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+        let beforeMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 20,
+                hour: 23,
+                minute: 59
+            )
+        )!
+        let afterMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 21,
+                hour: 0,
+                minute: 1
+            )
+        )!
+
+        for disclosure in [MemberExerciseDisclosure.preparing, .justCompleted] {
+            let clock = TestClock(beforeMidnight)
+            let source = TestClientSecretSource(secrets: [
+                try makeSecret("memory-session-first"),
+                try makeSecret("memory-session-reconnect"),
+            ])
+            let firstTransport = TestRealtimeTransport()
+            let secondTransport = TestRealtimeTransport()
+            let adapter = makeAdapter(
+                source: source,
+                factory: TestRealtimeTransportFactory(
+                    transports: [firstTransport, secondTransport]
+                ),
+                enablesMemberMemoryTool: true,
+                now: clock.now
+            )
+            let recorder = EventRecorder()
+            let observer = await observe(adapter: adapter, recorder: recorder)
+            var toolIterator = (await adapter.toolCallUpdates()).makeAsyncIterator()
+
+            let start = Task {
+                try await adapter.start(
+                    context: .returningMember,
+                    direction: .general,
+                    memberAddress: nil,
+                    memoryContext: VoiceMemberMemoryContext(
+                        highlight: .frequentMeeting
+                    )
+                )
+            }
+            #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+            #expect(await firstTransport.connectionMemberMemoryToolFlags == [true])
+            await firstTransport.emit(.sessionCreated)
+            try await start.value
+
+            // Complete the contextual opener once. Reconnect must not create a
+            // second greeting boundary after the session-only update.
+            await firstTransport.emit(.outputAudioStarted)
+            await firstTransport.emit(.outputAudioStopped)
+            #expect(await waitUntil { await recorder.count == 3 })
+            #expect(await recorder.events == [
+                .assistantOutputStarted,
+                .assistantOutputEnded,
+                .greetingCompleted,
+            ])
+
+            await adapter.updateMemberMemoryContext(
+                VoiceMemberMemoryContext(
+                    highlight: .frequentMeeting,
+                    currentExerciseDisclosure: disclosure
+                )
+            )
+            let firstSessionUpdate = try #require(
+                await firstTransport.sentData.first.flatMap {
+                    String(data: $0, encoding: .utf8)
+                }
+            )
+            #expect(firstSessionUpdate.contains("record_member_exercise_disclosure"))
+            #expect(firstSessionUpdate.contains(
+                disclosure == .preparing ? "目前準備運動" : "剛完成運動"
+            ))
+
+            clock.set(afterMidnight)
+            await firstTransport.finishUnexpectedly()
+            #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+            #expect(await secondTransport.connectionPurposes == [.reconnect])
+            #expect(await secondTransport.connectionMemberMemoryToolFlags == [true])
+            #expect(await secondTransport.sentData.isEmpty)
+
+            let configurations = await source.receivedConfigurations
+            #expect(configurations.count == 2)
+            let reconnectedConfiguration = try #require(configurations.last)
+            #expect(reconnectedConfiguration.usesExternalGreeting == false)
+            #expect(reconnectedConfiguration.instructions.contains(
+                disclosure == .preparing ? "目前準備運動" : "剛完成運動"
+            ))
+            #expect(reconnectedConfiguration.instructions.contains("最近幾個門店日常見到"))
+
+            await secondTransport.emit(.sessionCreated)
+            await secondTransport.emit(.outputAudioStarted)
+            await secondTransport.emit(.outputAudioStopped)
+            #expect(await waitUntil { await recorder.count == 5 })
+            #expect(await recorder.events.dropFirst(3) == [
+                .assistantOutputStarted,
+                .assistantOutputEnded,
+            ])
+
+            let call = VoiceToolCall(
+                callID: "reconnect-memory-tool",
+                kind: .recordExerciseDisclosure(disclosure)
+            )
+            await secondTransport.emit(.toolCall(call))
+            #expect(await toolIterator.next() == call)
+
+            await adapter.stop()
+            await observer.value
+        }
+    }
+
+    @Test("reconnect filters completed-today disclosure after the Taipei day boundary")
+    func reconnectFiltersExpiredCompletedTodayDisclosure() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+        let beforeMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 20,
+                hour: 23,
+                minute: 59
+            )
+        )!
+        let midnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 21,
+                hour: 0
+            )
+        )!
+        let afterMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 21,
+                hour: 0,
+                minute: 1
+            )
+        )!
+
+        for reconnectDate in [beforeMidnight, afterMidnight] {
+            let clock = TestClock(beforeMidnight)
+            let source = TestClientSecretSource(secrets: [
+                try makeSecret("completed-today-first"),
+                try makeSecret("completed-today-reconnect"),
+            ])
+            let firstTransport = TestRealtimeTransport()
+            let secondTransport = TestRealtimeTransport()
+            let adapter = makeAdapter(
+                source: source,
+                factory: TestRealtimeTransportFactory(
+                    transports: [firstTransport, secondTransport]
+                ),
+                enablesMemberMemoryTool: true,
+                now: clock.now
+            )
+            let memoryContext = VoiceMemberMemoryContext(
+                highlight: .frequentMeeting,
+                currentExerciseDisclosure: .completedToday,
+                currentExerciseDisclosureRecordedAt: beforeMidnight
+            )
+
+            let start = Task {
+                try await adapter.start(
+                    context: .returningMember,
+                    direction: .general,
+                    memberAddress: nil,
+                    memoryContext: memoryContext
+                )
+            }
+            #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+            await firstTransport.emit(.sessionCreated)
+            try await start.value
+
+            clock.set(reconnectDate)
+            await firstTransport.finishUnexpectedly()
+            #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+
+            let configurations = await source.receivedConfigurations
+            #expect(configurations.count == 2)
+            let reconnectInstructions = try #require(configurations.last?.instructions)
+            let containsCompletedToday = reconnectInstructions.contains(
+                "會員曾明確告知今天已完成運動"
+            )
+            #expect(containsCompletedToday == (reconnectDate < midnight))
+            #expect(reconnectInstructions.contains("最近幾個門店日常見到"))
+            #expect(reconnectInstructions.contains("record_member_exercise_disclosure"))
+            #expect(reconnectInstructions.contains("2026") == false)
+
+            await adapter.stop()
+        }
+    }
+
+    @Test("completed-today context fails closed without a valid recorded timestamp")
+    func completedTodayContextFailsClosedWithoutRecordedTimestamp() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+        let beforeMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 20,
+                hour: 23,
+                minute: 59
+            )
+        )!
+        let contextWithoutRecordedAt = VoiceMemberMemoryContext(
+            highlight: .frequentMeeting,
+            currentExerciseDisclosure: .completedToday
+        )
+        #expect(
+            contextWithoutRecordedAt
+                .effective(at: beforeMidnight)
+                .currentExerciseDisclosure == nil
+        )
+
+        let context = VoiceMemberMemoryContext(
+            highlight: .frequentMeeting,
+            currentExerciseDisclosure: .completedToday,
+            currentExerciseDisclosureRecordedAt: beforeMidnight
+        )
+        #expect(
+            context
+                .effective(at: beforeMidnight.addingTimeInterval(-60))
+                .currentExerciseDisclosure == nil
+        )
+    }
+
+    @Test("standby promotion retry refreshes an expired completed-today disclosure")
+    func standbyPromotionRetryFiltersExpiredCompletedTodayDisclosure() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+        let beforeMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 20,
+                hour: 23,
+                minute: 59
+            )
+        )!
+        let afterMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 21,
+                hour: 0,
+                minute: 1
+            )
+        )!
+        let clock = TestClock(beforeMidnight)
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("standby-completed-today"),
+            try makeSecret("standby-reconnect"),
+        ])
+        let firstTransport = TestRealtimeTransport()
+        let reconnectTransport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(
+                transports: [firstTransport, reconnectTransport]
+            ),
+            enablesMemberMemoryTool: true,
+            now: clock.now
+        )
+        let memoryContext = VoiceMemberMemoryContext(
+            highlight: .frequentMeeting,
+            currentExerciseDisclosure: .completedToday,
+            currentExerciseDisclosureRecordedAt: beforeMidnight
+        )
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.emit(.sessionCreated)
+
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .general,
+                memberAddress: nil,
+                memoryContext: memoryContext
+            )
+        }
+        try await start.value
+        let promotedConfiguration = try #require(
+            await firstTransport.activationConfigurations.first
+        )
+        #expect(promotedConfiguration.instructions.contains(
+            "會員曾明確告知今天已完成運動"
+        ))
+
+        clock.set(afterMidnight)
+        await firstTransport.finishUnexpectedly()
+        #expect(await waitUntil { await reconnectTransport.connectCallCount == 1 })
+        #expect(await reconnectTransport.connectionPurposes == [.reconnect])
+
+        let configurations = await source.receivedConfigurations
+        #expect(configurations.count == 2)
+        let reconnectInstructions = try #require(configurations.last?.instructions)
+        #expect(reconnectInstructions.contains("會員曾明確告知今天已完成運動") == false)
+        #expect(reconnectInstructions.contains("最近幾個門店日常見到"))
+
+        await adapter.stop()
+    }
+
+    @Test("an active session drops completed-today context on the first event after midnight")
+    func activeSessionRefreshesExpiredCompletedTodayDisclosure() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+        let beforeMidnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 20,
+                hour: 23,
+                minute: 59
+            )
+        )!
+        let midnight = calendar.date(
+            from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: 2026,
+                month: 9,
+                day: 21
+            )
+        )!
+        let clock = TestClock(midnight.addingTimeInterval(60))
+        let source = TestClientSecretSource(
+            secrets: [try makeSecret("active-completed-today")]
+        )
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesMemberMemoryTool: true,
+            now: clock.now
+        )
+        let memoryContext = VoiceMemberMemoryContext(
+            highlight: .frequentMeeting,
+            currentExerciseDisclosure: .completedToday,
+            currentExerciseDisclosureRecordedAt: beforeMidnight
+        )
+
+        // Start on the prior store day, then advance before the next member
+        // event while keeping the same provider connection alive.
+        clock.set(beforeMidnight)
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .general,
+                memberAddress: nil,
+                memoryContext: memoryContext
+            )
+        }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        clock.set(midnight.addingTimeInterval(60))
+        await transport.emit(.inputAudioSpeechStarted)
+        #expect(await waitUntil { await adapter.processedProviderEventCount == 2 })
+        #expect(await waitUntil { await transport.sentData.count == 1 })
+
+        let update = try #require(
+            await transport.sentData.first.flatMap {
+                String(data: $0, encoding: .utf8)
+            }
+        )
+        #expect(update.contains("會員曾明確告知今天已完成運動") == false)
+        #expect(update.contains("最近幾個門店日常見到"))
+        #expect(update.contains("2026") == false)
+
+        await adapter.stop()
+    }
+
+    @Test("a generated memory opener completes once before later assistant turns")
+    func generatedMemoryGreetingHasACompletionBoundary() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("memory-opener-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesMemberMemoryTool: true
+        )
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .general,
+                memberAddress: nil,
+                memoryContext: VoiceMemberMemoryContext(highlight: .frequentMeeting)
+            )
+        }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        await transport.emit(.outputAudioStarted)
+        await transport.emit(.outputAudioStopped)
+        #expect(await waitUntil { await recorder.count == 3 })
+        #expect(await recorder.events == [
+            .assistantOutputStarted,
+            .assistantOutputEnded,
+            .greetingCompleted,
+        ])
+
+        await transport.emit(.inputAudioSpeechStarted)
+        await transport.emit(.inputAudioSpeechStopped)
+        await transport.emit(.outputAudioStarted)
+        await transport.emit(.outputAudioStopped)
+        #expect(await waitUntil { await recorder.count == 8 })
+        #expect(await recorder.events.dropFirst(3) == [
+            .userSpeechStarted,
+            .userSpeechEnded,
+            .responseReady,
+            .assistantOutputStarted,
+            .assistantOutputEnded,
+        ])
+
+        await adapter.stop()
+        await observer.value
+    }
+
+    @Test("cleared generated opener cannot complete from a later output")
+    func clearedGeneratedGreetingDoesNotCount() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("memory-clear-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesMemberMemoryTool: true
+        )
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .general,
+                memberAddress: nil,
+                memoryContext: VoiceMemberMemoryContext(highlight: .frequentMeeting)
+            )
+        }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await transport.emit(.outputAudioStarted)
+        await transport.emit(.outputAudioCleared)
+        #expect(await waitUntil { await recorder.count == 2 })
+        #expect(await recorder.events == [
+            .assistantOutputStarted,
+            .assistantOutputCleared,
+        ])
+
+        await transport.emit(.outputAudioStarted)
+        await transport.emit(.outputAudioStopped)
+        await Task.yield()
+        #expect(await recorder.events.contains(.greetingCompleted) == false)
+        await adapter.stop()
+        await observer.value
+    }
+
+    @Test("failed generated opener cannot complete from a later output")
+    func failedGeneratedGreetingDoesNotCount() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("memory-failure-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport]),
+            enablesMemberMemoryTool: true
+        )
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .general,
+                memberAddress: nil,
+                memoryContext: VoiceMemberMemoryContext(highlight: .frequentMeeting)
+            )
+        }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+        await transport.emit(.responseFailed)
+        #expect(await waitUntil { await recorder.events == [.failure] })
+        await transport.emit(.outputAudioStarted)
+        await transport.emit(.outputAudioStopped)
+        await Task.yield()
+        #expect(await recorder.events.contains(.greetingCompleted) == false)
+        await adapter.stop()
+        await observer.value
+    }
+
+    @Test("usage reports are forwarded to the injected reporter with sequential turns")
+    func usageReportsForwardWithSequentialTurns() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("usage-secret")])
+        let transport = TestRealtimeTransport()
+        let factory = TestRealtimeTransportFactory(transports: [transport])
+        let reporter = TestUsageReporter()
+        let adapter = makeAdapter(source: source, factory: factory, usageReporter: reporter)
+
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        let firstUsage = OpenAIRealtimeResponseUsage(
+            inputTokens: 10,
+            outputTokens: 20,
+            totalTokens: 30,
+            cachedInputTokens: 1,
+            inputTextTokens: 2,
+            inputAudioTokens: 3,
+            outputTextTokens: 4,
+            outputAudioTokens: 5
+        )
+        let secondUsage = OpenAIRealtimeResponseUsage(
+            inputTokens: 11,
+            outputTokens: 21,
+            totalTokens: 32,
+            cachedInputTokens: 0,
+            inputTextTokens: 0,
+            inputAudioTokens: 0,
+            outputTextTokens: 0,
+            outputAudioTokens: 0
+        )
+        await transport.emitUsage(firstUsage)
+        await transport.emitUsage(secondUsage)
+
+        #expect(await waitUntil { await reporter.reports.count == 2 })
+        // Reports run on independent background tasks. Completion order is
+        // unspecified; the assigned turn must remain bound to its usage.
+        let reports = await reporter.reports.sorted { $0.turn < $1.turn }
+        #expect(reports[0].usage == firstUsage)
+        #expect(reports[0].turn == 1)
+        #expect(reports[1].usage == secondUsage)
+        #expect(reports[1].turn == 2)
+
+        await adapter.stop()
+    }
+
+    @Test("a nil usage reporter never affects normal session behavior")
+    func nilUsageReporterIsInert() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("no-usage-secret")])
+        let transport = TestRealtimeTransport()
+        let factory = TestRealtimeTransportFactory(transports: [transport])
+        let adapter = makeAdapter(source: source, factory: factory)
+
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        await transport.emitUsage(
+            OpenAIRealtimeResponseUsage(
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+                cachedInputTokens: 0,
+                inputTextTokens: 0,
+                inputAudioTokens: 0,
+                outputTextTokens: 0,
+                outputAudioTokens: 0
+            )
+        )
+
+        await adapter.stop()
     }
 
     @Test("stop is idempotent and finishes subscribers without a failure")
@@ -129,6 +749,35 @@ struct OpenAIRealtimeAdapterTests {
         await adapter.stop()
     }
 
+    @Test("external greeting forwards the token cap and suppresses repeated opening text")
+    func externalGreetingConfigurationIsForwarded() async throws {
+        let source = TestClientSecretSource(secrets: [try makeSecret("external-greeting-secret")])
+        let transport = TestRealtimeTransport()
+        let adapter = OpenAIRealtimeAdapter(
+            configuration: OpenAIRealtimeConfiguration(
+                maxResponseOutputTokens: 321,
+                usesExternalGreeting: true
+            ),
+            clientSecretSource: source,
+            transportFactory: TestRealtimeTransportFactory(transports: [transport]),
+            recordedGreeting: ImmediateRecordedGreetingPlayer()
+        )
+
+        let start = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        try await start.value
+
+        let sessionConfiguration = try #require(
+            await source.receivedConfigurations.first
+        )
+        #expect(sessionConfiguration.maxResponseOutputTokens == 321)
+        #expect(sessionConfiguration.usesExternalGreeting)
+        #expect(sessionConfiguration.instructions.contains("預錄迎賓"))
+
+        await adapter.stop()
+    }
+
     @Test("approved tony spoken label reaches instructions without fabricated exercise data")
     func approvedTonySpokenLabelIsAppliedWithoutExerciseData() async throws {
         let memberAddress = try VoiceMemberAddress(spokenLabel: "tony")
@@ -154,11 +803,16 @@ struct OpenAIRealtimeAdapterTests {
             await source.receivedConfigurations.first?.instructions
         )
         #expect(instructions.contains("tony"))
-        #expect(instructions.contains("第一個句子必須以「很開心再見到你tony漂亮姊姊」開頭"))
-        #expect(instructions.contains("漂亮姊姊"))
+        #expect(instructions.contains("自願提供且已確認"))
+        #expect(instructions.contains("先接住會員最新說的內容"))
+        #expect(instructions.contains("不要創造其他稱呼"))
+        #expect(instructions.contains("漂亮姊姊") == false)
+        #expect(instructions.contains("寶貝") == false)
+        #expect(instructions.contains("公主殿下") == false)
+        #expect(instructions.contains("35字") == false)
         #expect(instructions.contains("開場問候階段"))
-        #expect(instructions.contains("工具查詢階段"))
-        #expect(instructions.contains("數據回報階段"))
+        #expect(instructions.contains("工具查詢階段") == false)
+        #expect(instructions.contains("數據回報階段") == false)
         for marker in [
             "visits_this_week",
             "activity_met_minutes",
@@ -642,7 +1296,11 @@ struct OpenAIRealtimeAdapterTests {
         let instructions = try #require(
             await source.receivedConfigurations.first?.instructions
         )
-        #expect(instructions.contains("漂亮姊姊，我好像還不認識妳"))
+        #expect(instructions.contains("自然、一般的問候"))
+        #expect(instructions.contains("漂亮姊姊") == false)
+        #expect(instructions.contains("寶貝") == false)
+        #expect(instructions.contains("公主殿下") == false)
+        #expect(instructions.contains("35字") == false)
         #expect(instructions.contains("我可以跟你認識嗎？"))
         await transport.emit(.toolCall(call))
 
@@ -1002,6 +1660,176 @@ struct OpenAIRealtimeAdapterTests {
         #expect(await transport.closeCallCount == 1)
     }
 
+    @Test("ready standby promotion marks start as in progress during activation")
+    func readyStandbyPromotionRejectsConcurrentStart() async throws {
+        let transport = TestRealtimeTransport(blockSendOn: 1)
+        let source = TestClientSecretSource(secrets: [try makeSecret("promotion-secret")])
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport])
+        )
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+
+        let firstStart = Task { try await adapter.start(context: .visitor) }
+        await transport.waitUntilSendStarted()
+
+        await #expect(throws: OpenAIRealtimeAdapterError.startInProgress) {
+            try await adapter.start(context: .returningMember)
+        }
+
+        firstStart.cancel()
+        await transport.releaseSend()
+        await #expect(throws: CancellationError.self) {
+            try await firstStart.value
+        }
+        await adapter.stop()
+    }
+
+    @Test("stopping pending standby promotion cannot corrupt the next generation")
+    func stoppingPendingStandbyPromotionLeavesNextStartUsable() async throws {
+        let firstTransport = TestRealtimeTransport(blockSendOn: 1, blockClose: true)
+        let secondTransport = TestRealtimeTransport()
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("standby-secret"),
+            try makeSecret("retry-secret"),
+        ])
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(
+                transports: [firstTransport, secondTransport]
+            )
+        )
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+
+        let firstStart = Task { try await adapter.start(context: .visitor) }
+        await firstTransport.emit(.sessionCreated)
+        await firstTransport.waitUntilSendStarted()
+
+        let stopping = Task { await adapter.stop() }
+        #expect(await waitUntil { await firstTransport.closeStarted })
+
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+        let secondStart = Task { try await adapter.start(context: .returningMember) }
+        #expect(await waitUntil { await secondTransport.connectCallCount == 1 })
+        await secondTransport.emit(.sessionCreated)
+        try await secondStart.value
+
+        await firstTransport.releaseClose()
+        await stopping.value
+        await #expect(throws: CancellationError.self) {
+            try await firstStart.value
+        }
+
+        #expect(await secondTransport.closeCallCount == 0)
+        await secondTransport.emit(.inputAudioSpeechStarted)
+        #expect(await waitUntil { await recorder.events == [.userSpeechStarted] })
+        await adapter.stop()
+        await observer.value
+    }
+
+    @Test("promotion preserves output events received while activation is awaiting")
+    func promotionPreservesEventsDuringActivation() async throws {
+        let transport = TestRealtimeTransport(blockSendOn: 1)
+        let source = TestClientSecretSource(secrets: [try makeSecret("event-secret")])
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [transport])
+        )
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await transport.connectCallCount == 1 })
+        await transport.emit(.sessionCreated)
+        #expect(await waitUntil { await adapter.processedProviderEventCount == 1 })
+
+        let start = Task { try await adapter.start(context: .visitor) }
+        await transport.waitUntilSendStarted()
+        await transport.emit(.outputAudioStarted)
+        await transport.emit(.outputAudioCleared)
+        #expect(await waitUntil { await adapter.processedProviderEventCount == 3 })
+        #expect(await recorder.events.isEmpty)
+
+        await transport.releaseSend()
+        try await start.value
+        #expect(await waitUntil { await recorder.events.count == 2 })
+        #expect(await recorder.events == [.assistantOutputStarted, .assistantOutputCleared])
+
+        await adapter.stop()
+        await observer.value
+    }
+
+    @Test("promoted standby reconnects once with active context and tools")
+    func promotedStandbyReconnectsWithActiveConfiguration() async throws {
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("standby-secret"),
+            try makeSecret("reconnect-secret"),
+            try makeSecret("unused-secret"),
+        ])
+        let firstTransport = TestRealtimeTransport()
+        let reconnectTransport = TestRealtimeTransport()
+        let unusedTransport = TestRealtimeTransport()
+        let factory = TestRealtimeTransportFactory(
+            transports: [firstTransport, reconnectTransport, unusedTransport]
+        )
+        let adapter = makeAdapter(
+            source: source,
+            factory: factory,
+            enablesWeeklySummaryTool: true
+        )
+        let recorder = EventRecorder()
+        let observer = await observe(adapter: adapter, recorder: recorder)
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await firstTransport.connectCallCount == 1 })
+        await firstTransport.emit(.sessionCreated)
+
+        let start = Task {
+            try await adapter.start(
+                context: .returningMember,
+                direction: .postWorkoutReview
+            )
+        }
+        try await start.value
+        #expect(await firstTransport.activationCallCount == 1)
+        #expect(await firstTransport.activationToolFlags == [true])
+        #expect(await firstTransport.sentData.count == 2)
+
+        await firstTransport.finishUnexpectedly()
+        let reconnected = await waitUntil {
+            await reconnectTransport.connectCallCount == 1
+        }
+        #expect(reconnected)
+        if !reconnected {
+            await adapter.stop()
+            await observer.value
+            return
+        }
+
+        #expect(await reconnectTransport.connectionPurposes == [.reconnect])
+        #expect(await reconnectTransport.connectionToolFlags == [true])
+        #expect(await reconnectTransport.sentData.isEmpty)
+        let configurations = await source.receivedConfigurations
+        #expect(configurations.count == 2)
+        #expect(
+            configurations[1].instructions.contains(
+                OpenAIConversationPrompts.postWorkoutReview
+            )
+        )
+
+        await reconnectTransport.emit(.sessionCreated)
+        await reconnectTransport.finishUnexpectedly()
+        #expect(await waitUntil { await recorder.events == [.failure] })
+        #expect(await unusedTransport.connectCallCount == 0)
+        await observer.value
+    }
+
     @Test("stop cleanly closes a standby prewarmed transport")
     func stopClosesStandbyTransport() async throws {
         let transport = TestRealtimeTransport()
@@ -1017,10 +1845,95 @@ struct OpenAIRealtimeAdapterTests {
         await adapter.stop()
         #expect(await transport.closeCallCount == 1)
     }
+
+    @Test("failed standby prewarm clears its worker so a later start can retry")
+    func failedStandbyPrewarmIsRetryable() async throws {
+        let failedTransport = TestRealtimeTransport(
+            connectError: TestTransportError.connectFailed
+        )
+        let retryTransport = TestRealtimeTransport()
+        let source = TestClientSecretSource(secrets: [
+            try makeSecret("standby-secret"),
+            try makeSecret("retry-secret"),
+        ])
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(
+                transports: [failedTransport, retryTransport]
+            )
+        )
+
+        await adapter.prewarm()
+        #expect(await waitUntil { await failedTransport.closeCallCount == 1 })
+
+        let start = Task { try await adapter.start(context: .visitor) }
+        let retried = await waitUntil { await retryTransport.connectCallCount == 1 }
+        #expect(retried)
+        if retried {
+            await retryTransport.emit(.sessionCreated)
+            try await start.value
+            #expect(await source.callCount == 2)
+            await adapter.stop()
+        } else {
+            start.cancel()
+            _ = await start.result
+        }
+    }
+
+    @Test("standby credential failure settles a joining start and allows retry")
+    func failedStandbyCredentialSourceIsRetryable() async throws {
+        let retryTransport = TestRealtimeTransport()
+        let source = TestClientSecretSource(outcomes: [
+            .failure(TestTransportError.exhaustedCredentials),
+            .secret(try makeSecret("retry-secret")),
+        ], suspendsFirstRequest: true)
+        let adapter = makeAdapter(
+            source: source,
+            factory: TestRealtimeTransportFactory(transports: [retryTransport])
+        )
+
+        await adapter.prewarm()
+        // Keep the credential failure pending until a start has actually joined
+        // standby. Of two concurrent starts, one must report startInProgress;
+        // that response proves the other has registered its readiness waiter.
+        await withTaskGroup(of: Result<Void, any Error>.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    do {
+                        try await adapter.start(context: .visitor)
+                        return .success(())
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+            if case .failure(let error) = await group.next() {
+                #expect(error as? OpenAIRealtimeAdapterError == .startInProgress)
+            } else {
+                Issue.record("A concurrent start must reject the overlap")
+            }
+            await source.resumeFirstRequest()
+            if case .failure(let error) = await group.next() {
+                #expect(error as? TestTransportError == .exhaustedCredentials)
+            } else {
+                Issue.record("The joining start must receive the credential failure")
+            }
+        }
+
+        let retry = Task { try await adapter.start(context: .visitor) }
+        #expect(await waitUntil { await retryTransport.connectCallCount == 1 })
+        await retryTransport.emit(.sessionCreated)
+        try await retry.value
+        #expect(await source.callCount == 2)
+        await adapter.stop()
+    }
 }
 
 private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
     private var outcomes: [TestClientSecretOutcome]
+    private var suspendsFirstRequest = false
+    private var firstRequestContinuation: CheckedContinuation<Void, Never>?
+    private var firstRequestReleased = false
     private(set) var callCount = 0
     private(set) var receivedConfigurations: [OpenAIRealtimeConfiguration] = []
 
@@ -1028,8 +1941,15 @@ private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
         self.outcomes = secrets.map(TestClientSecretOutcome.secret)
     }
 
-    init(outcomes: [TestClientSecretOutcome]) {
+    init(outcomes: [TestClientSecretOutcome], suspendsFirstRequest: Bool = false) {
         self.outcomes = outcomes
+        self.suspendsFirstRequest = suspendsFirstRequest
+    }
+
+    func resumeFirstRequest() {
+        firstRequestReleased = true
+        firstRequestContinuation?.resume()
+        firstRequestContinuation = nil
     }
 
     func clientSecret(
@@ -1037,12 +1957,17 @@ private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
     ) async throws -> OpenAIRealtimeClientSecret {
         callCount += 1
         receivedConfigurations.append(configuration)
+        if callCount == 1, suspendsFirstRequest, !firstRequestReleased {
+            await withCheckedContinuation { firstRequestContinuation = $0 }
+        }
         guard !outcomes.isEmpty else { throw TestTransportError.exhaustedCredentials }
         switch outcomes.removeFirst() {
         case .secret(let secret):
             return secret
         case .authorizationRequired:
             throw VoiceSessionAuthorizationError.authorizationRequired
+        case .failure(let error):
+            throw error
         }
     }
 }
@@ -1050,6 +1975,7 @@ private actor TestClientSecretSource: OpenAIRealtimeClientSecretSource {
 private enum TestClientSecretOutcome: Sendable {
     case secret(OpenAIRealtimeClientSecret)
     case authorizationRequired
+    case failure(TestTransportError)
 }
 
 private actor TestRealtimeTransportFactory: OpenAIRealtimeTransportFactory {
@@ -1076,11 +2002,22 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
     private(set) var connectionPurposes: [OpenAIRealtimeConnectionPurpose] = []
     private(set) var connectionToolFlags: [Bool] = []
     private(set) var connectionVisitorToolFlags: [Bool] = []
+    private(set) var connectionMemberMemoryToolFlags: [Bool] = []
     private(set) var closeCallCount = 0
     private(set) var sendCallCount = 0
+    private(set) var activationCallCount = 0
+    private(set) var activationConfigurations: [OpenAIRealtimeConfiguration] = []
+    private(set) var activationToolFlags: [Bool] = []
+    private(set) var activationVisitorToolFlags: [Bool] = []
+    private(set) var activationMemberMemoryToolFlags: [Bool] = []
     private(set) var sendStarted = false
+    private(set) var closeStarted = false
     private(set) var sentData: [Data] = []
+    private let blockClose: Bool
+    private var closeGateIsOpen = false
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var continuation: AsyncStream<OpenAIRealtimeProviderEvent>.Continuation?
+    private var usageContinuation: AsyncStream<OpenAIRealtimeResponseUsage>.Continuation?
     private var pendingSend: CheckedContinuation<Void, Never>?
     private var sendStartedWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -1088,12 +2025,14 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
         connectError: (any Error)? = nil,
         sendError: (any Error)? = nil,
         failSendOn: Int? = nil,
-        blockSendOn: Int? = nil
+        blockSendOn: Int? = nil,
+        blockClose: Bool = false
     ) {
         self.connectError = connectError
         self.sendError = sendError
         self.failSendOn = failSendOn ?? (sendError == nil ? nil : 1)
         self.blockSendOn = blockSendOn
+        self.blockClose = blockClose
     }
 
     func connect(
@@ -1122,6 +2061,22 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
         if let connectError { throw connectError }
     }
 
+    func connect(
+        clientSecret _: OpenAIRealtimeClientSecret,
+        configuration _: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool,
+        enablesMemberMemoryTool: Bool
+    ) async throws {
+        connectCallCount += 1
+        connectionPurposes.append(purpose)
+        connectionToolFlags.append(enablesWeeklySummaryTool)
+        connectionVisitorToolFlags.append(enablesVisitorEnrollmentTools)
+        connectionMemberMemoryToolFlags.append(enablesMemberMemoryTool)
+        if let connectError { throw connectError }
+    }
+
     func send(_ data: Data) async throws {
         sendCallCount += 1
         if blockSendOn == sendCallCount {
@@ -1137,6 +2092,41 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
         }
         if let sendError, failSendOn == sendCallCount { throw sendError }
         sentData.append(data)
+    }
+
+    func activate(
+        configuration: OpenAIRealtimeConfiguration,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
+    ) async throws {
+        try await activate(
+            configuration: configuration,
+            enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+            enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+            enablesMemberMemoryTool: false
+        )
+    }
+
+    func activate(
+        configuration: OpenAIRealtimeConfiguration,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool,
+        enablesMemberMemoryTool: Bool
+    ) async throws {
+        activationCallCount += 1
+        activationConfigurations.append(configuration)
+        activationToolFlags.append(enablesWeeklySummaryTool)
+        activationVisitorToolFlags.append(enablesVisitorEnrollmentTools)
+        activationMemberMemoryToolFlags.append(enablesMemberMemoryTool)
+        try await send(
+            OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+                enablesMemberMemoryTool: enablesMemberMemoryTool
+            )
+        )
+        try await send(OpenAIRealtimeWireEncoder.responseCreate())
     }
 
     func releaseSend() {
@@ -1160,9 +2150,39 @@ private actor TestRealtimeTransport: OpenAIRealtimeTransport {
         return pair.stream
     }
 
-    func close() {
+    func usageUpdates() -> AsyncStream<OpenAIRealtimeResponseUsage> {
+        let pair = AsyncStream<OpenAIRealtimeResponseUsage>.makeStream(
+            of: OpenAIRealtimeResponseUsage.self,
+            bufferingPolicy: .unbounded
+        )
+        usageContinuation = pair.continuation
+        return pair.stream
+    }
+
+    func emitUsage(_ usage: OpenAIRealtimeResponseUsage) {
+        usageContinuation?.yield(usage)
+    }
+
+    func close() async {
         closeCallCount += 1
         continuation?.finish()
+        usageContinuation?.finish()
+        pendingSend?.resume()
+        pendingSend = nil
+        guard blockClose, !closeGateIsOpen else { return }
+        closeStarted = true
+        await withCheckedContinuation { continuation in
+            closeWaiters.append(continuation)
+        }
+    }
+
+    func releaseClose() {
+        closeGateIsOpen = true
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     func emit(_ event: OpenAIRealtimeProviderEvent) {
@@ -1185,6 +2205,23 @@ private actor ExhaustedRealtimeTransport: OpenAIRealtimeTransport {
     }
 
     func send(_: Data) async throws {}
+
+    func activate(
+        configuration _: OpenAIRealtimeConfiguration,
+        enablesWeeklySummaryTool _: Bool,
+        enablesVisitorEnrollmentTools _: Bool
+    ) async throws {
+        throw TestTransportError.exhaustedTransports
+    }
+
+    func activate(
+        configuration _: OpenAIRealtimeConfiguration,
+        enablesWeeklySummaryTool _: Bool,
+        enablesVisitorEnrollmentTools _: Bool,
+        enablesMemberMemoryTool _: Bool
+    ) async throws {
+        throw TestTransportError.exhaustedTransports
+    }
 
     func eventUpdates() -> AsyncStream<OpenAIRealtimeProviderEvent> {
         AsyncStream { continuation in continuation.finish() }
@@ -1211,6 +2248,41 @@ private actor CompletionProbe {
     }
 }
 
+private actor TestUsageReporter: OpenAIRealtimeUsageReporting {
+    private(set) var reports: [(usage: OpenAIRealtimeResponseUsage, turn: Int)] = []
+
+    func report(_ usage: OpenAIRealtimeResponseUsage, turn: Int) async {
+        reports.append((usage, turn))
+    }
+}
+
+private final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ value: Date) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+}
+
+private actor ImmediateRecordedGreetingPlayer: RecordedGreetingPlayer {
+    func play(context _: VoiceContext) async throws {}
+
+    func stop() async {}
+}
+
 private enum TestTransportError: Error, Equatable, Sendable {
     case connectFailed
     case exhaustedCredentials
@@ -1222,14 +2294,20 @@ private func makeAdapter(
     source: TestClientSecretSource,
     factory: TestRealtimeTransportFactory,
     enablesWeeklySummaryTool: Bool = false,
-    enablesVisitorEnrollmentTools: Bool = false
+    enablesVisitorEnrollmentTools: Bool = false,
+    enablesMemberMemoryTool: Bool = false,
+    usageReporter: (any OpenAIRealtimeUsageReporting)? = nil,
+    now: @escaping @Sendable () -> Date = { Date() }
 ) -> OpenAIRealtimeAdapter {
     OpenAIRealtimeAdapter(
         configuration: OpenAIRealtimeConfiguration(),
         clientSecretSource: source,
         transportFactory: factory,
         enablesWeeklySummaryTool: enablesWeeklySummaryTool,
-        enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
+        enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+        enablesMemberMemoryTool: enablesMemberMemoryTool,
+        usageReporter: usageReporter,
+        now: now
     )
 }
 

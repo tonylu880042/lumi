@@ -408,8 +408,39 @@ struct OpenAIWebRTCTransportTests {
         ])
     }
 
-    @Test("standby session handshake sends update without greeting and enables immediate send")
-    func standbyHandshakeEnablesImmediateSend() async throws {
+    @Test("external greeting suppresses the initial provider response and keeps input disabled")
+    func externalGreetingSuppressesInitialResponseAndInput() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker",
+            usesExternalGreeting: true
+        )
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .initial
+        )
+        #expect(await peer.mediaEnabledHistory == [false])
+
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+        ])
+
+        try await transport.setConversationMediaEnabled(true)
+        #expect(await peer.mediaEnabledHistory == [false, true])
+        await transport.close()
+    }
+
+    @Test("standby handshake defers greeting until explicit activation")
+    func standbyHandshakeDefersGreetingUntilExplicitActivation() async throws {
         let configuration = OpenAIRealtimeConfiguration(
             model: "model-marker",
             voice: "voice-marker",
@@ -432,12 +463,156 @@ struct OpenAIWebRTCTransportTests {
             try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
         ])
 
-        let greeting = try OpenAIRealtimeWireEncoder.responseCreate()
-        try await transport.send(greeting)
+        try await transport.activate(
+            configuration: configuration,
+            enablesWeeklySummaryTool: false,
+            enablesVisitorEnrollmentTools: false
+        )
         #expect(await peer.sentData == [
             try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
-            greeting,
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+            try OpenAIRealtimeWireEncoder.responseCreate(),
         ])
+    }
+
+    @Test("external greeting keeps standby input disabled through activation and omits both responses")
+    func externalGreetingKeepsStandbyInputDisabledThroughActivation() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker",
+            usesExternalGreeting: true
+        )
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .standby
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+        try await transport.activate(
+            configuration: configuration,
+            enablesWeeklySummaryTool: false,
+            enablesVisitorEnrollmentTools: false
+        )
+
+        #expect(await peer.mediaEnabledHistory == [false])
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+        ])
+
+        try await transport.setConversationMediaEnabled(true)
+        #expect(await peer.mediaEnabledHistory == [false, true])
+        await transport.close()
+    }
+
+    @Test("standby does not request microphone or answer input before activation")
+    func standbyDoesNotRequestMicrophoneOrAnswerInputBeforeActivation() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker"
+        )
+        let permission = RecordingPermission()
+        let audio = RecordingAudioController()
+        let peer = RecordingPeerDriver()
+        let transport = makeTransport(
+            permission: permission,
+            audio: audio,
+            peer: peer
+        )
+        let updates = await transport.eventUpdates()
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .standby
+        )
+
+        #expect(await permission.callCount == 0)
+        #expect(await audio.activateCallCount == 0)
+        await peer.emit(rawEvent(type: "session.created"))
+        var iterator = updates.makeAsyncIterator()
+        #expect(await iterator.next() == .sessionCreated)
+
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_stopped"))
+        await peer.emit(rawCommittedInput(itemID: "standby-input"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.stopped"))
+        for _ in 0 ..< 8 { await Task.yield() }
+
+        #expect(await peer.sentData == [
+            try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration),
+        ])
+        await transport.close()
+    }
+
+    @Test("promotion preserves output emitted while the greeting send is pending")
+    func promotionPreservesOutputDuringGreetingSend() async throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            model: "model-marker",
+            voice: "voice-marker",
+            instructions: "instructions-marker"
+        )
+        let peer = RecordingPeerDriver(blockSend: true, blockSendOn: 3)
+        let transport = makeTransport(peer: peer)
+        let updates = await transport.eventUpdates()
+        let recorder = ProviderEventRecorder()
+        let recordingTask = Task {
+            for await event in updates {
+                await recorder.append(event)
+            }
+        }
+
+        try await transport.connect(
+            clientSecret: try makeSecret(value: "token-marker", expiresAt: 200),
+            configuration: configuration,
+            purpose: .standby
+        )
+        await peer.emit(rawEvent(type: "session.created"))
+        #expect(await waitUntil { await recorder.events.count == 1 })
+        #expect(await recorder.events == [.sessionCreated])
+
+        let activation = Task {
+            try await transport.activate(
+                configuration: configuration,
+                enablesWeeklySummaryTool: false,
+                enablesVisitorEnrollmentTools: false
+            )
+        }
+        #expect(await waitUntil { await peer.sendStarted })
+        await peer.emit(rawEvent(type: "response.created"))
+        await peer.emit(rawEvent(type: "output_audio_buffer.started"))
+        await peer.emit(rawEvent(type: "error"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_started"))
+        await peer.emit(rawEvent(type: "input_audio_buffer.speech_stopped"))
+        await peer.emit(rawCommittedInput(itemID: "standby-input"))
+        #expect(await waitUntil { await transport.processedProviderEventCount == 7 })
+        #expect(await recorder.events == [.sessionCreated])
+
+        await peer.releaseSend()
+        try await activation.value
+        #expect(await waitUntil { await recorder.events.count == 3 })
+        #expect(await recorder.events == [
+            .sessionCreated,
+            .outputAudioStarted,
+            .error,
+        ])
+        #expect(await transport.responseGenerationIsActive)
+        await peer.emit(rawResponseDone(status: "completed"))
+        #expect(await waitUntil { await transport.processedProviderEventCount == 8 })
+        #expect(await transport.responseGenerationIsActive == false)
+        #expect(await peer.sentData.count == 2)
+
+        await transport.close()
+        _ = await recordingTask.result
     }
 
     @Test("enabled initial handshake sends the tool schema then greeting")
@@ -1266,6 +1441,7 @@ private actor RecordingPermission: OpenAIRealtimeMicrophonePermissionClient {
 }
 
 private actor RecordingAudioController: OpenAIRealtimeAudioSessionController {
+    private(set) var standbyPreparationCallCount = 0
     private(set) var activateCallCount = 0
     private(set) var deactivateCallCount = 0
     private let trace: Trace?
@@ -1274,6 +1450,11 @@ private actor RecordingAudioController: OpenAIRealtimeAudioSessionController {
     init(trace: Trace? = nil, error: (any Error)? = nil) {
         self.trace = trace
         self.error = error
+    }
+
+    func prepareForStandby() async {
+        standbyPreparationCallCount += 1
+        await trace?.append("audio.standby")
     }
 
     func activate() async throws {
@@ -1296,6 +1477,7 @@ private actor RecordingPeerDriver: OpenAIRealtimePeerDriver {
     private(set) var sentData: [Data] = []
     private(set) var sendStarted = false
     private(set) var sendCancellationCount = 0
+    private(set) var mediaEnabledHistory: [Bool] = []
     private(set) var receivedAnswer: String?
     private let trace: Trace?
     private let offer: String
@@ -1339,9 +1521,18 @@ private actor RecordingPeerDriver: OpenAIRealtimePeerDriver {
     }
 
     func prepare() async throws {
+        try await prepare(mediaEnabled: true)
+    }
+
+    func prepare(mediaEnabled: Bool) async throws {
         prepareCallCount += 1
+        mediaEnabledHistory.append(mediaEnabled)
         await trace?.append("peer.prepare")
         if let prepareError { throw prepareError }
+    }
+
+    func setMediaEnabled(_ enabled: Bool) async throws {
+        mediaEnabledHistory.append(enabled)
     }
 
     func createLocalOffer() async throws -> String {

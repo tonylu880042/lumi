@@ -569,6 +569,76 @@ struct AppDebugIdentityCalibrationCompositionTests {
         #expect(supportEntries.map(\.lastPathComponent) == ["Lumi"])
     }
 
+    @Test("member memory uses a dedicated Application Support directory")
+    func memberMemoryDatabaseURLIsSeparateFromIdentityDatabase() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "lumi-member-memory-support-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+
+        let memoryURL = AppIdentityCalibrationComposition.memberMemoryDatabaseURL(
+            applicationSupportURL: root
+        )
+        let identityURL = AppIdentityCalibrationComposition.databaseURL(
+            applicationSupportURL: root
+        )
+
+        #expect(memoryURL.path == root
+            .appendingPathComponent("Lumi", isDirectory: true)
+            .appendingPathComponent("MemberInteractionMemory", isDirectory: true)
+            .appendingPathComponent("MemberInteractionMemory.sqlite")
+            .path)
+        #expect(memoryURL != identityURL)
+        #expect(memoryURL.deletingLastPathComponent()
+            != identityURL.deletingLastPathComponent())
+        #expect(!FileManager.default.fileExists(atPath: root
+            .appendingPathComponent("Lumi").path))
+    }
+
+    @Test("member memory directory is prepared and excluded before SQLite opens")
+    func memberMemoryDirectoryIsPreparedAndExcludedFromBackup() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent(
+                "lumi-member-memory-fresh-container-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? fileManager.removeItem(at: root) }
+
+        try fileManager.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        let applicationSupportURL = root
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+
+        let databaseURL = try AppIdentityCalibrationComposition
+            .prepareMemberMemoryDatabaseURL(
+                applicationSupportURL: applicationSupportURL,
+                fileManager: fileManager
+            )
+        let directoryURL = databaseURL.deletingLastPathComponent()
+
+        try SQLiteMemberInteractionMemoryStoreMaintenance
+            .excludeDirectoryFromBackup(directoryURL: directoryURL)
+        let values = try directoryURL.resourceValues(
+            forKeys: [.isExcludedFromBackupKey]
+        )
+
+        #expect(databaseURL.lastPathComponent == "MemberInteractionMemory.sqlite")
+        #expect(fileManager.fileExists(atPath: directoryURL.path))
+        #expect(values.isExcludedFromBackup == true)
+        #expect(!fileManager.fileExists(atPath: AppIdentityCalibrationComposition
+            .databaseURL(applicationSupportURL: applicationSupportURL).path))
+    }
+
     @Test("both DEBUG app configurations declare camera usage copy")
     func debugBuildSettingsDeclareCameraUsage() throws {
         let projectURL = URL(fileURLWithPath: #filePath)

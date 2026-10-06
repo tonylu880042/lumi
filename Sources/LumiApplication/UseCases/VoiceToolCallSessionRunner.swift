@@ -21,12 +21,19 @@ public struct VoiceToolCallSessionRunner: Sendable {
     public static func prepare(
         port: any VoiceToolCallPort,
         memberID: MemberID,
-        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase? = nil,
+        memorySession: MemberInteractionMemorySession? = nil,
+        now: @escaping @Sendable () -> Date = { Date() },
+        memoryContextDidChange:
+            (@Sendable (MemberExerciseDisclosure?, Date) async -> Void)? = nil
     ) async -> Self {
         let toolCalls = await port.toolCallUpdates()
         let router = VoiceToolCallRouter(
             memberID: memberID,
-            weeklySummaryUseCase: weeklySummaryUseCase
+            weeklySummaryUseCase: weeklySummaryUseCase,
+            memorySession: memorySession,
+            now: now,
+            memoryContextDidChange: memoryContextDidChange
         )
         return Self(
             port: port,

@@ -71,6 +71,7 @@ protocol OpenAIRealtimeAudioSessionBackend: Sendable {
     func configureWebRTCDefaults(
         options: OpenAIRealtimeAudioSessionOptions
     ) async
+    func setWebRTCAudioEnabled(_ enabled: Bool) async
     func activate(
         configurationIntent: OpenAIRealtimeAudioSessionIntent
     ) async throws
@@ -79,6 +80,10 @@ protocol OpenAIRealtimeAudioSessionBackend: Sendable {
 
 /// Controller consumed by the Infrastructure transport lifecycle.
 protocol OpenAIRealtimeAudioSessionController: Sendable {
+    /// Configures WebRTC manual audio mode while leaving the system audio
+    /// session inactive. Standby may prepare a disabled peer without taking
+    /// microphone ownership or starting the VoIP audio unit.
+    func prepareForStandby() async
     func activate() async throws
     func deactivate() async
 }
@@ -145,18 +150,32 @@ actor OpenAIRealtimeAudioSession: OpenAIRealtimeAudioSessionController {
     func activate() async throws {
         guard !isActive else { return }
 
+        var backendActivated = false
         do {
             let intent = OpenAIRealtimeAudioSessionIntent(
                 category: .playAndRecord,
                 mode: .voiceChat,
                 options: OpenAIRealtimeWebRTCConfigurationPolicy.defaultRouteOptions()
             )
-            await backend.configureWebRTCDefaults(options: intent.options)
+            await backend.configureWebRTCDefaults(
+                options: intent.options
+            )
             try await backend.activate(
                 configurationIntent: intent
             )
+            backendActivated = true
+            try Task.checkCancellation()
+            await backend.setWebRTCAudioEnabled(true)
+            try Task.checkCancellation()
             isActive = true
             cleanupPerformed = false
+        } catch is CancellationError {
+            cleanupPerformed = true
+            await backend.setWebRTCAudioEnabled(false)
+            if backendActivated {
+                await backend.deactivate()
+            }
+            throw CancellationError()
         } catch let error as OpenAIRealtimeAudioSessionBackendError {
             cleanupPerformed = true
             throw map(error)
@@ -167,6 +186,17 @@ actor OpenAIRealtimeAudioSession: OpenAIRealtimeAudioSessionController {
         }
     }
 
+    func prepareForStandby() async {
+        let intent = OpenAIRealtimeAudioSessionIntent(
+            category: .playAndRecord,
+            mode: .voiceChat,
+            options: OpenAIRealtimeWebRTCConfigurationPolicy.defaultRouteOptions()
+        )
+        await backend.configureWebRTCDefaults(
+            options: intent.options
+        )
+    }
+
     func deactivate() async {
         guard isActive, !cleanupPerformed else { return }
 
@@ -174,6 +204,7 @@ actor OpenAIRealtimeAudioSession: OpenAIRealtimeAudioSessionController {
         // harmless even if framework cleanup takes time.
         isActive = false
         cleanupPerformed = true
+        await backend.setWebRTCAudioEnabled(false)
         await backend.deactivate()
     }
 
@@ -273,6 +304,17 @@ private actor OpenAIRealtimeRTCAudioSessionBackend:
         let configuration = RTCAudioSessionConfiguration.webRTC()
         configuration.categoryOptions.insert(avOptions(for: options))
         RTCAudioSessionConfiguration.setWebRTC(configuration)
+
+        audioSession.lockForConfiguration()
+        defer { audioSession.unlockForConfiguration() }
+        audioSession.useManualAudio = true
+        audioSession.isAudioEnabled = false
+    }
+
+    func setWebRTCAudioEnabled(_ enabled: Bool) async {
+        audioSession.lockForConfiguration()
+        defer { audioSession.unlockForConfiguration() }
+        audioSession.isAudioEnabled = enabled
     }
 
     func deactivate() async {

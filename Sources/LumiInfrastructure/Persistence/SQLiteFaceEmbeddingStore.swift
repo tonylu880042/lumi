@@ -151,6 +151,38 @@ actor SQLiteFaceEmbeddingStore {
         try step(statement, expecting: SQLITE_DONE)
     }
 
+    func localMemberProfiles() async throws(SQLiteFaceEmbeddingStoreError) -> [MemberMemoryProfile] {
+        let statement = try prepare(
+            "SELECT member_id, spoken_label FROM local_member_profiles "
+                + "ORDER BY member_id ASC;"
+        )
+        defer { sqlite3_finalize(statement) }
+
+        var profiles: [MemberMemoryProfile] = []
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                guard let memberIDValue = stringColumn(from: statement, at: 0),
+                      let spokenLabel = stringColumn(from: statement, at: 1),
+                      let memberID = try? MemberID(rawValue: memberIDValue),
+                      (try? VoiceMemberAddress(spokenLabel: spokenLabel)) != nil
+                else {
+                    throw .invalidStoredRecord
+                }
+                profiles.append(
+                    MemberMemoryProfile(
+                        memberID: memberID,
+                        spokenLabel: spokenLabel
+                    )
+                )
+            case SQLITE_DONE:
+                return profiles
+            default:
+                throw .operationFailed
+            }
+        }
+    }
+
     func commitVisitorEnrollment(
         memberID: MemberID,
         address: VoiceMemberAddress,
@@ -385,6 +417,16 @@ actor SQLiteFaceEmbeddingStore {
             )
         }
         guard result == SQLITE_OK else { throw .operationFailed }
+    }
+
+    private func stringColumn(
+        from statement: OpaquePointer,
+        at index: Int32
+    ) -> String? {
+        guard let pointer = sqlite3_column_text(statement, index) else { return nil }
+        return pointer.withMemoryRebound(to: CChar.self, capacity: 1) {
+            String(validatingCString: $0)
+        }
     }
 
     private func step(

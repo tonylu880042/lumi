@@ -335,10 +335,18 @@ extension AppCoreMLIdentityServiceLoader: IdentityEnrollmentSummaryPort {
     }
 }
 
+extension AppCoreMLIdentityServiceLoader: MemberMemoryProfileDirectory {
+    func memberMemoryProfiles() async throws -> [MemberMemoryProfile] {
+        try await load().memberMemoryProfiles()
+    }
+}
+
 /// App-only composition for the DEBUG calibration graph.
 enum AppIdentityCalibrationComposition {
     static let databaseDirectoryName = "Lumi"
     static let databaseFileName = "IdentityCalibration.sqlite"
+    static let memberMemoryDirectoryName = "MemberInteractionMemory"
+    static let memberMemoryDatabaseFileName = "MemberInteractionMemory.sqlite"
 
     @MainActor
     static func makeModel(
@@ -362,6 +370,21 @@ enum AppIdentityCalibrationComposition {
         applicationSupportURL
             .appendingPathComponent(databaseDirectoryName, isDirectory: true)
             .appendingPathComponent(databaseFileName, isDirectory: false)
+    }
+
+    /// Pure path derivation for the independent interaction-memory store.
+    /// Keeping this one level below `Lumi` gives backup exclusion a directory
+    /// boundary that does not include the identity calibration database.
+    static func memberMemoryDirectoryURL(applicationSupportURL: URL) -> URL {
+        applicationSupportURL
+            .appendingPathComponent(databaseDirectoryName, isDirectory: true)
+            .appendingPathComponent(memberMemoryDirectoryName, isDirectory: true)
+    }
+
+    /// Pure path derivation for the independent interaction-memory SQLite DB.
+    static func memberMemoryDatabaseURL(applicationSupportURL: URL) -> URL {
+        memberMemoryDirectoryURL(applicationSupportURL: applicationSupportURL)
+            .appendingPathComponent(memberMemoryDatabaseFileName, isDirectory: false)
     }
 
     /// Prepares the exact local directory chain needed by the calibration DB.
@@ -392,6 +415,42 @@ enum AppIdentityCalibrationComposition {
         }
 
         return derivedDatabaseURL
+    }
+
+    /// Prepares only the directory chain owned by interaction memory. The
+    /// identity database remains outside this directory and keeps its current
+    /// backup policy.
+    static func prepareMemberMemoryDatabaseURL(
+        applicationSupportURL: URL,
+        fileManager: FileManager
+    ) throws -> URL {
+        if !fileManager.fileExists(atPath: applicationSupportURL.path) {
+            try fileManager.createDirectory(
+                at: applicationSupportURL,
+                withIntermediateDirectories: true
+            )
+        }
+
+        let lumiDirectoryURL = applicationSupportURL
+            .appendingPathComponent(databaseDirectoryName, isDirectory: true)
+        if !fileManager.fileExists(atPath: lumiDirectoryURL.path) {
+            try fileManager.createDirectory(
+                at: lumiDirectoryURL,
+                withIntermediateDirectories: false
+            )
+        }
+
+        let memberMemoryDirectoryURL = lumiDirectoryURL
+            .appendingPathComponent(memberMemoryDirectoryName, isDirectory: true)
+        if !fileManager.fileExists(atPath: memberMemoryDirectoryURL.path) {
+            try fileManager.createDirectory(
+                at: memberMemoryDirectoryURL,
+                withIntermediateDirectories: false
+            )
+        }
+
+        return memberMemoryDirectoryURL
+            .appendingPathComponent(memberMemoryDatabaseFileName, isDirectory: false)
     }
 
     /// Builds the single concrete DEBUG identity graph used by either the

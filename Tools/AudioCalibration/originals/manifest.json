@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "description": "Immutable Marin WAV sources preserved before offline loudness calibration.",
+  "files": [
+    {
+      "file": "01-welcome.wav",
+      "sha256": "93af8df960eacaa96d0762badaeaf0989d1c8d2399b8676664b2d91fe5d7b098",
+      "frames": 108000,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "02-welcome.wav",
+      "sha256": "881c5d0ccbde788051666a73e6c9a26d8b17a0d485702fcfcfd0328f62c7540f",
+      "frames": 90000,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "03-welcome.wav",
+      "sha256": "cdd65e3b64f7b49f312cd0ba7d3e6c9623f79f5f53215b4bbefbf2c966a60705",
+      "frames": 68400,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "04-returning.wav",
+      "sha256": "b96ff1985e2eefaa0d61da759854df51bc8315a5fef2f1cde7c8782568766dee",
+      "frames": 61200,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "05-returning.wav",
+      "sha256": "dad34630cc4984c26acf5eab98cccb370cdddd708842e25e252364cfd3c80f23",
+      "frames": 73200,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "06-returning.wav",
+      "sha256": "b0db57dfd5820308ab0c9b90c4050a649bf9694473993940a790d69ad03def5c",
+      "frames": 80400,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "07-goodbye.wav",
+      "sha256": "e1724cb8c0725c6f4eca68b08746ca8e6accba7e2d39634aaade545b4c229f1e",
+      "frames": 85200,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    },
+    {
+      "file": "08-goodbye.wav",
+      "sha256": "a2fd9d40bfd06925013003a8c2ac41d302bae578e43775e97b2ab5dde5398cae",
+      "frames": 66000,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bytes_per_sample": 2
+    }
+  ]
+}

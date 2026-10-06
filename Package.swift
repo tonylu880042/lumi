@@ -29,7 +29,8 @@ let package = Package(
                 "LumiApplication",
                 "LumiDomain",
                 .product(name: "WebRTC", package: "WebRTC")
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .target(name: "LumiUI", dependencies: ["LumiPresentation"]),
         .testTarget(name: "LumiPresentationTests", dependencies: ["LumiPresentation", "LumiApplication"]),

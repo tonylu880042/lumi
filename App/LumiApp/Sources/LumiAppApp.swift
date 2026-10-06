@@ -16,7 +16,8 @@ enum AppCompositionDestination {
     case mock(simulationModel: SessionSimulationModel)
     case live(
         setupModel: DeviceSetupModel,
-        simulationModel: SessionSimulationModel
+        simulationModel: SessionSimulationModel,
+        memberMemoryManagementModel: MemberMemoryManagementModel?
     )
     case unavailable(message: String)
 }
@@ -30,10 +31,61 @@ enum AppCompositionDestination {
 struct AppCompositionFactory {
     typealias Builder = @MainActor (AppCompositionPlan) -> AppCompositionDestination
 
+    struct VoiceToolCapabilities: Equatable, Sendable {
+        let enablesWeeklySummaryTool: Bool
+        let enablesVisitorEnrollmentTools: Bool
+        let enablesMemberMemoryTool: Bool
+    }
+
     private let builder: Builder
 
     init(builder: Builder? = nil) {
         self.builder = builder ?? Self.productionBuilder
+    }
+
+    /// Member interaction memory is an explicitly bounded Debug-Live pilot
+    /// capability. Mock and Release compositions must not construct or expose
+    /// its operator surface.
+    static func memberMemoryManagementEnabled(for plan: AppCompositionPlan) -> Bool {
+#if DEBUG && LUMI_LIVE
+        if case .live = plan { return true }
+#endif
+        return false
+    }
+
+    /// Keeps synthetic exercise data out of the Debug-Live member-memory pilot.
+    /// The capability plan is shared by composition and tests so a future Live
+    /// wiring change cannot silently re-register the weekly-summary tool.
+    static func voiceToolCapabilities(
+        for plan: AppCompositionPlan
+    ) -> VoiceToolCapabilities {
+        guard case .live = plan else {
+            return VoiceToolCapabilities(
+                enablesWeeklySummaryTool: false,
+                enablesVisitorEnrollmentTools: false,
+                enablesMemberMemoryTool: false
+            )
+        }
+
+#if DEBUG && LUMI_LIVE
+        return VoiceToolCapabilities(
+            enablesWeeklySummaryTool: false,
+            enablesVisitorEnrollmentTools: true,
+            enablesMemberMemoryTool: true
+        )
+#elseif DEBUG
+        return VoiceToolCapabilities(
+            enablesWeeklySummaryTool: true,
+            enablesVisitorEnrollmentTools: true,
+            enablesMemberMemoryTool: false
+        )
+#else
+        return VoiceToolCapabilities(
+            enablesWeeklySummaryTool: false,
+            enablesVisitorEnrollmentTools: false,
+            enablesMemberMemoryTool: false
+        )
+#endif
     }
 
     func make(plan: AppCompositionPlan) -> AppCompositionDestination {
@@ -95,38 +147,71 @@ struct AppCompositionFactory {
                 endpointURL: brokerEndpoint,
                 store: store
             )
+            let storeArrivalVitalityService = StoreArrivalVitalityService()
+            let recordedGreeting = RecordedGreetingCoordinator(
+                playback: RecordedVoicePlayback(
+                    player: AVFoundationRecordedVoicePlayer()
+                ),
+                vitalityProvider: {
+                    await storeArrivalVitalityService.currentVitality()
+                }
+            )
             let voiceConfiguration: OpenAIRealtimeConfiguration
             let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
             let visitorEnrollmentToolCallConfiguration:
                 VisitorEnrollmentToolCallSessionConfiguration?
-            let enablesWeeklySummaryTool: Bool
-            let enablesVisitorEnrollmentTools: Bool
+            let voiceToolCapabilities = Self.voiceToolCapabilities(
+                for: .live(
+                    environment: .preview,
+                    brokerEndpoint: brokerEndpoint
+                )
+            )
 #if DEBUG
+            let identityServiceLoader = AppCoreMLIdentityServiceLoader()
+#if !LUMI_LIVE
             let repository = try DebugMemberFixture.makeRepository()
-            voiceConfiguration = OpenAIRealtimeConfiguration()
-            enablesWeeklySummaryTool = true
-            enablesVisitorEnrollmentTools = true
+#endif
+            voiceConfiguration = OpenAIRealtimeConfiguration(
+                usesExternalGreeting: true,
+                allowsConversationClosing: true
+            )
 #else
-            voiceConfiguration = OpenAIRealtimeConfiguration()
-            enablesWeeklySummaryTool = false
-            enablesVisitorEnrollmentTools = false
+            voiceConfiguration = OpenAIRealtimeConfiguration(
+                usesExternalGreeting: true,
+                allowsConversationClosing: true
+            )
 #endif
             let voice = OpenAIRealtimeAdapter(
                 configuration: voiceConfiguration,
                 clientSecretSource: source,
                 transportFactory: OpenAIWebRTCTransportFactory(),
-                enablesWeeklySummaryTool: enablesWeeklySummaryTool,
-                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
+                enablesWeeklySummaryTool:
+                    voiceToolCapabilities.enablesWeeklySummaryTool,
+                enablesVisitorEnrollmentTools:
+                    voiceToolCapabilities.enablesVisitorEnrollmentTools,
+                enablesMemberMemoryTool:
+                    voiceToolCapabilities.enablesMemberMemoryTool,
+                recordedGreeting: recordedGreeting
             )
 
-#if DEBUG
+#if DEBUG && !LUMI_LIVE
             voiceToolCallConfiguration = VoiceToolCallSessionConfiguration(
                 port: voice,
                 weeklySummaryUseCase: GetMemberWeeklySummaryUseCase(
                     repository: repository
                 )
             )
-            let identityServiceLoader = AppCoreMLIdentityServiceLoader()
+#elseif DEBUG && LUMI_LIVE
+            // The memory runner remains installed, but its weekly-summary
+            // dependency is intentionally absent in the Debug-Live pilot.
+            voiceToolCallConfiguration = VoiceToolCallSessionConfiguration(
+                port: voice
+            )
+#else
+            voiceToolCallConfiguration = nil
+#endif
+
+#if DEBUG
             let visitorEnrollment = AppVisitorEnrollmentPortProxy {
                 try await identityServiceLoader.load()
             }
@@ -136,8 +221,37 @@ struct AppCompositionFactory {
                     enrollmentPort: visitorEnrollment
                 )
 #else
-            voiceToolCallConfiguration = nil
             visitorEnrollmentToolCallConfiguration = nil
+#endif
+
+#if DEBUG && LUMI_LIVE
+            guard let applicationSupportURL = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first else {
+                throw IdentityCalibrationError.failed
+            }
+            let memberMemoryDatabaseURL = try AppIdentityCalibrationComposition
+                .prepareMemberMemoryDatabaseURL(
+                    applicationSupportURL: applicationSupportURL,
+                    fileManager: .default
+                )
+            let memberMemoryDirectoryURL = memberMemoryDatabaseURL
+                .deletingLastPathComponent()
+            try SQLiteMemberInteractionMemoryStoreMaintenance
+                .excludeDirectoryFromBackup(directoryURL: memberMemoryDirectoryURL)
+            let memberMemoryStore = try SQLiteMemberInteractionMemoryStore(
+                databaseURL: memberMemoryDatabaseURL
+            )
+            let memberMemoryConfiguration:
+                MemberInteractionMemorySessionConfiguration? =
+                MemberInteractionMemorySessionConfiguration(store: memberMemoryStore)
+            Task {
+                try? await memberMemoryStore.pruneExpired(at: Date())
+            }
+#elseif DEBUG
+            let memberMemoryConfiguration:
+                MemberInteractionMemorySessionConfiguration? = nil
 #endif
 
             let hardware = MockHardwareControlPort()
@@ -170,7 +284,8 @@ struct AppCompositionFactory {
                 memberAddressResolver: memberAddressResolver,
                 voiceToolCallConfiguration: voiceToolCallConfiguration,
                 visitorEnrollmentToolCallConfiguration:
-                    visitorEnrollmentToolCallConfiguration
+                    visitorEnrollmentToolCallConfiguration,
+                memberMemoryConfiguration: memberMemoryConfiguration
             )
             let simulationModel = SessionSimulationModel(
                 coordinator: coordinator,
@@ -178,11 +293,33 @@ struct AppCompositionFactory {
                 voiceSimulationControls: nil,
                 memberAddressResolver: memberAddressResolver,
                 visitorPresenceMonitor: visitorPresence,
+                storeArrivalVitalityService: storeArrivalVitalityService,
                 identityEnrollmentSummary: identityServiceLoader,
                 onAuthorizationRequired: {
                     setupModel.authorizationInvalidated()
                 }
             )
+#if LUMI_LIVE
+            let memberMemoryManagementModel: MemberMemoryManagementModel? =
+                MemberMemoryManagementModel(
+                    store: memberMemoryStore,
+                    directory: identityServiceLoader,
+                    consentUseCase: SetMemberMemoryConsentUseCase(
+                        store: memberMemoryStore
+                    ),
+                    clearUseCase: ClearMemberMemoryUseCase(
+                        store: memberMemoryStore
+                    ),
+                    onBeforeMemoryMutation: {
+                        await simulationModel.prepareForMemberMemoryMutation()
+                    },
+                    onAfterMemoryMutation: {
+                        await simulationModel.restartContinuousExperience()
+                    }
+                )
+#else
+            let memberMemoryManagementModel: MemberMemoryManagementModel? = nil
+#endif
 #else
             let identity = MockIdentityRecognitionAdapter()
             let coordinator = AssistantSessionCoordinator(
@@ -196,14 +333,17 @@ struct AppCompositionFactory {
                 hardware: hardware,
                 identity: identity,
                 voiceSimulationControls: nil,
+                storeArrivalVitalityService: storeArrivalVitalityService,
                 onAuthorizationRequired: {
                     setupModel.authorizationInvalidated()
                 }
             )
+            let memberMemoryManagementModel: MemberMemoryManagementModel? = nil
 #endif
             return .live(
                 setupModel: setupModel,
-                simulationModel: simulationModel
+                simulationModel: simulationModel,
+                memberMemoryManagementModel: memberMemoryManagementModel
             )
         } catch {
             // A validated plan should always contain one of the approved
@@ -238,10 +378,11 @@ struct LumiAppApp: App {
         switch destination {
         case let .mock(simulationModel):
             MockCompositionRootView(simulationModel: simulationModel)
-        case let .live(setupModel, simulationModel):
+        case let .live(setupModel, simulationModel, memberMemoryManagementModel):
             LiveCompositionRootView(
                 setupModel: setupModel,
-                simulationModel: simulationModel
+                simulationModel: simulationModel,
+                memberMemoryManagementModel: memberMemoryManagementModel
             )
         case let .unavailable(message):
             AppCompositionUnavailableView(message: message)
@@ -288,6 +429,7 @@ private struct MockCompositionRootView: View {
 private struct LiveCompositionRootView: View {
     @State private var setupModel: DeviceSetupModel
     @StateObject private var simulationModel: SessionSimulationModel
+    private let memberMemoryManagementModel: MemberMemoryManagementModel?
     @State private var hasStartedSetupLoad = false
 #if DEBUG
     @State private var calibrationModel: DebugIdentityCalibrationModel
@@ -295,10 +437,12 @@ private struct LiveCompositionRootView: View {
 
     init(
         setupModel: DeviceSetupModel,
-        simulationModel: SessionSimulationModel
+        simulationModel: SessionSimulationModel,
+        memberMemoryManagementModel: MemberMemoryManagementModel?
     ) {
         _setupModel = State(initialValue: setupModel)
         _simulationModel = StateObject(wrappedValue: simulationModel)
+        self.memberMemoryManagementModel = memberMemoryManagementModel
 #if DEBUG
         _calibrationModel = State(
             initialValue: AppIdentityCalibrationComposition.makeModel()
@@ -311,10 +455,14 @@ private struct LiveCompositionRootView: View {
 #if DEBUG
             ContentView(
                 simulationModel: simulationModel,
-                calibrationModel: calibrationModel
+                calibrationModel: calibrationModel,
+                memberMemoryManagementModel: memberMemoryManagementModel
             )
 #else
-            ContentView(simulationModel: simulationModel)
+            ContentView(
+                simulationModel: simulationModel,
+                memberMemoryManagementModel: memberMemoryManagementModel
+            )
 #endif
         }
         .task {

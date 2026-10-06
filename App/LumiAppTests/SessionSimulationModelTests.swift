@@ -1,13 +1,52 @@
+import Foundation
 import Combine
 import LumiDomain
 import LumiApplication
 import LumiInfrastructure
+import LumiPresentation
 import Testing
 @testable import LumiApp
 
 @MainActor
 @Suite("Session simulation dual-mode wrapper", .serialized)
 struct SessionSimulationModelTests {
+    @Test("releasing the model cancels its pending vitality refresh immediately")
+    func releasingModelCancelsVitalityRefresh() async throws {
+        let hardware = MockHardwareControlPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        defer { Task { await presence.stop() } }
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: ImmediateIdentityRecognitionPort(result: .unknown),
+            voice: ImmediateVoiceSessionPort()
+        )
+        var model: SessionSimulationModel? = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            visitorPresenceMonitor: presence,
+            storeArrivalVitalityService: StoreArrivalVitalityService()
+        )
+        model?.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+
+        // Inspect the owned handle without adding a production API for tests.
+        let refresh: Task<Void, Never> = try {
+            let reflectedModel = try #require(model)
+            return try #require(
+                Mirror(reflecting: reflectedModel).children
+                    .first { $0.label == "vitalityRefreshTask" }?.value
+                    as? Task<Void, Never>
+            )
+        }()
+        defer { refresh.cancel() }
+        #expect(!refresh.isCancelled)
+        weak var releasedModel = model
+        model = nil
+
+        try #require(await waitUntilCurrent { releasedModel == nil })
+        #expect(refresh.isCancelled)
+    }
+
     @Test("Conversation direction choices are payload-free and use the product labels")
     func conversationDirectionChoicesArePayloadFreeAndLabelled() {
         let choices = SessionSimulationModel.ConversationDirectionChoice.allCases
@@ -22,6 +61,27 @@ struct SessionSimulationModelTests {
         for choice in choices {
             #expect(Mirror(reflecting: choice).children.isEmpty)
         }
+    }
+
+    @Test("memory mutation preparation succeeds while the kiosk is idle")
+    func memoryMutationPreparationSucceedsWhileIdle() async {
+        let hardware = MockHardwareControlPort()
+        let identity = MockIdentityRecognitionAdapter()
+        let voice = MockVoiceSessionPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voiceSimulationControls: VoiceSimulationControls(voice: voice)
+        )
+
+        #expect(await model.prepareForMemberMemoryMutation())
+        #expect(await hardware.returnHomeCallCount == 0)
     }
 
     @Test("Selected direction reaches voice startup for an unknown visitor")
@@ -383,6 +443,174 @@ struct SessionSimulationModelTests {
         #expect(model.isContinuousExperienceRunning)
     }
 
+    @Test("arrival vitality is applied before automatic voice startup")
+    func arrivalVitalityPrecedesVoice() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = DeferredStartVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let vitality = StoreArrivalVitalityService(
+            clock: FixedStoreArrivalVitalityClock(value: .seconds(20))
+        )
+        for second in [0, 4, 8, 12, 16] {
+            _ = await vitality.recordArrival(at: .seconds(second))
+            _ = await vitality.markDeparture(at: .seconds(second + 3))
+        }
+
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence,
+            storeArrivalVitalityService: vitality
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        await voice.waitForStartCall()
+
+        #expect(model.arrivalVitality == .excited)
+        #expect(model.avatarState == AvatarStateMapper().map(.greeting, vitality: .excited))
+        #expect(await identity.callCount == 1)
+
+        await voice.completeStart()
+        model.stopContinuousExperience()
+    }
+
+    @Test("voice startup failure does not rearm the arrival latch")
+    func voiceStartupFailureDoesNotRecountArrival() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = RetryingVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let vitality = StoreArrivalVitalityService(
+            clock: FixedStoreArrivalVitalityClock(value: .seconds(16))
+        )
+        for second in [0, 4, 8, 12] {
+            _ = await vitality.recordArrival(at: .seconds(second))
+            _ = await vitality.markDeparture(at: .seconds(second + 3))
+        }
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence,
+            storeArrivalVitalityService: vitality
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+
+        // The second monitor request proves the failed welcome completed its
+        // existing cleanup/continue path before inspecting the first attempt.
+        await presence.waitForArrivalRequest(count: 2)
+        try #require(await waitUntilCurrent { model.assistantState == .idle })
+        #expect(await voice.startCallCount == 1)
+        #expect(await identity.callCount == 1)
+        #expect(model.arrivalVitality == .happy)
+
+        // The monitor can see the same face again after the failed welcome.
+        // Existing retry behavior remains available, while the deduplicator
+        // keeps the repeated observation out of the arrival count.
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        #expect(await voice.startCallCount == 2)
+        #expect(await identity.callCount == 2)
+        #expect(model.arrivalVitality == .happy)
+
+        model.stopContinuousExperience()
+    }
+
+    @Test("idle model can refresh vitality after the rolling window expires")
+    func idleVitalityRefreshesAfterExpiry() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let vitality = StoreArrivalVitalityService()
+        for second in [0, 4, 8, 12, 16, 20] {
+            _ = await vitality.recordArrival(at: .seconds(second))
+            if second < 20 {
+                _ = await vitality.markDeparture(at: .seconds(second + 3))
+            }
+        }
+
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence,
+            storeArrivalVitalityService: vitality
+        )
+
+        await model.refreshArrivalVitality(at: .seconds(600))
+        #expect(model.arrivalVitality == .happy)
+        await model.refreshArrivalVitality(at: .seconds(612))
+        #expect(model.arrivalVitality == .calm)
+        #expect(model.assistantState == .idle)
+    }
+
+    @Test("a naturally stopped loop can restart its idle vitality refresh")
+    func naturalStopThenRestartResumesVitalityRefresh() async throws {
+        let hardware = MockHardwareControlPort()
+        let identity = ImmediateIdentityRecognitionPort(result: .unknown)
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let clock = MutableStoreArrivalVitalityClock(value: .seconds(16))
+        let vitality = StoreArrivalVitalityService(clock: clock)
+        for second in [0, 4, 8, 12] {
+            _ = await vitality.recordArrival(at: .seconds(second))
+            _ = await vitality.markDeparture(at: .seconds(second + 3))
+        }
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator,
+            hardware: hardware,
+            voiceSimulationControls: nil,
+            visitorPresenceMonitor: presence,
+            storeArrivalVitalityService: vitality
+        )
+
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        await presence.waitForDepartureRequest()
+        await presence.failDeparture()
+        try #require(await waitUntilCurrent {
+            model.isContinuousExperienceRunning == false
+        })
+
+        clock.set(.seconds(612))
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest(count: 2)
+        try await Task.sleep(for: .milliseconds(1_100))
+
+        #expect(model.arrivalVitality == .calm)
+        model.stopContinuousExperience()
+    }
+
     @Test("wakeUp transitions isAwake, calls prewarm, and starts continuous experience")
     func wakeUpTransitionsStateAndStartsContinuousExperience() async throws {
         let hardware = MockHardwareControlPort()
@@ -498,7 +726,7 @@ struct SessionSimulationModelTests {
         #expect(await summary.callCount == 1)
     }
 
-    @Test("ten-second departure result ends the session and rearms recognition")
+    @Test("confirmed departure ends the session and rearms recognition")
     func continuousExperienceRearmsAfterDeparture() async throws {
         var diagnostics: [SessionSimulationModel.ContinuousExperienceDiagnostic] = []
         let hardware = MockHardwareControlPort()
@@ -532,6 +760,43 @@ struct SessionSimulationModelTests {
         #expect(diagnostics.contains(.stageStarted(.finishSession)))
         #expect(await voice.startContexts == [.visitor])
         #expect(await hardware.returnHomeCallCount == 1)
+    }
+
+    @Test("goodbye returns home but requires departure before greeting again")
+    func naturalClosingWaitsForDepartureBeforeRearming() async throws {
+        let hardware = MockHardwareControlPort()
+        let voice = ImmediateVoiceSessionPort()
+        let presence = ControlledVisitorPresenceMonitor()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: ImmediateIdentityRecognitionPort(result: .unknown),
+            voice: voice
+        )
+        let model = SessionSimulationModel(
+            coordinator: coordinator, hardware: hardware,
+            voiceSimulationControls: nil, visitorPresenceMonitor: presence
+        )
+        model.startContinuousExperience()
+        await presence.waitForArrivalRequest()
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        await presence.waitForDepartureRequest()
+        await voice.emit(.conversationEndRequested)
+        try #require(await waitUntilCurrent {
+            model.assistantState == .idle && model.pendingAction == nil
+        })
+        #expect(await voice.stopCallCount == 1)
+        #expect(await voice.startCallCount == 1)
+        #expect(await presence.arrivalRequestCount == 1)
+        #expect(await presence.departureRequestCount == 1)
+        #expect(await hardware.returnHomeCallCount == 1)
+
+        await presence.signalDeparture()
+        await presence.waitForArrivalRequest(count: 2)
+        await presence.signalArrival()
+        try #require(await waitUntilCurrent { model.assistantState == .speaking })
+        #expect(await voice.startCallCount == 2)
+        model.stopContinuousExperience()
     }
 
     @Test("confirmed departure cannot stop active assistant audio")
@@ -1133,6 +1398,64 @@ private actor ImmediateVoiceSessionPort: VoiceSessionPort {
     }
 }
 
+private actor RetryingVoiceSessionPort: VoiceSessionPort {
+    private(set) var startCallCount = 0
+    private var continuation: AsyncStream<VoiceSessionEvent>.Continuation?
+
+    func start(context _: VoiceContext) async throws {
+        startCallCount += 1
+        if startCallCount == 1 {
+            throw TestVoiceFailure.injected
+        }
+    }
+
+    func eventUpdates() async -> AsyncStream<VoiceSessionEvent> {
+        let pair = AsyncStream<VoiceSessionEvent>.makeStream(
+            of: VoiceSessionEvent.self,
+            bufferingPolicy: .unbounded
+        )
+        continuation = pair.continuation
+        return pair.stream
+    }
+
+    func stop() async {
+        continuation?.finish()
+        continuation = nil
+    }
+}
+
+private struct FixedStoreArrivalVitalityClock:
+    StoreArrivalVitalityClock,
+    Sendable
+{
+    let value: Duration
+
+    func now() -> Duration { value }
+}
+
+private final class MutableStoreArrivalVitalityClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Duration
+
+    init(value: Duration) {
+        current = value
+    }
+
+    func set(_ value: Duration) {
+        lock.lock()
+        current = value
+        lock.unlock()
+    }
+
+    func now() -> Duration {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+}
+
+extension MutableStoreArrivalVitalityClock: StoreArrivalVitalityClock {}
+
 private actor DeferredStartVoiceSessionPort: VoiceSessionPort {
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var startCallWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1199,7 +1522,7 @@ private actor ImmediateIdentityRecognitionPort: IdentityRecognitionPort {
 private actor ControlledVisitorPresenceMonitor: VisitorPresenceMonitoringPort {
     private var arrivalContinuation: CheckedContinuation<Void, Error>?
     private var departureContinuation: CheckedContinuation<Void, Error>?
-    private var arrivalRequestCount = 0
+    private(set) var arrivalRequestCount = 0
     private var arrivalWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var departureWaiters: [CheckedContinuation<Void, Never>] = []
     private var stopCallCount = 0

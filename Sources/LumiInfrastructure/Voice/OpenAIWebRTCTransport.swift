@@ -96,9 +96,18 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     private let eventStream: AsyncStream<OpenAIRealtimeProviderEvent>
     private let eventContinuation: AsyncStream<OpenAIRealtimeProviderEvent>.Continuation
 
+    // One-off Realtime cost-telemetry milestone: usage counters are decoded
+    // and published independently of the provider-event stream above so the
+    // existing event mapping and its exhaustive switches never change.
+    private let usageStream: AsyncStream<OpenAIRealtimeResponseUsage>
+    private let usageContinuation: AsyncStream<OpenAIRealtimeResponseUsage>.Continuation
+
     private var generation: UInt64 = 0
     private var lifecycle = Lifecycle.idle
-    private var audioIsActive = false
+    private var audioCleanupRequired = false
+    private var conversationMediaEnabled = false
+    private var activationInProgress = false
+    private var pendingActivationEvents: [OpenAIRealtimeProviderEvent] = []
     private var peerWasStarted = false
     private var sessionCreatedHandled = false
     private var eventConsumerTask: Task<Void, Never>?
@@ -106,10 +115,11 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     private var activeOperationID: UInt64?
     private var cancelActiveOperation: (@Sendable () -> Void)?
     private var assistantOutputIsActive = false
-    private var responseGenerationIsActive = false
+    private(set) var responseGenerationIsActive = false
     private var inputTurnDisposition = InputTurnDisposition.none
     private var inputSpeechHasStopped = false
     private var committedInputItemID: String?
+    private(set) var processedProviderEventCount = 0
     private var bargeInCandidateGeneration: UInt64 = 0
     private var bargeInCandidateTask: Task<Void, Never>?
 
@@ -141,6 +151,13 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         )
         self.eventStream = stream.stream
         self.eventContinuation = stream.continuation
+
+        let usageStreamAndContinuation = AsyncStream<OpenAIRealtimeResponseUsage>.makeStream(
+            of: OpenAIRealtimeResponseUsage.self,
+            bufferingPolicy: .unbounded
+        )
+        self.usageStream = usageStreamAndContinuation.stream
+        self.usageContinuation = usageStreamAndContinuation.continuation
     }
 
     /// Starts this transport with the approved permission/media/signaling
@@ -157,7 +174,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
             configuration: configuration,
             purpose: purpose,
             enablesWeeklySummaryTool: enablesWeeklySummaryTool,
-            enablesVisitorEnrollmentTools: false
+            enablesVisitorEnrollmentTools: false,
+            enablesMemberMemoryTool: false
         )
     }
 
@@ -167,6 +185,24 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         purpose: OpenAIRealtimeConnectionPurpose,
         enablesWeeklySummaryTool: Bool,
         enablesVisitorEnrollmentTools: Bool
+    ) async throws {
+        try await connect(
+            clientSecret: clientSecret,
+            configuration: configuration,
+            purpose: purpose,
+            enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+            enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+            enablesMemberMemoryTool: false
+        )
+    }
+
+    func connect(
+        clientSecret: OpenAIRealtimeClientSecret,
+        configuration: OpenAIRealtimeConfiguration,
+        purpose: OpenAIRealtimeConnectionPurpose,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool,
+        enablesMemberMemoryTool: Bool
     ) async throws {
         guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
         guard lifecycle == .idle else {
@@ -183,28 +219,42 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                 generation: acceptedGeneration
             )
 
-            try await awaitCancellable {
-                try await self.permission.authorize()
-            }
-            try ensureActive(acceptedGeneration)
+            if purpose == .standby {
+                try await awaitCancellable {
+                    await self.audioSession.prepareForStandby()
+                }
+                try ensureActive(acceptedGeneration)
+            } else {
+                try await awaitCancellable {
+                    try await self.permission.authorize()
+                }
+                try ensureActive(acceptedGeneration)
 
-            // Record the attempt before awaiting so cancellation cannot leave
-            // an activated backend untracked between return and the next
-            // generation check. The audio controller makes deactivation
-            // idempotent when activation itself fails.
-            audioIsActive = true
-            try await awaitCancellable {
-                try await self.audioSession.activate()
+                // Record the attempt before awaiting so cancellation cannot
+                // leave an activated backend untracked between return and the
+                // next generation check. The audio controller makes
+                // deactivation idempotent when activation itself fails.
+                audioCleanupRequired = true
+                try await awaitCancellable {
+                    try await self.audioSession.activate()
+                }
+                try ensureActive(acceptedGeneration)
             }
-            try ensureActive(acceptedGeneration)
 
             // Mark the peer as started before preparation so a partial driver
-            // setup is always closed on failure or cancellation.
+            // setup is always closed on failure or cancellation. A local
+            // opening keeps the microphone track disabled until playback has
+            // finished; reconnects are already past the opening.
+            let startsWithLocalGreeting = configuration.usesExternalGreeting
+                && (purpose == .initial || purpose == .standby)
             peerWasStarted = true
             try await awaitCancellable {
-                try await self.peerDriver.prepare()
+                try await self.peerDriver.prepare(
+                    mediaEnabled: purpose != .standby && !startsWithLocalGreeting
+                )
             }
             try ensureActive(acceptedGeneration)
+            conversationMediaEnabled = purpose != .standby && !startsWithLocalGreeting
 
             let offer = try await awaitCancellable {
                 try await self.peerDriver.createLocalOffer()
@@ -242,7 +292,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                 configuration: configuration,
                 purpose: purpose,
                 enablesWeeklySummaryTool: enablesWeeklySummaryTool,
-                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+                enablesMemberMemoryTool: enablesMemberMemoryTool
             )
             lifecycle = .connected
         } catch {
@@ -257,6 +308,133 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
     /// Returns the decoded provider-event stream for this transport.
     func eventUpdates() async -> AsyncStream<OpenAIRealtimeProviderEvent> {
         eventStream
+    }
+
+    /// Returns the per-response usage stream for this transport.
+    ///
+    /// One-off Realtime cost-telemetry milestone only — see the usage
+    /// counters wired up in `consume(_:generation:configuration:purpose:...)`.
+    func usageUpdates() async -> AsyncStream<OpenAIRealtimeResponseUsage> {
+        usageStream
+    }
+
+    /// Promotes a negotiated standby connection into the active conversation.
+    /// Permission, manual WebRTC audio, final session capabilities, and the
+    /// one initial greeting are all committed here as one generation-owned
+    /// operation.
+    func activate(
+        configuration: OpenAIRealtimeConfiguration,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool
+    ) async throws {
+        try await activate(
+            configuration: configuration,
+            enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+            enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+            enablesMemberMemoryTool: false
+        )
+    }
+
+    func activate(
+        configuration: OpenAIRealtimeConfiguration,
+        enablesWeeklySummaryTool: Bool,
+        enablesVisitorEnrollmentTools: Bool,
+        enablesMemberMemoryTool: Bool
+    ) async throws {
+        guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
+        guard lifecycle == .connected, sessionCreatedHandled, !conversationMediaEnabled else {
+            throw OpenAIWebRTCTransportError.transportFailure
+        }
+
+        let acceptedGeneration = generation
+        activationInProgress = true
+        pendingActivationEvents.removeAll()
+        do {
+            try await awaitCancellable {
+                try await self.permission.authorize()
+            }
+            try ensureActive(acceptedGeneration)
+
+            // Track the attempted activation before awaiting so cleanup can
+            // always balance a partially activated audio session. Provider
+            // input remains inert until the final session update and greeting
+            // have both been sent.
+            audioCleanupRequired = true
+            try await awaitCancellable {
+                try await self.audioSession.activate()
+            }
+            try ensureActive(acceptedGeneration)
+
+            let update = try OpenAIRealtimeWireEncoder.sessionUpdate(
+                for: configuration,
+                enablesWeeklySummaryTool: enablesWeeklySummaryTool,
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+                enablesMemberMemoryTool: enablesMemberMemoryTool
+            )
+            try await awaitCancellable {
+                try await self.peerDriver.send(update)
+            }
+            try ensureActive(acceptedGeneration)
+
+            if !configuration.usesExternalGreeting {
+                try await awaitCancellable {
+                    try await self.peerDriver.setMediaEnabled(true)
+                }
+                try ensureActive(acceptedGeneration)
+
+                let greeting = try OpenAIRealtimeWireEncoder.responseCreate()
+                try await awaitCancellable {
+                    try await self.peerDriver.send(greeting)
+                }
+                try ensureActive(acceptedGeneration)
+                conversationMediaEnabled = true
+            } else {
+                conversationMediaEnabled = false
+            }
+            activationInProgress = false
+            await replayPendingActivationEvents(generation: acceptedGeneration)
+        } catch {
+            activationInProgress = false
+            pendingActivationEvents.removeAll()
+            await close()
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw map(error)
+        }
+    }
+
+    /// Opens or closes the conversation media gate after a local greeting.
+    /// The transport remains connected while the gate is closed, so the local
+    /// player can use the already configured audio route without feeding its
+    /// output back as microphone input.
+    func setConversationMediaEnabled(_ enabled: Bool) async throws {
+        guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
+        guard lifecycle == .connected, sessionCreatedHandled else {
+            throw OpenAIWebRTCTransportError.dataChannelUnavailable
+        }
+
+        let acceptedGeneration = generation
+        do {
+            try await awaitCancellable {
+                try await self.peerDriver.setMediaEnabled(enabled)
+            }
+            try ensureActive(acceptedGeneration)
+            conversationMediaEnabled = enabled
+            if !enabled {
+                assistantOutputIsActive = false
+                await bargeInDetector.assistantOutputEnded()
+                cancelBargeInCandidate()
+                inputTurnDisposition = .none
+                inputSpeechHasStopped = false
+                committedInputItemID = nil
+            }
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw map(error)
+        }
     }
 
     /// Closes startup resources at most once and finishes the stable stream.
@@ -274,11 +452,12 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         await bargeInDetector.assistantOutputEnded()
         await cleanupStartedResources()
         eventContinuation.finish()
+        usageContinuation.finish()
     }
 
     func send(_ data: Data) async throws {
         guard lifecycle != .closed else { throw OpenAIWebRTCTransportError.closed }
-        guard lifecycle == .connected, sessionCreatedHandled else {
+        guard lifecycle == .connected, sessionCreatedHandled, conversationMediaEnabled else {
             throw OpenAIWebRTCTransportError.dataChannelUnavailable
         }
 
@@ -302,7 +481,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         configuration: OpenAIRealtimeConfiguration,
         purpose: OpenAIRealtimeConnectionPurpose,
         enablesWeeklySummaryTool: Bool,
-        enablesVisitorEnrollmentTools: Bool
+        enablesVisitorEnrollmentTools: Bool,
+        enablesMemberMemoryTool: Bool
     ) {
         let task = Task { [weak self] in
             var iterator = peerEvents.makeAsyncIterator()
@@ -314,7 +494,8 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
                     configuration: configuration,
                     purpose: purpose,
                     enablesWeeklySummaryTool: enablesWeeklySummaryTool,
-                    enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
+                    enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+                    enablesMemberMemoryTool: enablesMemberMemoryTool
                 )
             }
 
@@ -330,11 +511,21 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         configuration: OpenAIRealtimeConfiguration,
         purpose: OpenAIRealtimeConnectionPurpose,
         enablesWeeklySummaryTool: Bool,
-        enablesVisitorEnrollmentTools: Bool
+        enablesVisitorEnrollmentTools: Bool,
+        enablesMemberMemoryTool: Bool
     ) async {
         guard isGenerationActive(acceptedGeneration), !Task.isCancelled else {
             return
         }
+        processedProviderEventCount &+= 1
+
+        // Decoded independently of the event mapping below: a missing or
+        // malformed usage payload must never affect the existing status
+        // handling, and this never yields anything but integer counts.
+        if let usage = OpenAIRealtimeWireDecoder.responseUsage(from: data) {
+            usageContinuation.yield(usage)
+        }
+
         guard let event = OpenAIRealtimeWireDecoder.decode(data) else {
             return
         }
@@ -350,14 +541,15 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
             let update = try OpenAIRealtimeWireEncoder.sessionUpdate(
                 for: configuration,
                 enablesWeeklySummaryTool: enablesWeeklySummaryTool,
-                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools
+                enablesVisitorEnrollmentTools: enablesVisitorEnrollmentTools,
+                enablesMemberMemoryTool: enablesMemberMemoryTool
             )
             try await awaitCancellable {
                 try await self.peerDriver.send(update)
             }
             try ensureActive(acceptedGeneration)
 
-            if purpose == .initial {
+            if purpose == .initial, !configuration.usesExternalGreeting {
                 let greeting = try OpenAIRealtimeWireEncoder.responseCreate()
                 try await awaitCancellable {
                     try await self.peerDriver.send(greeting)
@@ -376,6 +568,23 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         _ event: OpenAIRealtimeProviderEvent,
         generation acceptedGeneration: UInt64
     ) async {
+        // A standby peer may receive provider events while it waits for
+        // identity promotion. Keep those events out of turn state and rely on
+        // the peer/audio controls to keep media itself disabled.
+        guard sessionCreatedHandled else { return }
+        if activationInProgress {
+            switch event {
+            case .responseStarted, .responseCompleted, .responseFailed,
+                 .outputAudioStarted, .outputAudioStopped, .outputAudioCleared,
+                 .error:
+                pendingActivationEvents.append(event)
+            default:
+                break
+            }
+            return
+        }
+        guard conversationMediaEnabled else { return }
+
         switch event {
         case .responseStarted:
             Self.diagnostics.notice("provider response-started")
@@ -585,6 +794,16 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         bargeInCandidateTask = nil
     }
 
+    private func replayPendingActivationEvents(
+        generation acceptedGeneration: UInt64
+    ) async {
+        let events = pendingActivationEvents
+        pendingActivationEvents.removeAll()
+        for event in events {
+            await consumeSessionEvent(event, generation: acceptedGeneration)
+        }
+    }
+
     private func peerEventsFinished(generation acceptedGeneration: UInt64) async {
         guard isGenerationActive(acceptedGeneration) else { return }
         lifecycle = .closed
@@ -594,6 +813,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         await bargeInDetector.assistantOutputEnded()
         await cleanupStartedResources()
         eventContinuation.finish()
+        usageContinuation.finish()
     }
 
     private func failHandshake(generation acceptedGeneration: UInt64) async {
@@ -606,6 +826,7 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         await cleanupStartedResources()
         eventContinuation.yield(.error)
         eventContinuation.finish()
+        usageContinuation.finish()
     }
 
     private func isGenerationActive(_ acceptedGeneration: UInt64) -> Bool {
@@ -669,15 +890,19 @@ actor OpenAIWebRTCTransport: OpenAIRealtimeTransport {
         eventConsumerTask = nil
         await cleanupStartedResources()
         eventContinuation.finish()
+        usageContinuation.finish()
     }
 
     private func cleanupStartedResources() async {
+        activationInProgress = false
+        pendingActivationEvents.removeAll()
         if peerWasStarted {
             peerWasStarted = false
             await peerDriver.close()
         }
-        if audioIsActive {
-            audioIsActive = false
+        conversationMediaEnabled = false
+        if audioCleanupRequired {
+            audioCleanupRequired = false
             await audioSession.deactivate()
         }
     }

@@ -123,8 +123,8 @@ struct AppCompositionTests {
         let first = AppCompositionFactory().make(plan: plan)
         let second = AppCompositionFactory().make(plan: plan)
 
-        guard case let .live(firstSetup, firstSimulation) = first,
-              case let .live(secondSetup, secondSimulation) = second
+        guard case let .live(firstSetup, firstSimulation, firstMemoryManagement) = first,
+              case let .live(secondSetup, secondSimulation, secondMemoryManagement) = second
         else {
             Issue.record("Production Live plan must build the Live destination")
             return
@@ -135,11 +135,74 @@ struct AppCompositionTests {
 #if DEBUG
         #expect(!firstSimulation.hasManualIdentityControls)
         #expect(!secondSimulation.hasManualIdentityControls)
+        #expect(firstSimulation.supportsContinuousExperience)
+        #expect(secondSimulation.supportsContinuousExperience)
 #endif
         #expect(firstSetup !== secondSetup)
         #expect(firstSimulation !== secondSimulation)
         #expect(firstSetup.state == .loading)
         #expect(secondSetup.state == .loading)
+#if DEBUG && LUMI_LIVE
+        #expect(firstMemoryManagement != nil)
+        #expect(secondMemoryManagement != nil)
+#else
+        #expect(firstMemoryManagement == nil)
+        #expect(secondMemoryManagement == nil)
+#endif
+    }
+
+    @Test("Mock composition never exposes the member-memory management surface")
+    @MainActor
+    func mockCompositionDoesNotExposeMemberMemoryManagement() throws {
+        let destination = AppCompositionFactory().make(plan: .mock)
+
+        guard case .mock = destination else {
+            Issue.record("Mock plan must produce the direct Mock destination")
+            return
+        }
+
+        // The associated value is deliberately absent from Mock. The only
+        // composition that may construct the management model is Debug-Live.
+        #expect(AppCompositionFactory.memberMemoryManagementEnabled(for: .mock) == false)
+    }
+
+    @Test("Debug-Live keeps synthetic weekly summary isolated from member memory")
+    @MainActor
+    func debugLiveVoiceCapabilitiesKeepSyntheticDataIsolated() {
+        let plan = AppCompositionPlan.live(
+            environment: .preview,
+            brokerEndpoint: URL(string: previewEndpoint)!
+        )
+        let capabilities = AppCompositionFactory.voiceToolCapabilities(for: plan)
+
+#if DEBUG && LUMI_LIVE
+        #expect(capabilities.enablesWeeklySummaryTool == false)
+        #expect(capabilities.enablesMemberMemoryTool)
+#else
+        #expect(capabilities.enablesMemberMemoryTool == false)
+#endif
+    }
+
+    @Test("Member-memory entry requires both the Debug-Live model and kiosk mode")
+    func memberMemoryEntryRequiresLiveModelAndKioskMode() {
+        #expect(
+            ContentView.shouldShowMemberMemoryManagementEntry(
+                hasManagementModel: true,
+                supportsContinuousExperience: true
+            )
+        )
+        #expect(
+            !ContentView.shouldShowMemberMemoryManagementEntry(
+                hasManagementModel: false,
+                supportsContinuousExperience: true
+            )
+        )
+        #expect(
+            !ContentView.shouldShowMemberMemoryManagementEntry(
+                hasManagementModel: true,
+                supportsContinuousExperience: false
+            )
+        )
     }
 
     @Test("Unavailable copy is exact and renders an independent destination")
@@ -458,7 +521,8 @@ private final class CompositionBuilderRecorder {
                     coordinator: coordinator,
                     hardware: hardware,
                     identity: identity
-                )
+                ),
+                memberMemoryManagementModel: nil
             )
         case let .unavailable(message):
             return .unavailable(message: message)

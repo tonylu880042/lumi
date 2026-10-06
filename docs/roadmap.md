@@ -1,1116 +1,206 @@
-# Curves Lumi — Development Roadmap
+# Curves Lumi — Remaining Development Roadmap
 
-> File: `roadmap.md`
-> Status: Active
-> Last updated: 2026-08-23
-> Development principles: Clean Architecture + TDD + Ask-if-Unclear
+> Updated: 2026-10-01
+> Scope: 未完成的工作、相依條件與驗收；不保留已完成功能清單。
+> 客戶訪談需求／驗收對照：[customer-interview-development-spec.md](customer-interview-development-spec.md)。C0–C9 保留全部客戶成果；owner 已選 Lumi 觀察計次作首版週次數與月 12 次來源，離店鼓勵仍須交付。
+> Decision records: [ADR-0018](decisions/ADR-0018-store-experience-recovery-plan.md)、[ADR-0019](decisions/ADR-0019-greeting-reminder-first.md)、[ADR-0020](decisions/ADR-0020-two-stage-presence-greeting.md)
+> 2026-10-01 迎賓／量身面談決策：[ADR-0021](decisions/ADR-0021-weekly-encounters-and-interview-reminders.md)，產品規則部分定案，尚未實作。
+> 本輪 Luna 實作包：[打招呼與提醒優先](greeting-reminder-first.md)
 
-## 1. Roadmap Goal
+## Agent 執行規則
 
-This roadmap defines the implementation sequence for **Curves Lumi**, an AI-powered smart welcome and member interaction assistant for Curves stores.
+1. 先讀 `AGENTS.md`、`SYSTEM_SPEC.md`、`docs/architecture.md`、本任務的 feature spec 與 ADR。
+2. 從下表第一個相依條件已滿足的任務開始。Blocked 只阻擋相關實作，不阻擋量測與其他任務。
+3. 本文件是工作排序，不代表所有候選產品規則已核准。未決問題必須詢問 owner，不可用建議值當定案。
+4. Production 行為採 RED → GREEN → REFACTOR；先保留失敗回歸測試，再修正。Profiling 不得降低辨識門檻或減少既有三影格取樣。
+5. 每個實作任務獨立驗證；跨多模組時再拆成一次可驗收的小變更。不要一次實作整個階段。
+6. 更新測試證據與 feature spec 後，移除已完成的任務；若程式完成而實機驗收未完成，只保留實機驗收工作，不重新開發既有功能。
+7. 依 Clean Architecture：Domain 管規則；Application 管 Use Case、身分綁定及 session；Infrastructure 管 Vision/Core ML、資料庫、網路與音訊；Presentation 映射 UI 自有值。
+8. 保留既有工作區變更。舊文件的歷史驗證或部署紀錄，不等於目前工作樹／裝置版本已驗收。
 
-It answers:
-- What is currently being implemented?
-- What comes next?
-- When should hardware integration begin?
-- When should Apple Vision / Core ML member recognition begin?
-- What must be complete before moving to the next milestone?
-- Which requirements must be clarified before implementation?
+## 已確認的產品約束
 
-This roadmap does not replace `SYSTEM_SPEC.md`, feature specifications, or ADRs.
+- 2026-09-23 owner 最新定位：重點是打招呼與提醒；會員不必聊天或回答例行提醒。一次一個重點，說完留白；必要同意、稱呼、更正與短服務回應仍保留。
+- 2026-09-30 owner 接受兩階段方向：遠處先說一次不帶姓名的「你好」；以畫面中臉部尺寸判斷靠近，且身分可靠後才叫名字／做個人提醒；始終未靠近時不再發話。臉面向鏡頭時可眨眼。尺寸／朝向門檻與重複問候處理仍待定；現行觸發規則尚未更動。
 
-### Language and Voice Scope
+- 本週見面鼓勵採台北時間週一至週日的不同 Lumi 見面日，同日只算一次；第一次表達很開心見面、第二次肯定持續、第三次以上加強鼓勵。Domain 週計數與同意後的資料讀取已實作；新語音鼓勵尚未接入。
+- 首版週次數與月 12 次音效的來源已選「我們看到一次就算一次」，沿用同日最多一次；說法肯定 Lumi 觀察到的來店次數，不標成正式完成運動紀錄。資料來源選定不代表離店入口或事件／播放契約已定稿。
+- 量身面談提醒窗口已定為每月 1–10 日（含 10 日），每會員每日最多一次，直到教練確認當月完成；第一版需教練操作入口，會員自述不直接標為確認完成。
+- 月初提醒的 1 日若為週日，順延到第一個營業日；整體窗口仍截至日曆 10 日。營業日來源及提醒日界／播放去重契約仍待確認。
+- 量身與面談是同一件事，名稱統一為「量身面談」，不可拆成兩個完成狀態。
+- 當月達到 12 次運動的特別音效，每會員每月只播放一次。
+- 需求方向：簡短迎賓；離店提到本週運動次數；未滿三次鼓勵再來；已滿三次肯定並鼓勵維持；每週輪替說法。
+- 見面紀錄、到店、本人告知、正式完成運動不是同一種資料。不能用既有七日滾動見面紀錄冒充日曆週運動次數。
+- 現行臉部登錄保存特徵而非照片；「照相存在記憶裡」不得作為不符合實作的告知。
+- 原有約 30 秒交流目標由 ADR-0019 取代，不再以延續對話為目標；這不新增自動斷線或硬切斷。新逾時值仍待確認。
 
-> **注意：目前 Lumi 系統僅支援中文。** UI 文案、提示詞與對話內容以
-> 台灣繁體中文為基準；語音辨識與語音輸出以台灣華語口音為優先驗收目標。
-> 其他語言與多語切換不在目前 roadmap 範圍內，必須經產品決策後另立里程碑。
+## 阻擋產品實作的決策
 
-## 2. Development Principles
+| ID | 未決問題 | 建議（未定案） | 影響／阻擋 |
+| --- | --- | --- | --- |
+| D1 | 首版來源已選 Lumi 觀察；可靠身分、寫入時點、記憶缺漏與計次資料契約如何處理？ | 沿用同日最多一次；標明觀察來源，既有記憶同意與完成招呼後寫入規則保留，變更前確認 | P1-1、P1-2、P1-4、P2-2 |
+| D2 | 已定案：首次當日紀錄至少 30 分鐘後，再次可靠辨識本人即播離店鼓勵 | 已接入開場；沿用三秒無可用臉只結束／重新待機，實機驗收待執行 | P1-3、P1-4 |
+| D3 | 週邊界／同日去重已定；月邊界、遲到資料及更正如何計數？ | 台北週一至週日、每日最多一次已實作於同意後的週計數；日曆月及剩餘契約待確認 | P1-2、P2-2 |
+| D4 | 窗口／頻率／完成來源已定；提醒日界、播放失敗／中斷、重啟去重及教練操作權限如何處理？ | 已定：日曆 1–10 日、每日最多一次、教練確認當月完成後停止；其餘見 ADR-0021 待確認事項 | P2-1 |
+| D5 | 門店營業日與例假日資料從哪裡來？ | 明確門店日曆；無資料不硬說週五／週六要來 | P1-4、P2-1 |
+| D6 | 運動／量身面談記錄的同意、來源、留存、更正與清除規則；多人時能否播報次數？ | 最小結構化狀態、明確來源；不沿用臉部同意擴張用途 | P1-1、P1-4、P2-1、P2-2 |
+| D7 | 辨識、語音啟動、回答、收尾各階段的逾時與失敗 UX？ | 先依 P0-1 實測提出門檻，再確認 | P0-3 |
+| D8 | 多提醒同時成立時的優先序？例行迎賓／提醒不要求回答已由 ADR-0019 確認 | 進店量身面談、離店成果；一次一個重點 | P1-4、P2-1 |
+| D9 | 12 次獎勵遇資料更正、跨月補登、播放失敗／中斷或清除後如何處理？ | 本機持久去重；禁止無限補播；具體重試／補登規則先確認 | P2-2 |
+| D11 | 已選臉框尺寸判斷靠近；具體尺寸門檻／連續影格／遲滯／偵測中斷如何處理？ | 依實機距離 profile 校準，owner 核准數值（未定案） | P0-5 |
+| D13 | 面向鏡頭的證據／角度門檻為何？需額外一次雙眼眨眼，或只使用現有自然眨眼？ | 先量測 Vision 姿態訊號；不以臉框朝向推測（未定案） | P0-5 眨眼 slice |
 
-### Clean Architecture
+主動播報正式運動資料會擴張目前按需查詢範圍，需同步修訂 ADR-0011／0017 對應權限，不能只在 prompt 開啟。
 
-```text
-UI
-↓
-Presentation
-↓
-Application / Use Cases
-↓
-Domain
+## 執行順序
+
+| 優先序 | 任務 | 前置 | 狀態 |
+| --- | --- | --- | --- |
+| P0-1 | 辨識與首句延遲實機 profile | Live 裝置、已同意受測者 | 待實機；host 初步量測見 profiling 文件 |
+| P0-2 | 量測支持的辨識加速 | P0-1 | 待 baseline |
+| P0-3 | 不反應重現、狀態提示與恢復 | P0-1、D7 | 可先診斷；產品逾時待確認 |
+| P0-4B | 更換聊天定位的預錄音檔 | 核對實際 WAV 文案、新素材與響度驗證 | 待辦，prompt 無法改錄音 |
+| P0-4C | 迎賓／提醒優先的 Live 驗收 | P0-4B、可用裝置；既有提示證據見 feature spec | 待實機 |
+| P0-5 | 遠處一次「你好」、以臉尺寸判斷靠近、可靠身分後才個人化；可選面向鏡頭眨眼 | P0-1 遠近量測、D11／D13；規格見 two-stage-presence-greeting.md | Luna 已完成匿名臉框尺寸與可選 raw yaw/roll；相機接入、門檻與觸發仍待辦 |
+| P0-6 | 本週第一次／第二次／第三次以上見面鼓勵 | ADR-0021：既有記憶同意；當次序號、同日文案與 context 優先序待定 | 日曆週與同日去重已核准；尚未實作，不能重做為正式運動統計 |
+| P1-1 | 首版 Lumi 觀察計次與身分／資料契約 | D1、D6 | 來源已選；事件、權限與資料契約待定 |
+| P1-2 | 週月次數摘要 | P1-1、D3 | 週計數與首次迎賓／離店語音已接入；30 分鐘內重訪短招呼已接入；月計數待定，實機文案待驗收 |
+| P1-3 | 自動鏡頭離店事件 | D2 | 30 分鐘再見面資格已實作；實機待驗收 |
+| P1-4 | 依次數的離店鼓勵 | P0-4、P1-2、P1-3、D5、D6、D8 | 觀察次數離店開場已接入；實機、營業日／多人擴充待定 |
+| P2-1 | 量身面談提醒與完成記錄 | D4、D5、D6、D8 | Blocked |
+| P2-2 | 每月 12 次音效、持久去重 | P1-2、D6、D9 | Blocked |
+| P2-3 | 每週文案輪替與聲音一致性 | P0-4、P1-4，客戶文案／聲音確認 | 待核心流程 |
+| V1 | 現場綜合驗收 | 已完成的對應任務 | 持續保留至有實機證據 |
+
+Luna 第一包的實作與測試證據見 greeting-reminder-first.md；本表只保留後續音檔與實機驗收，不重新開發提示政策。
+
+## P0 — 穩定、看得懂、反應快
+
+### P0-1：辨識與首句延遲 profile
+
+- 參考：[profiling 記錄與操作方式](identity-performance-profile.md)、identity-recognition.md、ADR-0004／0010。
+- 範圍：既有 `SessionSimulationModel` operation diagnostics、Identity factory／camera／pipeline／SQLite／matcher、實際音訊播放開始。
+- 分開量測：啟動模型、相機首個可用影格、presence、三個 fresh-frame 的等待／Vision／YuNet／alignment／SFace／gallery read／matching、known/unknown 判定、稱呼／記憶查詢、語音 ready、第一個可聽見聲音。
+- 區分 cold/warm、已登錄／未登錄單人、無臉／多人／模糊拒絕；記錄樣本數、median、p95、max 與失敗／取消數。無臉提早返回不能代表陌生人速度。
+- 先確認手機上實際 bundle/version/model/gallery size；host synthetic microbenchmark 只能描述元件耗時，不能冒充端到端或實機結果。
+- 2026-09-30 owner 接受遠處一次「你好」、以臉部尺寸判斷靠近、身分可靠後才叫名／個人提醒，未靠近時不再發話；在門店實際站位分距離記錄原始影格尺寸、臉框像素、偵測率、正確認出率、誤認／unknown 與延遲；分清看到臉與認出身分，不先承諾幾公尺。面向鏡頭眨眼需另量測姿態與確定動作。觸發細節見 [兩階段規格](two-stage-presence-greeting.md)。
+- 驗收：可重跑量測；每個 stall 可定位最後完成階段；報告保留環境與原始耗時，不含姓名、照片、embedding、聲音、逐字稿或穩定會員識別碼。
+- 若需新增診斷程式，先測量測完整性、錯誤／取消與不含敏感 payload，再加 Infrastructure／Application instrumentation；不改識別契約。
+
+### P0-2：以瓶頸為依據的小幅加速
+
+- 第一候選：host profile 顯示 Debug 與最佳化成本差異很大；先對同一實機、仍保留 Debug-Live 功能的最佳化組態做 A/B。不得直接改用缺少 pilot 能力的 Release-Live，也不得把 host 倍數當手機結果；組態與 DEBUG 編譯旗標須分別驗證。
+
+- 候選 A：若 SQLite decode 佔比高，評估同一次三影格辨識共用 gallery snapshot；先測登錄／刪除／取消一致性。
+- 候選 B：若首用 model load 佔比高，評估在既有授權生命週期內預載；不得擴張背景相機或麥克風使用。
+- 候選 C：若 tensor packing／copy 佔比高，優化等價記憶體操作，保留 RGB/BGR、stride、shape、parity tests。
+- 候選 D：presence 目前也經完整 embedding gate；改成較輕量 presence gate 會改變「可用臉」語意，須另提規格與測試、owner 確認後才能改。
+- 一次只選一個證據支持的候選，不預先新增 vector DB、快取框架或換模型。
+- 驗收：同裝置／資料／組態前後比較；known/unknown 正確性不退步；不降低 0.70／0.20 門檻或擅改三影格、2-of-3 規則。
+
+### P0-3：不反應診斷與恢復
+
+- 第一小步：重現 prewarm/start、麥克風未恢復、打斷後等待、斷線、工具未返回、道別後同次 presence 等情境；每個確定 bug 先寫失敗測試。
+- 第二小步：Presentation 區分準備中、可以說話、處理中、恢復中、可重新互動；UI 不直接操作硬體／網路，不另建競爭 state machine。
+- 第三小步：D7 確認後，加入各等待階段的有限等待與取消策略；沿用唯一 coordinator 與既有一次重連契約。
+- 驗收：故障不無提示等待；失敗可恢復；取消／過期事件不影響下一位、重連不重迎賓。
+- 不以維持約 30 秒交流為目標；同次 presence 不重迎賓與手動再互動入口需要一起驗收，不能把例行提醒不用回答解讀成任意 timeout。
+- 基準測試的語音重連失敗須先重現、定位，不能因本次 roadmap 修改就標為已修好。
+
+### P0-4：打招呼與提醒優先
+
+- 參考 greeting-reminder-first.md 的既有實作／驗證證據及 ADR-0019、ADR-0013～0017；以下只列未完成工作。
+- P0-4B：核對所有 WAV；已知 `07-goodbye` 含「來跟我聊天」，需另製短道別、校準音量並驗證單次播放／echo／取消，不改用假設離店的 `08-goodbye`。
+- P0-4C：以真人驗證例行迎賓／提醒不必回答、必要同意仍待答、短回應不引出新話題；結果另存 feature spec。
+- 分別定義初次認識、已知會員進店、一般回答、登錄同意與離店目的；每次只選一個重點，不重複問候或強制追問。
+- 文案包含「Hello，我是 Lumi，新來的小幫手」方向；保存三份臉部特徵、不保存照片的告知與肯定同意順序保留；拒絕不強求。
+- 驗收：一般回覆維持 1–2 句；必要同意說明完整；客人追問時持續協助；不需回答的提醒不偷偷等待回答。
+- 5–10 秒可作試聽候選目標，非已核准硬切斷；prompt fixture passing 不能代替真人語音驗收。
+
+## P1 — 有依據的觀察計次與離店鼓勵
+
+### P1-1：資料契約與單一來源接入
+
+- 首版來源已定為 Lumi 觀察計次，沿用台北日曆週與同日最多一次；先定可靠會員 ID 綁定、觀察／寫入事件、權限、更新時間、記憶缺漏／失敗與更正契約。不是先接正式運動 API 的前置要求。
+- 沿用既有 encounter store／Use Case 時須核對其完成招呼後寫入、同意、清除與保留規則；來源選定不把當日運動自述或既有 `visitsThisWeek` 改成正式完成運動紀錄。未來正式 API 另定契約，不以姓名匹配帳號。
+- 驗收：unknown 不查／寫會員資料；mock fixture 不冒充真實紀錄；過期、缺漏、失敗不轉成零次。
+- 可能範圍：Application repository／Use Case、Infrastructure adapter、對應 unit/contract tests。
+
+### P1-2：週月摘要
+
+- 依已確認的日曆週／同日去重與 D3 剩餘月邊界契約建立 Domain 觀察週月計次，保留來源與截至時間；不從觀察推定今天已完成運動，也不直接將 `visitsThisWeek` 改名當完成次數。
+- 驗收：0／1／2／3／超過 3／月 11→12；跨日週月、同日重複、延遲與撤回不錯算；資料不完整時不說「本週第一次」。
+- 可能範圍：Domain policy、Application summary Use Case、repository DTO mapping、相應測試。
+
+### P1-3：離店事件
+
+- 將「聊天結束」「離開鏡頭」「完成運動」「運動後離店」分開；只實作 D2 選定的入口。
+- 2026-10-02 已實作：首次當日已保存觀察紀錄至少 30 分鐘後，再次可靠辨識本人就播離店開場；三秒無可用臉只結束本次互動。中途重訪不重設計時，持續在場不自行觸發。
+- 驗收：一般「掰掰」與走出鏡頭不自動加一次運動；否定／引用／第三人稱不誤判；重複事件只觸發一次。
+- 模型可提出受限意圖，Application 決定合法行為與當前會員綁定，不能讓模型帶入 MemberID 或任意日期。
+
+### P1-4：次數鼓勵
+
+- 建立固定規則選擇一次短訊息：本週觀察 1／2 次鼓勵再來、3 次加強肯定、超過 3 次肯定持續；0 次／不確定不宣稱今天完成。依 owner 選定的來源說「這週已經來三次」，不說成正式完成三次運動。
+- 離店使用包含今天且已確認的最新資料；不得在已有資料包含今天時再自行 +1。
+- 指定週五／週六等日期需 D5 支持；先回應會員當下需求，不為播報忽略提問。
+- 驗收：每次合格離店只播一次次數＋鼓勵；多人隱私策略生效；來源故障仍可一般道別、不捏造。
+
+## P2 — 量身面談、達標慶祝與內容輪替
+
+### P2-1：量身面談
+
+- 名稱及完成狀態只有一個：「量身面談」。ADR-0021 已定日曆 1–10 日、每會員每日最多一次、教練確認當月完成後停止；依 D4/D5 補提醒日界、播放去重與 1 日週日順延／營業日契約。
+- 第一版由教練入口確認當月完成；會員口頭說已完成不直接寫成確認完成。教練權限、會員綁定、同意、留存、清除與更正先依 D4/D6 定稿。
+- 驗收：1／10／11 日、同日不重複／隔日可提醒、教練確認後停止、會員自述不誤確認、跨月重新判斷，以及已定稿的週日順延、播放失敗／中斷、重啟與更正行為有測試。
+- 先實作 Domain 日期選擇，再完成 Application 寫入與存取，最後串語音／管理更正，分三個可驗收小步。
+
+### P2-2：月 12 次音效
+
+- 首版依 owner 選定的 Lumi 觀察月次數達 12 次觸發，每會員每月最多一次；保留觀察來源，不宣稱正式完成 12 次運動。週三次音效的額外需求／門檻尚未定案，不自行新增。
+- 去重狀態須跨 session／重連／App 重啟有效。識別 key 由 Application／store 管理，不送到模型。
+- 先依 D9 定義播放預約／完成／失敗與清除、更正後語意；多裝置同步不隱含在單機範圍。
+- 驗收：11→12、12→13、同月重訪與重啟不重播；跨月依新紀錄計算；播放取消／失敗不困住 session；音效不被麥克風誤收成會員輸入。
+
+### P2-3：每週文案與聲音
+
+- 客戶確認短文案庫後，以週別及當前情境選擇；避免連續重複，不讓內容輪替改變次數或提醒規則。
+- Vale／Maple 是聲音偏好，目前查核未列於 Realtime API 內建聲音；實作前再次查官方支援，不直接寫入 voice 設定。
+- 換聲音時涵蓋迎賓、即時對話、道別；音量與情緒一致，延用 audio-loudness-calibration.md 的量測方式。
+- 驗收：跨週變化但不變長；名稱／數字發音清楚；同一流程沒有無意義的聲線切換；試聽結果由 owner 確認。
+
+## V1 — 現場驗收與發布前工作
+
+尚待實機驗收的既有能力只驗收，不重做：
+
+- 真實攝影機下已知／陌生、眼鏡／角度／光線／多人、明確同意登錄與下一次認出、撤回／取消。
+- 語音冷啟動、音訊路由、音量、echo、barge-in、自然台灣華語、短回覆、語意道別、斷線恢復及下一位會員。
+- 個人化記憶的真實語意、獨立同意、清除／停用、跨日、重啟與不誤用正式運動次數。
+- 既有活力與預錄迎賓的鏡頭到訪重置、單次迎賓、真人現場音量；使用最新 ADR-0015 的三秒 rearm，不能照舊 roadmap 十秒歷史重新實作。
+- Live broker／Preview／Production：核對現在部署與憑證隔離，再依 runbook 補尚缺證據；不把舊 Task 18 或歷史安裝成功當目前驗收。
+
+每次 handoff 必跑並報告真實結果：
+
+```sh
+swift test
+xcodebuild -project App/LumiApp.xcodeproj \
+  -scheme LumiApp \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO build
 ```
 
-Infrastructure implements Application ports.
+實機僅限 `LumiApp-Live`、`Debug-Live`；安裝前檢查 `CFBundleIdentifier == com.curves.lumi.live`，只安裝／啟動此 bundle。完整命令遵循 AGENTS.md。
+所有失敗／hang 如實列出，不以 focused tests、build 或安裝成功取代全套與現場驗收。
 
-External frameworks such as SwiftUI, AVFoundation, Vision, Core ML, OpenAI Realtime, WebSocket, Raspberry Pi GPIO, and ESP32 communication must remain outside Domain and Application business rules.
+## 後續未完成里程碑
 
-### TDD
-
-All production behavior follows:
-
-```text
-RED → GREEN → REFACTOR
-```
-
-Requirements:
-- New behavior requires a failing test first.
-- Bug fixes require a regression test first.
-- State transitions require tests.
-- Use Cases require tests.
-- Domain policies require tests.
-- Adapter mappings require contract/integration tests.
-
-### Ask-if-Unclear
-
-If an unresolved requirement affects UX, Domain behavior, state transitions, API contracts, privacy, member data, recognition thresholds, hardware behavior, voice behavior, or acceptance criteria, stop the affected implementation and ask the product owner.
-
-No silent product assumptions.
-
-## 3. Current Development Status
-
-### Avatar M0 — Domain / Presentation Model
-**Status: Complete**
-
-Completed:
-- `AssistantState`
-- `AvatarVisualState`
-- `AvatarStateMapper`
-- Clean separation between Domain and visual parameters
-- Pure deterministic mapping
-- Unit tests
-
-### Avatar M1 — SwiftUI Visual Layer
-**Status: Complete**
-
-Completed:
-- Lumi eye rendering
-- Multi-layer iris
-- pupil
-- watery multi-point highlights
-- eyelid masking
-- scalable geometry
-- SwiftUI rendering layer
-- visual tokens
-
-### Avatar M2 — Continuous Animation
-**Status: Complete / tuning**
-
-Completed:
-- randomized blinking
-- micro eye movement
-- highlight breathing
-- deterministic time injection
-- reduced motion behavior
-- animation composition
-- iOS tuning shell
-- detected left / center / right gaze behavior
-
-Current tuning may still include iris size, pupil ratio, gaze travel, visual weight, and state distinction.
-
-## 4. Avatar M3 — Event / State Expression Layer
-
-**Status: Complete**
-
-Goal: complete Lumi as a reusable animated character component before connecting full system services.
-
-Implement:
-- greeting state transition and optional short-lived recognition effect
-- encouraging state animation without a duplicate Domain Event
-- reminding state
-- confused / retry state
-- recognition transition
-- speaking / listening presentation
-- sparkle / heart / question effects
-- event lifetime and cancellation
-- state transition animation rules
-
-Completed in the current working slice:
-- Domain `AssistantEvent` taxonomy from Avatar Visual Spec §5.3
-- Presentation-owned `AvatarEventCommand` and exhaustive Domain event mapper
-- `LumiUI` consumes Presentation event commands without importing `LumiDomain`
-- package dependency boundary enforces `LumiUI → LumiPresentation`
-- pure `EventLayer` duration, effect mapping, and intensity envelope
-- State → Continuous → Event → Accessibility compositor order
-- vector effect shapes and Simulator trigger controls
-- Event lifetime, replacement, and latest-base-state unit tests
-- clamped Event decoration intensity rendered independently from ambient sparkle
-- Presentation-owned replacement, explicit cancellation, and expiry through `AvatarEventPlayback`
-- Reduced Motion fallback that keeps the active Event as a static, fully visible effect
-- destination `AvatarTransition` consumed at the single `AnimatedLumiAvatarView` coordination point
-- Presentation-owned amplitude smoothing, batch downsampling, and clamp pipeline
-- one processed amplitude routed to listening waveform and speaking waveform/mouth
-- Simulator amplitude controls showing raw and processed values
-- constant-memory deterministic blink scheduling with no runtime horizon
-- native pixel snapshot coverage for states, gaze, Events, audio, eyelids,
-  highlights, themes, and Reduced Motion
-
-Final M3 approval gate completed:
-- product owner approved the checked-in visual baseline sheets on 2026-08-09
-- shipping canvases are bright white and light lavender; dark UI is unsupported
-
-### Immediate TDD Execution Order
-
-Implement the remaining M3 work as these reviewable slices. Each slice starts
-with a failing test, ends with `swift test` and the Simulator build, and must be
-green before the next slice begins.
-
-1. **M3.1 — Presentation boundary (Complete)**
-   - Added the Presentation-owned `AvatarEventCommand` and exhaustive mapper tests.
-   - Moved Event-layer input from `AssistantEvent` to `AvatarEventCommand`.
-   - Removed `LumiDomain` from `LumiUI` source imports and package dependencies.
-   - Kept Domain-to-Presentation mapping in `LumiPresentation`; the App remains
-     the composition root.
-2. **M3.2 — Event lifecycle and accessibility (Complete)**
-   - Replaced the Reduced Motion behavior that erased Event effects with a
-     static, fully visible effect fallback.
-   - Applied the intensity envelope to Event decoration rendering.
-   - Made replacement, explicit cancellation, expiry, and latest-base-state
-     restoration observable and tested through the public Presentation API.
-3. **M3.3 — Transition and audio inputs (Complete)**
-   - Consumed `AvatarTransition` at the single animation coordination point,
-     with immediate semantic updates under Reduced Motion.
-   - Added a mock amplitude processor with smoothing, batch downsampling, and
-     clamp tests for `listening` and `speaking`.
-4. **M3.4 — Long-running and visual regression coverage (Complete)**
-   - Replaced the one-hour array horizon with an ongoing deterministic timeline
-     that has constant query cost and constant memory use.
-   - Added four native pixel snapshot matrices with fixed size, scale, seed,
-     time, Event progress, audio input, and Reduced Motion coverage.
-   - Product owner approved the checked-in baselines; dark-background coverage
-     remains diagnostic only, not a supported product theme.
-
-Phase 1.1 completed the first vertical slice: `rotating`, the deterministic
-reducer transition, validated rotation angles, mock hardware completion,
-explicit Avatar mapping, snapshots, and Simulator state selection landed
-together. Next, add the remaining ports, mocks, coordinator, and Simulator
-controls around that tested state flow.
-
-### TDD Acceptance
-
-```text
-greeting
-→ happy visual state
-→ stronger highlight
-→ greeting effect active
-
-encouraging
-→ elevated sparkle
-→ energetic expression
-
-confused
-→ confused expression
-→ no fabricated member state
-
-event expires
-→ returns to base AssistantState visual state
-```
-
-### Exit Criteria
-- All core `AssistantState` values have readable visual differences.
-- Continuous animation and event animation do not conflict.
-- Reduced Motion remains supported.
-- Avatar can be driven entirely from mocked state input.
-
-## 5. Phase 1 — Simulated Interaction MVP
-
-**Status: Complete — the simulated interaction loop and all Phase 1 port
-contracts are implemented and verified**
-
-Goal: create a complete Lumi interaction loop without real hardware, real face recognition, or real Curves backend.
-
-Architecture introduced:
-
-```text
-Domain
-Application
-Presentation
-Infrastructure mocks
-UI
-Composition Root
-```
-
-Implement:
-- `AssistantSessionCoordinator`
-- deterministic State Reducer
-- Application Use Cases
-- `IdentityRecognitionPort`
-- `MemberRepository`
-- `VoiceSessionPort`
-- `HardwareControlPort`
-- Mock adapters
-- debug/simulation control panel
-
-Target flow:
-
-```text
-Idle
-↓
-Simulate Visitor
-↓
-Detected
-↓
-Rotating (MockHardwareControlPort)
-↓
-Recognizing
-↓
-Mock Known or Unknown Visitor
-↓
-Greeting
-↓
-Speaking (initial greeting)
-↓
-Listening
-↓
-Thinking
-↓
-Speaking (response)
-↓
-Timeout
-↓
-EndSession + Mock Hardware Return Home
-↓
-Idle
-```
-
-### Important Architecture Decision
-
-`IdentityRecognitionPort` must be defined in this phase even though real Vision/Core ML recognition is implemented later.
-
-```swift
-protocol IdentityRecognitionPort {
-    func recognizeCurrentVisitor() async throws -> RecognitionResult
-}
-```
-
-Phase 1:
-```text
-MockIdentityRecognitionAdapter
-```
-
-Future:
-```text
-VisionCoreMLIdentityAdapter
-```
-
-### Exit Criteria
-The complete interaction flow runs in iPad Simulator with:
-- no Raspberry Pi
-- no Vision
-- no Core ML
-- no real Curves backend
-- no mandatory OpenAI connection
-
-All external systems must be replaceable by mocks.
-
-Phase 1 introduces `AssistantState.rotating` together with the deterministic
-State Reducer, mock `HardwareControlPort`, tests, and an explicit Avatar mapping.
-`ending` and `returnHome` remain Application actions rather than state cases.
-
-Phase 1.1 decisions:
-- `rotating` is parameterless and maps to a centered attentive expression
-- illegal reducer transitions throw a typed Domain error
-- rotation angles are finite degrees in `-90...90`; invalid values are rejected
-- mock `rotate(to:)` completes only after explicit arrival confirmation
-
-Phase 1.1 completed:
-- Domain reducer covers `idle → detected → rotating → recognizing` and rejects
-  every illegal transition with a typed error
-- `RotationAngle` validates finite values in the inclusive safety range
-- Application owns the `HardwareControlPort`; Infrastructure provides a
-  deterministic, cancellation-safe actor mock with explicit arrival control
-- Presentation maps the twelfth baseline state, snapshot coverage includes
-  `rotating`, and the Simulator debug state picker exposes it
-
-Phase 1.2 decisions:
-- Simulator orientation is staged as Confirm Presence → Begin Rotation →
-  Complete Rotation, with no invented wall-clock delay
-- left/center/right always issue absolute `-90°`/`0°`/`+90°` commands and wait
-  for explicit arrival
-- rotation failure or cancellation stops hardware and returns through the
-  reducer to the original `detected(direction:)`, allowing retry
-- Session simulation and Avatar tuning remain separate debug-control modes;
-  Session mode is the default and the coordinator remains the only session
-  state owner. App/Xcode wiring occurs only after the coordinator API review
-  gate.
-
-Phase 1.2 coordinator API completed:
-- `AssistantSessionCoordinator` is the actor-isolated state owner and exposes
-  read-only state updates for independent observers
-- orientation maps left/center/right to validated absolute
-  `-90°`/`0°`/`+90°` targets and advances to `recognizing` only after confirmed
-  hardware arrival
-- duplicate or reentrant commands are rejected through the typed Domain
-  transition error without replacing an active rotation
-- hardware failure and caller cancellation stop movement, restore the original
-  `detected(direction:)` through the reducer, propagate the original error, and
-  permit a deterministic retry
-
-Phase 1.2 Simulator integration completed:
-- the App composition root constructs one mock hardware adapter and one
-  coordinator, then injects an App-side observable adapter without a singleton
-- the App target links Application and Infrastructure directly while `LumiUI`
-  remains Presentation-only
-- Session mode is the default and exposes the explicit Confirm Presence → Begin
-  Rotation → Complete Rotation sequence; Avatar tuning remains an independent
-  mode and cannot overwrite coordinator state
-- the full-screen Avatar stays on the supported bright canvas, with the debug
-  overlay forced to the light appearance instead of adapting to a dark panel
-
-Phase 1.3 decisions (see ADR-0006):
-- `MemberID` preserves an exact non-empty value, while recognition confidence
-  rejects non-finite values and values outside inclusive `0...1`
-- known and unknown identity results both enter `greeting`; known may emit the
-  existing member-recognized Event, but neither path queries member data
-- the canonical voice flow is greeting → speaking → listening → thinking →
-  speaking, driven by ready, speech-started, speech-ended, and response-ready
-  events; ordinary conversation does not use Phase 3 tool-call events
-- every Simulator stage is explicit and deterministic, with Unknown selected by
-  default and no wall-clock delays
-- identity and voice failures preserve the approved retryable state; identity
-  adapter failure degrades to unknown while cancellation still propagates
-- timeout and person-left share one end-session action: stop voice, stop active
-  movement, return home, then enter idle only after confirmed arrival
-
-Phase 1.3 identity slice completed:
-- Domain defines validated `MemberID`, `RecognitionConfidence`, and the
-  privacy-safe known/unknown `RecognitionResult`
-- the reducer advances both identity outcomes from `recognizing` to `greeting`
-  and keeps illegal transitions explicit
-- Application defines `IdentityRecognitionPort`; Infrastructure supplies a
-  deterministic cancellation-safe mock with explicit result completion
-- the coordinator owns one recognition operation, degrades adapter failure to
-  unknown, propagates cancellation, and preserves the result as session context
-- Simulator defaults to Unknown and exposes one explicit Resolve Visitor stage;
-  known shows the generic Taiwan Traditional Chinese「歡迎回來～」plus the
-  existing member-recognized Avatar Event, while unknown shows「嗨，歡迎妳！」
-  with no identity detail
-
-Phase 1.3 mock voice slice completed:
-- Domain reducer events cover the canonical `greeting → speaking → listening →
-  thinking → speaking` lifecycle and reject illegal transitions explicitly
-- Application defines a privacy-safe, Taiwan-Mandarin-only voice boundary;
-  `VoiceContext` never carries a member ID, confidence, name, or language choice
-- Infrastructure supplies a deterministic voice mock with explicit readiness,
-  lifecycle events, cancellation-safe retry, and no wall-clock timing
-- the coordinator is the sole voice-event subscriber and preserves the current
-  semantic state on provider failure while exposing a generic retry condition
-- Simulator Session mode uses Taiwan Traditional Chinese copy and explicit
-  controls for startup, speech start/end, response readiness, and failure; the
-  Avatar tuning mode remains isolated
-
-Phase 1.3 end-session slice completed:
-- Domain accepts one `sessionEnded` event from every active semantic state and
-  rejects `idle`/`offline` without side effects; ending and Home remain actions
-- the coordinator uses one operation generation to cancel or ignore stale
-  orientation, identity, voice-start, and voice-event completions
-- voice stops first, rotating hardware stops when needed, and `returnHome()`
-  must confirm Home arrival before the reducer publishes `idle`
-- Home failure or cancellation preserves the semantic state and session
-  context for retry; confirmed idle clears recognition and voice-retry context
-- the deterministic hardware mock exposes explicit Home completion and failure
-  controls with cancellation-safe request IDs
-- Simulator Session mode exposes「模擬逾時」、「模擬訪客離開」、Home
-  completion, and Home failure/retry controls; confirmed idle resets direction
-  to center, identity to Unknown, and cancels any transient Session Avatar Event
-
-Phase 1 member-data boundary completed:
-- Domain defines framework-free, `Sendable` `Member` and `ExerciseSummary`
-  values for member profile and weekly activity data
-- Application defines the `Sendable` `MemberRepository` port with only
-  `profile(for:)` and `weeklySummary(for:)`
-- Phase 1 does not construct a member repository, query member data, or expose
-  member questions in the Simulator; mock query behavior remains Phase 3
-
-Phase 1 defines `MemberRepository` as a port but does not implement member
-questions or repository query behavior. Those remain in Phase 3 with mock member
-data and tool calling.
-
-## 6. Phase 2 — OpenAI Realtime Voice
-
-**Status: In Progress**
-
-Goal: replace simulated voice with natural realtime voice interaction.
-
-Implement:
-- Realtime session abstraction
-- OpenAI Realtime infrastructure adapter
-- short-lived credential flow
-- audio input/output
-- interruption
-- listening/speaking state integration
-- inactivity timeout
-- session shutdown
-- error/reconnect behavior
-
-Architecture:
-
-```text
-Application
-↓
-VoiceSessionPort
-↓
-OpenAIRealtimeAdapter
-```
-
-OpenAI types must not leak into Domain.
-
-Realtime becomes active only when a person is confirmed in front of Lumi. Do not keep an active session for the full store business day.
-
-Phase 2.1 decisions:
-- iOS production transport targets WebRTC; the first slice uses an injected
-  transport seam so Simulator tests require no network, microphone, or provider
-- initial provider configuration uses `gpt-realtime-2.1-mini` with `marin`
-- session instructions require Taiwan Traditional Chinese and prioritize natural
-  Taiwan Mandarin; regional accent remains a physical-device quality target,
-  not an API guarantee
-- `responseReady` is emitted at the first playable response audio, while the
-  initial greeting remains represented by voice-session readiness
-- assistant interruption is a public provider-independent voice event and maps
-  to the existing speaking-to-listening Domain transition
-- an unexpected disconnect retries once with a new short-lived credential; the
-  retry starts a fresh provider session and does not promise transcript recovery
-- the app receives only injected short-lived credentials; the standard OpenAI
-  API key remains on the company backend
-
-Phase 2.1 completed:
-- provider-independent Realtime configuration and redacted short-lived client
-  secret contracts
-- an injected transport and factory seam requiring no network or microphone in
-  tests
-- deterministic provider event mapping for readiness, first playable audio,
-  interruption, failures, and unknown future events
-- a cancellation-safe adapter with one fresh-credential reconnect attempt and
-  no provider types crossing `VoiceSessionPort`
-
-Phase 2.2 completed scope:
-- use `stasel/WebRTC` pinned to exact version `151.0.0`
-- implement a concrete peer connection with local microphone input, remote
-  assistant-audio playback, `oai-events`, and ephemeral-token SDP exchange
-- configure provider-default `server_vad` with automatic response and
-  interruption; defer threshold tuning to physical-iPad validation
-- request microphone permission just in time, use a voice-chat audio session,
-  prefer the iPad speaker without overriding wired or Bluetooth HFP routes, and
-  add the approved microphone purpose string
-- reject expired credentials before permission, media, or signaling, without
-  inventing an expiry safety margin
-- request the initial greeting exactly once and never replay it during the
-  adapter's automatic reconnect
-- keep the App on mock voice by default; concrete credential backend, Live mode,
-  wall-clock timeout values, and real Avatar amplitude remain later Phase 2 work
-
-Phase 2.2 implementation status: **Complete (automated gates)**
-- resolved revision: `19aa8c1fc7120d50df987b7111f42d5024df3d54`
-- upstream binary checksum:
-  `64a218fad3d84a0d783321aa9a1eec58ca266ac7879123f86b0b44b703b7d8dc`
-- focused `OpenAIWebRTCTransportTests`: 21 tests in 1 suite passed
-- Swift Testing: 247 tests in 16 suites passed; XCTest: 4 snapshot tests
-  passed
-- unsigned iOS Simulator build completed successfully
-- automated checks used deterministic fakes and did not exercise real
-  credentials, OpenAI network traffic, a microphone, or a physical iPad
-- the App remains on `MockVoiceSessionPort`; physical-iPad validation of
-  permission presentation, routing, echo cancellation, barge-in, interruption
-  recovery, and Taiwan Mandarin quality is deferred
-
-Phase 2.3 status: **Automated implementation/review through Task 17 complete; local checkpoint staging/commit authorized under 33A (2026-08-13), no push; Preview remains stopped and the Task 18 external gate is pending with no deployment**
-- add a separately installable `LumiApp-Live` composition while preserving the
-  existing offline Mock scheme
-- add a minimal Vercel client-secret broker; the standard OpenAI key remains a
-  server-only sensitive environment value
-- authorize revocable per-iPad tokens through this-device-only Keychain storage
-  and SHA-256 Vercel allowlists, with no member identity data in the broker
-- keep hardware and identity mocked while real WebRTC voice drives the existing
-  coordinator lifecycle
-- isolate Preview and Production credentials, endpoints, and Keychain
-  namespaces; require Preview review and physical-iPad evidence before explicit
-  Production promotion
-- defer App Attest, QR enrollment, a database registry, real identity, member
-  data, timeout tuning, and Avatar amplitude
-
-Refer to:
-
-```text
-docs/phase-2.2-webrtc-transport.md
-docs/phase-2.2-webrtc-implementation-plan.md
-docs/decisions/ADR-0008-phase-2.2-webrtc-transport.md
-docs/decisions/ADR-0007-phase-2-realtime-voice-contract.md
-docs/phase-2.3-live-voice.md
-docs/phase-2.3-live-voice-implementation-plan.md
-docs/phase-2.3-live-voice-task-list.md
-docs/decisions/ADR-0009-phase-2.3-live-voice-broker.md
-```
-
-### Exit Criteria
-A simulated visitor can trigger greeting, speak naturally, interrupt Lumi, receive spoken reply, timeout, and return to idle.
-
-## 7. Phase 3 — Mock Member Data + Tool Calling
-
-**Status: Automated Debug-Live implementation complete; physical voice quality,
-physical iPad validation, and real Curves data validation pending**
-
-Goal: allow Lumi to answer member-specific exercise questions before integrating the real Curves backend.
-
-Implement support for:
-- member profile
-- weekly visit count
-- recent exercise summary
-- today's goal
-- activity total / MET-minutes where applicable
-
-### Completed implementation slice
-
-The first validated slice intentionally narrows the Phase 3 surface to one
-weekly-summary tool:
-
-- `get_member_weekly_summary` is exposed as a no-argument Realtime function
-  with an empty, closed parameter object.
-- Only a known local session registers the tool. The Application router binds
-  the locally retained `MemberID`; OpenAI receives neither the ID nor any
-  member identity field.
-- Unknown/visitor sessions do not register the tool and cannot load member
-  data. Tool calls are routed serially and return deterministic JSON or fixed
-  redacted error codes.
-- `Debug-Live` uses one fixed synthetic `MockMemberRepository` record. The
-  Debug-Live instructions require the spoken answer to begin with
-  「以下是開發測試資料」 so fixture data cannot be mistaken for Curves
-  production data.
-- `LumiApp` Release and `LumiApp-Live` Release-Live do not enable the mock
-  member tool. The generic mock repository has no default records.
-
-### Completed conversation-direction slice (43A)
-
-The voice session can be focused before startup with one payload-free,
-provider-neutral direction:
-
-- `general`, `preWorkoutReminder`, and `postWorkoutReview` apply to both known
-  members and unknown visitors.
-- Only the per-session Realtime instructions change; general adds no direction
-  text, and the pre-workout/post-workout text is fixed and does not contain a
-  `MemberID`, name, confidence, embedding, photo, or other member payload.
-- A direction does not force a tool call. The weekly-summary member tool remains
-  known-session-only and on-demand; unknown/visitor sessions have no private
-  member data path.
-- The Debug-Live UI labels are exactly `一般`, `運動前提醒`, and `運動後
-  review`. The picker is compiled/displayed only for `DEBUG && LUMI_LIVE`;
-  Mock Debug, Release, and Release-Live use `general` without the picker.
-- The picker is selectable only before voice startup, remains selected after a
-  retryable startup failure, and resets to `general` after confirmed return to
-  `idle`. Direction choice is neither persisted nor telemetered.
-- The broker request/body and device authentication flow remain unchanged.
-
-The current synthetic fixture is intentionally stable for manual validation:
-
-| Field | Debug-Live value |
+| 項目 | 下一步與完成條件 |
 | --- | --- |
-| Display name | `Lumi 開發測試會員` |
-| Visits this week | `2` |
-| Activity total | `580.5` MET-minutes |
-| Last workout | `2026-08-18T02:30:00.000Z` |
-| Today completed | `false` |
-
-Automated evidence for this slice includes the focused package
-runner/coordinator/mock gate (52/52), Debug and Debug-Live fixture/composition
-tests, and unsigned generic Simulator builds for Mock Debug, Mock Release,
-Debug-Live, and Release-Live. The exact `swift test` and `swift test --parallel`
-runs reached build and visible passing suites (including 4/4 snapshots), but
-the known `swiftpm-testing-helper` lifecycle hang required interruption; they
-are not recorded as clean full-suite passes or full-suite counts.
-
-43A evidence also includes the Slice 1 RED contract failure followed by the
-focused package gate (80/80) and `swift build`, then the Slice 2 Debug RED
-(`xcodebuild` exit 65) followed by focused Debug and Debug-Live tests. The
-focused Debug summary was 13 tests in 2 suites; both focused configurations
-passed. Full App gates passed 63/63 for `LumiApp` Debug and 63/63 for
-`LumiApp-Live` Debug-Live, and all four unsigned generic Simulator builds
-completed with exit 0. These automated results do not replace a physical
-microphone/voice-quality check.
-
-### Deferred boundary
-
-Replacing the synthetic repository with a real `CurvesMemberAPIRepository` is
-not part of this slice. It remains blocked on the verified API endpoint and
-authentication flow, face/member identity mapping, profile and weekly-summary
-schema, time-zone/week-boundary semantics, privacy/consent rules, error and
-rate-limit behavior, and offline/cache policy. Those details belong to
-Milestone 4 and must not be inferred from the Debug-Live fixture.
-
-Example:
-
-```text
-Member:
-「我這星期來幾次？」
-
-Lumi:
-→ Application Use Case
-→ MemberRepository
-→ Mock Member Data
-→ Realtime tool result
-→ spoken response
-```
-
-### Privacy Requirement
-Only the minimum required member context may be provided to the LLM.
-
-### Exit Criteria
-Mock known members can ask the supported weekly-summary question and receive a
-deterministic answer grounded in Debug-Live data. Unknown/visitor sessions
-cannot query member data. Physical iPad microphone/voice-quality validation and
-the real Curves adapter remain explicit follow-up gates; the adapter is blocked
-on the verified Curves endpoint, authentication, identity mapping, schema,
-privacy, error, rate-limit, and offline/cache contracts.
-
-## 8. Milestone 2 — Smart Rotation Base
-
-**Status: Planned**
-
-Goal: connect Lumi to the physical rotating dock.
-
-Hardware:
-- Raspberry Pi prototype
-- 3 ultrasonic sensors
-- stepper motor
-- motor driver
-- Home sensor
-- 180° rotation
-- Wi-Fi LAN
-
-Protocol:
-
-```text
-iPad
-↕ WebSocket
-Rotation Base
-```
-
-Implement:
-- boot
-- homing
-- presence detection
-- left / center / right coarse direction
-- rotate command
-- angle limits
-- return home
-- emergency stop
-- communication-loss behavior
-
-### Tests
-- presence debounce
-- direction selection
-- rotation limits
-- invalid angle rejection
-- homing state
-- sensor noise
-- motor failure
-- disconnect recovery
-
-### Exit Criteria
-A person approaching left/center/right causes Lumi to orient approximately toward the visitor while respecting motor limits.
-
-## 9. Milestone 3 — Member Identity Recognition
-
-**Status: In progress — Debug-Live recognition and consented conversational
-enrollment pilot implemented; physical conversational validation, production
-thresholds, backup, and CMS binding pending**
-
-> **Apple Vision / Core ML member recognition begins here.**
-
-Goal: use the iPad camera to determine whether the current visitor is a registered Curves member.
-
-This milestone must use the existing `IdentityRecognitionPort`; Domain/Application must not be redesigned to accommodate Vision.
-
-The 41A checkpoint now supplies a DEBUG-only, manually gated physical
-calibration path using the real front-camera, Vision, YuNet, SFace, exact
-cosine gallery, and a dedicated SQLite calibration database. It exposes raw
-top-1/top-2 scores and margin for measurement; it does not make a production
-known/unknown decision or replace `IdentityRecognitionPort`.
-
-The 42A checkpoint adds a DEBUG-only photo-library fallback: SwiftUI
-`PhotosPicker` selects one image and loads its current representation as
-transient in-memory data. It enters the same Vision → YuNet → SFace → SQLite
-gate without requesting camera or full-library photo permission and without
-starting the camera. Infrastructure accepts only an actual JPEG/PNG/HEIC UTI
-with one image, applies EXIF orientation, and emits an owned
-upright/non-mirrored top-left BGRA8 frame with a 64-byte padded stride; ImageIO
-downsamples to a maximum edge of 2048 as a memory bound only. Enrollment stores
-only the embedding; return import ranks the full gallery and never saves
-photos. Picker items and encoded/decoded image data are never persisted or
-logged, and Release builds omit the tool. Physical-iPad quality and production
-recognition policy remain pending.
-
-The 44B and conversational-enrollment checkpoints now connect that local graph
-to the Debug-Live session. A public Unknown visitor may be offered enrollment
-only after a disclosure and clear spoken consent. Three fresh usable samples
-remain in memory until the visitor supplies a valid spoken address; the App
-then generates a local UUID and atomically persists the profile, consent time,
-and three embeddings. A later recognized UUID resolves to the stored address
-for `<名稱>，歡迎回來～`. No photo, embedding, confidence, raw ID, or CMS identity
-crosses the Realtime tool boundary. Release remains unchanged.
-
-### I0 — Identity Port Validation
-Verify:
-```text
-IdentityRecognitionPort
-RecognitionResult
-MemberID
-RecognitionConfidencePolicy
-```
-
-### I1 — Camera Capture
-Technology: AVFoundation
-
-Implement:
-- front camera session
-- frame delivery
-- permission handling
-- camera unavailable behavior
-- app lifecycle handling
-
-### I2 — Face Detection
-Technology: Apple Vision
-
-```text
-Camera Frame
-↓
-Vision Face Detection
-↓
-Face Bounding Boxes
-```
-
-Test:
-- no face
-- one face
-- multiple faces
-- partial face
-- low-quality input
-
-### I3 — Active Face Target Selection
-Select exactly one conversation target.
-
-Possible rules:
-- largest face
-- face closest to screen center
-- closest confirmed physical target
-- recognized member priority
-
-**If not already decided, this policy must be confirmed before implementation.**
-
-### I4 — Face Normalization
-Implement:
-- crop
-- orientation normalization
-- scale
-- alignment if needed
-- image normalization
-
-Must be deterministic and testable.
-
-### I5 — Face Embedding
-Technology: Core ML face embedding model
-
-```text
-Normalized Face
-↓
-Core ML
-↓
-Embedding Vector
-```
-
-ADR-0010 selects OpenCV Zoo SFace as the primary model and Intel
-`face-reidentification-retail-0095` as the challenger. The pinned SFace ONNX →
-Core ML conversion PoC passes its numerical parity gate. The approved SFace and
-YuNet packages are present under App resources, Xcode compiles them into bundled
-`.mlmodelc` resources, and 41A/42A load them lazily after an explicit DEBUG
-camera start or first photo import. Physical-iPad quality/performance,
-validation data, thresholds, and the production recognition route remain gates.
-Domain must never depend on vector dimensions or Core ML types.
-
-### I6 — Member Matching
-
-```text
-Query Embedding
-↓
-Similarity / Distance
-↓
-Candidate Members
-↓
-RecognitionConfidencePolicy
-```
-
-Each member should support multiple registered embeddings.
-
-Possible measures:
-- cosine similarity
-- Euclidean distance
-
-Final choice must be documented.
-
-The initial exact cosine matcher and model-version isolation are implemented.
-At the target upper bound of 800 members × 5 samples, no vector database is
-planned unless physical-iPad measurements require one.
-
-### I7 — Confidence / Unknown Policy
-
-Critical rule:
-
-> **Unknown is safer than calling the wrong member name.**
-
-```text
-high confidence
-→ known(MemberID)
-
-insufficient confidence
-→ unknown
-
-ambiguous candidates
-→ unknown
-```
-
-Tests:
-- correct known member
-- stranger
-- similar-looking candidates
-- low-quality image
-- threshold boundary
-
-Threshold must not be silently invented. It must be established using validation data and documented in an ADR.
-
-### I8 — Member Enrollment
-
-Recommended initial enrollment:
-- 3–5 images per member
-- frontal
-- mild left/right angle
-- common appearance variation
-
-Identity relationship:
-
-```text
-Face Embeddings
-↓
-member_id
-```
-
-Do not use display name as the recognition database primary key.
-
-### I9 — End-to-End Identity Flow
-
-```text
-Presence Detected
-↓
-Rotate
-↓
-Camera Confirms Person
-↓
-Vision Detects Face
-↓
-Core ML Embedding
-↓
-Member Matcher
-↓
-RecognitionConfidencePolicy
-├─ known(MemberID)
-└─ unknown
-↓
-AssistantSessionCoordinator
-↓
-Greeting
-```
-
-### Exit Criteria
-- Known-member test set meets agreed validation criteria.
-- Stranger cases do not produce unsafe false identity claims.
-- Recognition integrates without changing Domain/Application boundaries.
-- Failed recognition gracefully falls back to generic greeting.
-
-## 10. Milestone 4 — Real Curves Member / Exercise API
-
-**Status: Planned**
-
-Goal: replace mock data with actual Curves member and exercise data.
-
-Implement:
-```text
-CurvesMemberAPIRepository
-```
-
-Expected capabilities:
-- member profile
-- visit history
-- weekly summary
-- recent exercise
-- goals
-- relevant activity metrics
-
-Architecture:
-
-```text
-MemberRepository
-↑
-CurvesMemberAPIRepository
-```
-
-Use standardized exercise terms where applicable:
-- 代謝當量（METs）
-- 活動總量（MET-minutes）
-- 訓練總量（kg）
-- 平均心率（bpm）
-- 範圍（ROM）
-- 次數達成率
-- 器材表現分數
-
-Do not invent medical meaning from exercise metrics.
-
-### Exit Criteria
-Real member questions are answered using verified backend data.
-
-## 11. Milestone 5 — Integrated Store MVP
-
-**Status: Planned**
-
-Goal: combine all major subsystems.
-
-```text
-Presence
-↓
-Rotation
-↓
-Camera
-↓
-Identity
-↓
-Member Context
-↓
-Realtime Voice
-↓
-Exercise Interaction
-```
-
-### Exit Criteria
-
-```text
-member approaches
-→ Lumi notices
-→ eyes look toward visitor
-→ dock rotates
-→ member recognized
-→ personalized greeting
-→ member asks question
-→ Lumi answers from member data
-→ member leaves
-→ Realtime closes
-→ Lumi returns home
-```
-
-## 12. Milestone 6 — Pilot Store Hardening
-
-**Status: Future**
-
-Areas:
-- kiosk mode
-- crash recovery
-- watchdog
-- app auto-recovery
-- hardware reconnect
-- network reconnect
-- telemetry
-- Realtime cost monitoring
-- privacy behavior
-- face recognition validation
-- operation logging
-- OTA/update strategy
-
-Metrics:
-- sessions/day
-- recognition success rate
-- false recognition rate
-- unknown rate
-- voice session duration
-- tool latency
-- Realtime latency
-- hardware errors
-- rotations/day
-- estimated cost/store/day
-
-## 13. Productization — ESP32 Smart Dock
-
-**Status: Future**
-
-After Raspberry Pi prototype behavior is stable:
-
-```text
-Raspberry Pi
-↓
-ESP32 Smart Rotation Dock
-```
-
-The iPad Application / Domain should not require changes if the hardware Port contract remains compatible.
-
-Final architecture:
-
-```text
-Curves Cloud
-↓
-Curves Lumi iPad App
-↓
-ESP32 Smart Rotation Dock
-```
-
-## 14. Roadmap Summary
-
-```text
-Avatar M0        ✅ Domain / Presentation
-Avatar M1        ✅ SwiftUI Visual Layer
-Avatar M2        ✅ Continuous Animation / tuning
-Avatar M3        ✅ Event & Expression Layer
-
-Phase 1          ✅ Simulated Interaction MVP
-Phase 2          ▶ OpenAI Realtime Voice
-Phase 3          Mock Member Data + Tool Calling
-
-Milestone 2      Smart Rotation Base
-
-Milestone 3      Vision + Core ML Identity Recognition
-                 ├─ Camera
-                 ├─ Vision Face Detection
-                 ├─ Target Selection
-                 ├─ Face Normalization
-                 ├─ Core ML Embedding
-                 ├─ Member Matching
-                 ├─ Confidence / Unknown Policy
-                 └─ Enrollment
-
-                 44B Debug-Live pilot: 0.70 top-1, 0.20 margin,
-                 2-of-3 fresh observations → returning-member voice context;
-                 safe enrollment ID may be a temporary spoken address in
-                 Debug-Live only (owner Option A, 2026-08-22).
-                 2026-08-23: consented Unknown-visitor enrollment now captures
-                 3 in-memory samples, asks for a spoken address, and atomically
-                 stores a local UUID profile in Debug-Live.
-                 2026-08-23: Debug-Live now stays in continuous recognition,
-                 proactively starts the known/unknown voice greeting once per
-                 arrival, rearms after 10 continuous face-free seconds, and
-                 exposes a native system-output volume slider.
-                 Physical voice/camera validation, backup, production
-                 thresholds, legal consent copy, and CMS binding remain pending.
-
-Milestone 4      Real Curves Member API
-Milestone 5      Integrated Store MVP
-Milestone 6      Pilot Store Hardening
-Productization   ESP32 Smart Dock
-```
-
-## 15. Rule for Roadmap Changes
-
-A roadmap change that affects product behavior or milestone order must be documented.
-
-Use:
-
-```text
-docs/decisions/ADR-xxxx-*.md
-```
-
-Update this roadmap whenever:
-- a milestone begins
-- a milestone is completed
-- a major dependency changes
-- a product decision changes milestone scope
-- implementation reveals a new required milestone
+| 正式 Identity 品質與發布 | 代表性且同意的驗證集；誤認／unknown／延遲指標與 production 門檻核准；多人目標選擇、逾時、正式同意文案、刪除、備份與 CMS 綁定；不重做已有 camera/Vision/YuNet/SFace/SQLite pipeline |
+| 正式 Curves API 擴充 | P1 確認後擴充 profile／歷史／目標／活動指標；真實資料驗證及錯誤／限流／offline/cache 契約；不重做既有 mock weekly-summary tool |
+| Raspberry Pi 旋轉底座 | 定稿 protocol／故障契約後，分 homing/角度限位、presence debounce/方向、旋轉/停止/return-home、斷線/watchdog 四步；每步先硬體邊界測試，再實體確認；LLM 不控制馬達 |
+| 整店整合 | 在上述裝置與資料 gate 通過後，驗證到訪→轉向→辨識→短對話→運動資料→離店→Home，包含多人／斷線／故障 |
+| 店內長時間穩定 | kiosk、崩潰恢復、長時間相機／語音／硬體資源、耗電發熱、版本更新、redacted telemetry；既有 usage reporter 的現場帳務／成本驗證，不假設尚未有任何成本工具 |
+| ESP32 產品化 | Raspberry Pi 行為穩定後替換 Infrastructure hardware adapter；保持 Domain/Application port，完成韌體更新、watchdog 與安全驗收 |
+
+歷史實作與驗證依各 feature spec／ADR 查閱；本檔不再列 Avatar M0–M3、Phase 1、已完成的 Realtime/tool/enrollment/memory 實作為待辦。

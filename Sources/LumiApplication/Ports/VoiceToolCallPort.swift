@@ -1,4 +1,5 @@
 import Foundation
+import LumiDomain
 
 /// The provider-neutral tool operation requested by a voice session.
 public enum VoiceToolCallKind: Equatable, Sendable {
@@ -6,12 +7,25 @@ public enum VoiceToolCallKind: Equatable, Sendable {
     /// member bound to the current voice session.
     case getMemberWeeklySummary
 
+    /// Records one of the bounded exercise states explicitly volunteered by
+    /// the currently bound member. The MemberID and timestamp are owned by
+    /// the Application session and never arrive from the provider.
+    case recordExerciseDisclosure(MemberExerciseDisclosure)
+
+    /// Corrects or retracts the current member's previously disclosed
+    /// completion. The call has no provider-supplied member ID or timestamp.
+    case correctMemberExerciseDisclosure
+
     /// Starts the current Unknown visitor's explicitly consented enrollment.
     case beginVisitorEnrollment
 
     /// Commits the current pending enrollment using only a validated spoken
     /// address. The generated local member ID never crosses this tool value.
     case completeVisitorEnrollment(VoiceMemberAddress)
+
+    /// Requests a contextual, one-time close of the current conversation.
+    /// This carries no transcript, member identity, or provider arguments.
+    case endConversation
 
     /// Represents a provider tool name that Lumi does not support.
     case unsupported
@@ -40,11 +54,15 @@ public enum VoiceToolFailureCode: String, Equatable, Sendable {
     case invalidData = "invalid_data"
     case enrollmentUnavailable = "enrollment_unavailable"
     case enrollmentNotReady = "enrollment_not_ready"
+    case memberMemoryUnavailable = "member_memory_unavailable"
 }
 
 /// The provider-neutral result payload for one voice tool call.
 public enum VoiceToolResultPayload: Equatable, Sendable {
     case success(MemberWeeklySummaryToolResult)
+    case exerciseDisclosureRecorded(MemberExerciseDisclosure)
+    case exerciseDisclosureCorrected
+    case exerciseDisclosureCorrectionNotFound
     case enrollmentSamplesCaptured(Int)
     case enrollmentCompleted(VoiceMemberAddress)
     case failure(VoiceToolFailureCode)
@@ -68,6 +86,32 @@ public struct VoiceToolResult: Equatable, Sendable {
         switch payload {
         case let .success(summary):
             return summary.jsonData()
+        case let .exerciseDisclosureRecorded(disclosure):
+            let disclosureValue: String
+            switch disclosure {
+            case .preparing:
+                disclosureValue = "preparing"
+            case .justCompleted:
+                disclosureValue = "just_completed"
+            case .completedToday:
+                disclosureValue = "completed_today"
+            }
+            let persistence: String
+            switch disclosure.persistenceScope {
+            case .session:
+                persistence = "session"
+            case .day:
+                persistence = "day"
+            }
+            let status = disclosure.isPersistent ? "recorded" : "session_only"
+            return Data(
+                "{\"exercise_state\":\"\(disclosureValue)\",\"persistence\":\"\(persistence)\",\"status\":\"\(status)\"}"
+                    .utf8
+            )
+        case .exerciseDisclosureCorrected:
+            return Data("{\"status\":\"exercise_disclosure_corrected\"}".utf8)
+        case .exerciseDisclosureCorrectionNotFound:
+            return Data("{\"status\":\"no_current_exercise_disclosure\"}".utf8)
         case let .enrollmentSamplesCaptured(count):
             return Data(
                 "{\"captured_sample_count\":\(count),\"status\":\"samples_captured\"}"

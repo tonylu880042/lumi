@@ -1,3 +1,4 @@
+import Foundation
 import LumiDomain
 
 /// Errors raised by coordinator-owned operations before reaching a port.
@@ -10,14 +11,35 @@ public enum AssistantSessionCoordinatorError: Error, Equatable, Sendable {
 /// Application dependencies for the optional member-aware voice tool session.
 public struct VoiceToolCallSessionConfiguration: Sendable {
     public let port: any VoiceToolCallPort
-    public let weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+    public let weeklySummaryUseCase: GetMemberWeeklySummaryUseCase?
 
     public init(
         port: any VoiceToolCallPort,
-        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase? = nil
     ) {
         self.port = port
         self.weeklySummaryUseCase = weeklySummaryUseCase
+    }
+}
+
+/// Dependencies for the consented, local member-memory portion of one voice
+/// session. The time and session-ID providers keep lifecycle tests
+/// deterministic without moving clock logic into Domain.
+public struct MemberInteractionMemorySessionConfiguration: Sendable {
+    public let store: any MemberInteractionMemoryStore
+    public let now: @Sendable () -> Date
+    public let sessionID: @Sendable () -> String
+
+    public init(
+        store: any MemberInteractionMemoryStore,
+        now: @escaping @Sendable () -> Date = { Date() },
+        sessionID: @escaping @Sendable () -> String = {
+            UUID().uuidString.lowercased()
+        }
+    ) {
+        self.store = store
+        self.now = now
+        self.sessionID = sessionID
     }
 }
 
@@ -53,6 +75,8 @@ private enum PreparedVoiceToolCallRunner: Sendable {
 private struct VoiceStartPreparation: Sendable {
     let events: AsyncStream<VoiceSessionEvent>
     let toolRunner: PreparedVoiceToolCallRunner?
+    let memorySession: MemberInteractionMemorySession?
+    let memoryContext: VoiceMemberMemoryContext?
 }
 
 /// Owns the active Phase 1 assistant session state and coordinates orientation.
@@ -65,6 +89,8 @@ public actor AssistantSessionCoordinator {
     private let voiceToolCallConfiguration: VoiceToolCallSessionConfiguration?
     private let visitorEnrollmentToolCallConfiguration:
         VisitorEnrollmentToolCallSessionConfiguration?
+    private let memberMemoryConfiguration:
+        MemberInteractionMemorySessionConfiguration?
     private let reducer: AssistantStateReducer
 
     public private(set) var state: AssistantState
@@ -75,6 +101,10 @@ public actor AssistantSessionCoordinator {
     private var subscribers: [UInt64: AsyncStream<AssistantState>.Continuation] = [:]
     private var nextAuthorizationSubscriberID: UInt64 = 0
     private var authorizationSubscribers: [
+        UInt64: AsyncStream<Void>.Continuation
+    ] = [:]
+    private var nextConversationEndSubscriberID: UInt64 = 0
+    private var conversationEndSubscribers: [
         UInt64: AsyncStream<Void>.Continuation
     ] = [:]
     private var nextVoiceTurnCompletionSubscriberID: UInt64 = 0
@@ -94,8 +124,15 @@ public actor AssistantSessionCoordinator {
     private var voiceStartOperation: Task<VoiceStartPreparation, Error>?
     private var voiceStartOperationGeneration: UInt64?
     private var voiceSessionIsActive = false
+    private var voiceWasStoppedForConversationEnd = false
+    private var conversationEndStopTask: Task<Void, Never>?
     private var assistantOutputHasStarted = false
     private var assistantOutputIsActive = false
+    private var memberMemorySession: MemberInteractionMemorySession?
+    private var memberMemoryContext: VoiceMemberMemoryContext?
+    private var memberMemoryMeetingRecorded = false
+    private var memberMemoryMeetingWriteInFlight = false
+    private var memberMemoryMutationInProgress = false
 
     public init(
         hardware: any HardwareControlPort,
@@ -105,7 +142,8 @@ public actor AssistantSessionCoordinator {
             @escaping @Sendable (MemberID) async -> VoiceMemberAddress? = { _ in nil },
         voiceToolCallConfiguration: VoiceToolCallSessionConfiguration? = nil,
         visitorEnrollmentToolCallConfiguration:
-            VisitorEnrollmentToolCallSessionConfiguration? = nil
+            VisitorEnrollmentToolCallSessionConfiguration? = nil,
+        memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration? = nil
     ) {
         self.hardware = hardware
         self.identity = identity
@@ -114,6 +152,7 @@ public actor AssistantSessionCoordinator {
         self.voiceToolCallConfiguration = voiceToolCallConfiguration
         self.visitorEnrollmentToolCallConfiguration =
             visitorEnrollmentToolCallConfiguration
+        self.memberMemoryConfiguration = memberMemoryConfiguration
         self.reducer = AssistantStateReducer()
         self.state = .idle
         self.recognitionResult = nil
@@ -160,6 +199,26 @@ public actor AssistantSessionCoordinator {
         return pair.stream
     }
 
+    /// Returns an independent stream for a confirmed natural conversation
+    /// closing. The stream carries no transcript or provider payload; App
+    /// composition uses it to complete the existing return-home flow.
+    public func conversationEndRequests() -> AsyncStream<Void> {
+        let subscriberID = nextConversationEndSubscriberID
+        nextConversationEndSubscriberID &+= 1
+
+        let pair = AsyncStream<Void>.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        pair.continuation.onTermination = { @Sendable [weak self] _ in
+            Task { [weak self] in
+                await self?.removeConversationEndSubscriber(id: subscriberID)
+            }
+        }
+        conversationEndSubscribers[subscriberID] = pair.continuation
+        return pair.stream
+    }
+
     /// Ends a session only after the current conversational turn reaches a
     /// provider-confirmed audio boundary.
     ///
@@ -182,14 +241,17 @@ public actor AssistantSessionCoordinator {
     @discardableResult
     public func confirmPresence(
         direction: PresenceDirection
-    ) throws(AssistantStateTransitionError) -> AssistantState {
-        try transition(.personConfirmed(direction: direction))
+    ) throws -> AssistantState {
+        guard !memberMemoryMutationInProgress else {
+            throw AssistantSessionCoordinatorError.endSessionInProgress
+        }
+        return try transition(.personConfirmed(direction: direction))
     }
 
     /// Starts orientation from the detected state and waits for confirmed arrival.
     @discardableResult
     public func beginOrientation() async throws -> AssistantState {
-        guard !ending else {
+        guard !ending, !memberMemoryMutationInProgress else {
             throw AssistantSessionCoordinatorError.endSessionInProgress
         }
 
@@ -254,7 +316,7 @@ public actor AssistantSessionCoordinator {
     /// second port request. Adapter failures are intentionally treated as an
     /// unknown visitor; cancellation propagates to the caller.
     public func recognizeVisitor() async throws -> RecognitionResult {
-        guard !ending else {
+        guard !ending, !memberMemoryMutationInProgress else {
             throw AssistantSessionCoordinatorError.endSessionInProgress
         }
 
@@ -316,8 +378,58 @@ public actor AssistantSessionCoordinator {
 
     /// Pre-warms the voice adapter resources before voice startup.
     public func prewarmVoiceSession() async {
-        guard !ending else { return }
+        guard !ending, !memberMemoryMutationInProgress else { return }
         await voice.prewarm()
+    }
+
+    /// Invalidates the active provider context before a management clear or
+    /// disable. The management operation then removes the persisted events;
+    /// this ordering prevents an already-loaded opener from being reused.
+    public func invalidateMemberMemoryContext() async {
+        await memberMemorySession?.invalidate()
+        memberMemoryContext = nil
+        await voice.invalidateMemberMemoryContext()
+    }
+
+    /// Quiesces the coordinator before the operator changes member-memory
+    /// consent or clears data. Startup/reconnect work is cancelled first, the
+    /// session-bound context is invalidated, and an active session completes
+    /// the ordinary return-home flow. A failed home movement throws before a
+    /// caller can report the storage mutation as successful.
+    public func prepareForMemberMemoryMutation() async throws {
+        guard !ending, !memberMemoryMutationInProgress else {
+            throw AssistantSessionCoordinatorError.endSessionInProgress
+        }
+
+        memberMemoryMutationInProgress = true
+        defer { memberMemoryMutationInProgress = false }
+
+        await memberMemorySession?.invalidate()
+        memberMemoryContext = nil
+
+        guard state != .idle, state != .offline else {
+            sessionGeneration &+= 1
+            cancelPendingOperations()
+            await voice.stop()
+            await voice.invalidateMemberMemoryContext()
+            voiceSessionIsActive = false
+            voiceWasStoppedForConversationEnd = false
+            memberMemorySession = nil
+            memberMemoryMeetingRecorded = false
+            memberMemoryMeetingWriteInFlight = false
+            return
+        }
+
+        do {
+            _ = try await endSessionImpl()
+        } catch {
+            // `endSession` already stopped provider output before attempting
+            // Home. Make the provider-side memory boundary fail closed even
+            // when the hardware cannot complete the return-home movement.
+            await voice.invalidateMemberMemoryContext()
+            throw error
+        }
+        await voice.invalidateMemberMemoryContext()
     }
 
     /// Starts a privacy-safe voice session from the greeting state.
@@ -329,7 +441,7 @@ public actor AssistantSessionCoordinator {
     public func startVoiceSession(
         direction: VoiceConversationDirection = .general
     ) async throws -> AssistantState {
-        guard !ending else {
+        guard !ending, !memberMemoryMutationInProgress else {
             throw AssistantSessionCoordinatorError.endSessionInProgress
         }
 
@@ -366,6 +478,13 @@ public actor AssistantSessionCoordinator {
         let memberAddressResolver = memberAddressResolver
         let toolConfiguration = voiceToolCallConfiguration
         let visitorToolConfiguration = visitorEnrollmentToolCallConfiguration
+        let memoryConfiguration = memberMemoryConfiguration
+        let memoryNow: @Sendable () -> Date
+        if let memoryConfiguration {
+            memoryNow = memoryConfiguration.now
+        } else {
+            memoryNow = { Date() }
+        }
         let operation = Task<VoiceStartPreparation, Error> {
             try Task.checkCancellation()
             let memberAddress: VoiceMemberAddress?
@@ -376,6 +495,46 @@ public actor AssistantSessionCoordinator {
                 memberAddress = nil
             }
 
+            var memorySession: MemberInteractionMemorySession?
+            var memoryContext: VoiceMemberMemoryContext?
+            if let memberID, let memoryConfiguration {
+                do {
+                    let now = memoryConfiguration.now()
+                    let loadResult = try await LoadMemberMemoryUseCase(
+                        store: memoryConfiguration.store
+                    ).execute(
+                        for: memberID,
+                        at: now
+                    )
+                    if case let .available(loaded) = loadResult {
+                        let initialExerciseDisclosureRecordedAt =
+                            loaded.snapshot.currentExerciseDisclosureRecordedAt
+                        let session = MemberInteractionMemorySession(
+                            memberID: memberID,
+                            sessionID: memoryConfiguration.sessionID(),
+                            initialRevision: loaded.revision,
+                            initialExerciseDisclosure:
+                                loaded.snapshot.currentExerciseDisclosure,
+                            initialExerciseDisclosureRecordedAt:
+                                initialExerciseDisclosureRecordedAt,
+                            store: memoryConfiguration.store
+                        )
+                        memorySession = session
+                        let exerciseState = await session.currentExerciseMemoryState(at: now)
+                        memoryContext = VoiceMemberMemoryContext(
+                            snapshot: loaded.snapshot,
+                            currentExerciseState: exerciseState,
+                            encounterAt: now
+                        )
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // Memory read failures degrade to the ordinary greeting;
+                    // the voice session itself remains available.
+                }
+            }
+
             let events = await voice.eventUpdates()
             try Task.checkCancellation()
             let toolRunner: PreparedVoiceToolCallRunner?
@@ -384,7 +543,16 @@ public actor AssistantSessionCoordinator {
                     await VoiceToolCallSessionRunner.prepare(
                         port: toolConfiguration.port,
                         memberID: memberID,
-                        weeklySummaryUseCase: toolConfiguration.weeklySummaryUseCase
+                        weeklySummaryUseCase: toolConfiguration.weeklySummaryUseCase,
+                        memorySession: memorySession,
+                        now: memoryNow,
+                        memoryContextDidChange: { [weak self] disclosure, recordedAt in
+                            await self?.applyMemberMemoryDisclosure(
+                                disclosure,
+                                recordedAt: recordedAt,
+                                generation: generation
+                            )
+                        }
                     )
                 )
             } else if context == .visitor, let visitorToolConfiguration {
@@ -401,9 +569,15 @@ public actor AssistantSessionCoordinator {
             try await voice.start(
                 context: context,
                 direction: direction,
-                memberAddress: memberAddress
+                memberAddress: memberAddress,
+                memoryContext: memoryContext
             )
-            return VoiceStartPreparation(events: events, toolRunner: toolRunner)
+            return VoiceStartPreparation(
+                events: events,
+                toolRunner: toolRunner,
+                memorySession: memorySession,
+                memoryContext: memoryContext
+            )
         }
         voiceStartOperation = operation
         voiceStartOperationGeneration = generation
@@ -422,6 +596,11 @@ public actor AssistantSessionCoordinator {
             }
 
             voiceSessionIsActive = true
+            memberMemorySession = preparation.memorySession
+            memberMemoryContext = preparation.memoryContext
+            memberMemoryMeetingRecorded = false
+            memberMemoryMeetingWriteInFlight = false
+            voiceWasStoppedForConversationEnd = false
             assistantOutputHasStarted = false
             assistantOutputIsActive = false
             _ = try transition(.voiceSessionReady)
@@ -454,6 +633,14 @@ public actor AssistantSessionCoordinator {
     /// retried without losing the current interaction context.
     @discardableResult
     public func endSession() async throws -> AssistantState {
+        guard !memberMemoryMutationInProgress else {
+            throw AssistantSessionCoordinatorError.endSessionInProgress
+        }
+        return try await endSessionImpl()
+    }
+
+    @discardableResult
+    private func endSessionImpl() async throws -> AssistantState {
         guard !ending else {
             throw AssistantSessionCoordinatorError.endSessionInProgress
         }
@@ -466,6 +653,7 @@ public actor AssistantSessionCoordinator {
         ending = true
         defer { ending = false }
         sessionGeneration &+= 1
+        await memberMemorySession?.invalidate()
         cancelPendingOperations()
         voiceEventConsumerTask?.cancel()
         voiceEventConsumerTask = nil
@@ -477,9 +665,17 @@ public actor AssistantSessionCoordinator {
             await toolRunnerTask.value
         }
 
-        // Voice is always stopped for an accepted end, even for states that did
-        // not currently have a live voice session.
-        await voice.stop()
+        // A natural closing already stops voice before its Application signal
+        // is published. Keep the accepted end idempotent while preserving the
+        // existing stop behavior for every other end cause and state.
+        let voiceAlreadyStopped = voiceWasStoppedForConversationEnd
+        voiceWasStoppedForConversationEnd = false
+        if let stopTask = conversationEndStopTask {
+            await stopTask.value
+            conversationEndStopTask = nil
+        } else if !voiceAlreadyStopped {
+            await voice.stop()
+        }
 
         var preHomeStopIssued = false
         if Task.isCancelled {
@@ -513,10 +709,15 @@ public actor AssistantSessionCoordinator {
         }
 
         voiceSessionIsActive = false
+        voiceWasStoppedForConversationEnd = false
         assistantOutputHasStarted = false
         assistantOutputIsActive = false
         _ = try transition(.sessionEnded)
         recognitionResult = nil
+        memberMemorySession = nil
+        memberMemoryContext = nil
+        memberMemoryMeetingRecorded = false
+        memberMemoryMeetingWriteInFlight = false
         voiceRequiresRetry = false
         return state
     }
@@ -551,6 +752,10 @@ public actor AssistantSessionCoordinator {
 
     private func removeAuthorizationSubscriber(id: UInt64) {
         authorizationSubscribers.removeValue(forKey: id)
+    }
+
+    private func removeConversationEndSubscriber(id: UInt64) {
+        conversationEndSubscribers.removeValue(forKey: id)
     }
 
     private func voiceTurnCompletionUpdates() -> AsyncStream<Bool> {
@@ -669,11 +874,31 @@ public actor AssistantSessionCoordinator {
         voiceRequiresRetry = true
     }
 
+    private func applyMemberMemoryDisclosure(
+        _ _: MemberExerciseDisclosure?,
+        recordedAt: Date,
+        generation: UInt64
+    ) async {
+        guard generation == sessionGeneration,
+              !ending,
+              let context = memberMemoryContext,
+              let memorySession = memberMemorySession
+        else { return }
+
+        let exerciseState = await memorySession.currentExerciseMemoryState(at: recordedAt)
+        let updated = context.updatingExerciseDisclosure(
+            exerciseState.disclosure, recordedAt: exerciseState.recordedAt
+        )
+        memberMemoryContext = updated
+        await voice.updateMemberMemoryContext(updated)
+    }
+
     private func consumeVoiceEvent(
         _ event: VoiceSessionEvent,
         generation: UInt64
-    ) {
+    ) async {
         guard generation == sessionGeneration, !ending else { return }
+        guard !voiceWasStoppedForConversationEnd else { return }
 
         switch event {
         case .assistantOutputStarted:
@@ -683,6 +908,28 @@ public actor AssistantSessionCoordinator {
         case .assistantOutputEnded:
             assistantOutputIsActive = false
             publishVoiceTurnCompletionReadiness()
+        case .assistantOutputCleared:
+            assistantOutputIsActive = false
+            publishVoiceTurnCompletionReadiness()
+        case .greetingCompleted:
+            await recordMemberMeetingIfNeeded(generation: generation)
+        case .conversationEndRequested:
+            // Stop the provider before notifying App composition. This keeps
+            // a provider close/retry from racing the return-home operation,
+            // and also makes the event safe when no App subscriber exists.
+            voiceWasStoppedForConversationEnd = true
+            let voice = voice
+            let stopTask = Task { await voice.stop() }
+            conversationEndStopTask = stopTask
+            await stopTask.value
+            guard generation == sessionGeneration, !ending else { return }
+            conversationEndStopTask = nil
+            voiceSessionIsActive = false
+            voiceRequiresRetry = false
+            assistantOutputHasStarted = false
+            assistantOutputIsActive = false
+            publishVoiceTurnCompletionReadiness()
+            publishConversationEndRequest()
         case .failure:
             voiceRequiresRetry = true
         case .authorizationRequired:
@@ -701,6 +948,35 @@ public actor AssistantSessionCoordinator {
             assistantOutputHasStarted = false
             assistantOutputIsActive = false
             applyVoiceTransition(.responseReady)
+        }
+    }
+
+    private func recordMemberMeetingIfNeeded(generation: UInt64) async {
+        guard generation == sessionGeneration,
+              !ending,
+              let memorySession = memberMemorySession,
+              memberMemoryContext != nil,
+              !memberMemoryMeetingRecorded,
+              !memberMemoryMeetingWriteInFlight
+        else { return }
+
+        memberMemoryMeetingWriteInFlight = true
+        defer { memberMemoryMeetingWriteInFlight = false }
+        let now = memberMemoryConfiguration?.now() ?? Date()
+        do {
+            let result = try await memorySession.recordMeeting(at: now)
+            guard generation == sessionGeneration, !ending else { return }
+            if result.wasAccepted {
+                memberMemoryMeetingRecorded = true
+            } else {
+                memberMemoryContext = nil
+                await voice.invalidateMemberMemoryContext()
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            // A failed memory write leaves the current conversation usable;
+            // it simply cannot claim that this meeting was remembered.
         }
     }
 
@@ -727,6 +1003,18 @@ public actor AssistantSessionCoordinator {
         }
     }
 
+    private func publishConversationEndRequest() {
+        var terminatedSubscribers: [UInt64] = []
+        for (id, continuation) in conversationEndSubscribers {
+            if case .terminated = continuation.yield(()) {
+                terminatedSubscribers.append(id)
+            }
+        }
+        for id in terminatedSubscribers {
+            conversationEndSubscribers.removeValue(forKey: id)
+        }
+    }
+
     private func targetAngle(
         for direction: PresenceDirection
     ) throws(RotationAngleError) -> RotationAngle {
@@ -747,6 +1035,9 @@ public actor AssistantSessionCoordinator {
             continuation.finish()
         }
         for continuation in authorizationSubscribers.values {
+            continuation.finish()
+        }
+        for continuation in conversationEndSubscribers.values {
             continuation.finish()
         }
         for continuation in voiceTurnCompletionSubscribers.values {

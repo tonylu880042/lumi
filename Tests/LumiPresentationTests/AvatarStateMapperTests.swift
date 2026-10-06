@@ -186,3 +186,55 @@ func mapperIsPureAndReproducible(state: AssistantState) {
     #expect(mapper.map(state) == mapper.map(state))
     #expect(AvatarStateMapper().map(state) == AvatarStateMapper().map(state))
 }
+
+@Test("arrival vitality increases warmth monotonically on the idle Avatar")
+func arrivalVitalityWarmsIdleExpression() {
+    let calm = mapper.map(.idle, vitality: .calm)
+    let happy = mapper.map(.idle, vitality: .happy)
+    let excited = mapper.map(.idle, vitality: .excited)
+
+    #expect(happy.overallBrightness > calm.overallBrightness)
+    #expect(excited.overallBrightness > happy.overallBrightness)
+    #expect(happy.highlightIntensity > calm.highlightIntensity)
+    #expect(excited.highlightIntensity > happy.highlightIntensity)
+    #expect(happy.blushOpacity > calm.blushOpacity)
+    #expect(excited.blushOpacity > happy.blushOpacity)
+    #expect(happy.mouthStyle == .smile)
+    #expect(excited.mouthStyle == .wideSmile)
+}
+
+@Test("vitality preserves semantic priority for active assistant states")
+func vitalityPreservesSemanticState() {
+    let states: [AssistantState] = [
+        .listening, .thinking, .reminding, .confused, .offline
+    ]
+
+    for state in states {
+        let base = mapper.map(state, vitality: .calm)
+        let excited = mapper.map(state, vitality: .excited)
+        #expect(excited.eyelidStyle == base.eyelidStyle)
+        #expect(excited.eyebrowStyle == base.eyebrowStyle)
+        #expect(excited.eyebrowTilt == base.eyebrowTilt)
+        #expect(excited.mouthStyle == base.mouthStyle)
+        #expect(excited.waveformMode == base.waveformMode)
+        #expect(excited.effect == base.effect)
+    }
+
+    #expect(mapper.map(.offline, vitality: .excited) == mapper.map(.offline))
+}
+
+@Test("vitality overlay keeps every visual field within the existing bounds",
+      arguments: AssistantState.baselineCases)
+func vitalityOverlayStaysBounded(state: AssistantState) {
+    for vitality in [StoreArrivalVitality.calm, .happy, .excited] {
+        let visual = mapper.map(state, vitality: vitality)
+        #expect(AvatarRange.eyeOpenAmount.contains(visual.eyeOpenAmount))
+        #expect(AvatarRange.irisScale.contains(visual.irisScale))
+        #expect(AvatarRange.brightness.contains(visual.irisBrightness))
+        #expect(AvatarRange.brightness.contains(visual.overallBrightness))
+        #expect(AvatarRange.unit.contains(visual.highlightIntensity))
+        #expect(AvatarRange.unit.contains(visual.softGlossOpacity))
+        #expect(AvatarRange.unit.contains(visual.blushOpacity))
+        #expect(AvatarRange.unit.contains(visual.sparkleIntensity))
+    }
+}

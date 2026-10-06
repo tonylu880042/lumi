@@ -62,10 +62,27 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(defaultData == explicitlyDisabledData)
         #expect(
             String(data: defaultData, encoding: .utf8)
-                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":false,"interrupt_response":false,"prefix_padding_ms":300,"silence_duration_ms":800,"threshold":0.625,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","type":"realtime"},"type":"session.update"}"#
+                == #"{"session":{"audio":{"input":{"turn_detection":{"create_response":false,"interrupt_response":false,"prefix_padding_ms":300,"silence_duration_ms":800,"threshold":0.625,"type":"server_vad"}},"output":{"voice":"marin"}},"instructions":"instructions","max_output_tokens":1024,"type":"realtime"},"type":"session.update"}"#
         )
         #expect(session["tools"] == nil)
         #expect(session["tool_choice"] == nil)
+    }
+
+    @Test("session.update carries the configured max_output_tokens cap")
+    func sessionUpdateCarriesMaxResponseOutputTokens() throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            voice: "marin",
+            instructions: "instructions",
+            maxResponseOutputTokens: 256
+        )
+
+        let session = try object(
+            try jsonObject(try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration)),
+            at: "session"
+        )
+
+        #expect(session["max_output_tokens"] as? Int == 256)
+        #expect(session["max_response_output_tokens"] == nil)
     }
 
     @Test("enabled session.update carries exactly one empty-argument weekly tool")
@@ -152,6 +169,34 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(spokenLabel["type"] as? String == "string")
         #expect(completeParameters["required"] as? [String] == ["spoken_label"])
         #expect(completeParameters["additionalProperties"] as? Bool == false)
+        #expect(session["tool_choice"] as? String == "auto")
+    }
+
+    @Test("closing-enabled session declares one no-argument end tool")
+    func sessionUpdateDeclaresConversationClosingTool() throws {
+        let configuration = OpenAIRealtimeConfiguration(
+            voice: "marin",
+            instructions: "instructions",
+            allowsConversationClosing: true
+        )
+
+        let session = try object(
+            try jsonObject(try OpenAIRealtimeWireEncoder.sessionUpdate(for: configuration)),
+            at: "session"
+        )
+        guard let tools = session["tools"] as? [[String: Any]] else {
+            Issue.record("Expected the conversation closing tool")
+            return
+        }
+
+        #expect(tools.count == 1)
+        #expect(tools[0]["type"] as? String == "function")
+        #expect(tools[0]["name"] as? String == "end_conversation")
+        #expect(tools[0]["description"] as? String == "End the current short conversation after the visitor clearly says goodbye.")
+        let parameters = try object(tools[0], at: "parameters")
+        #expect((parameters["properties"] as? [String: Any])?.isEmpty == true)
+        #expect((parameters["required"] as? [Any])?.isEmpty == true)
+        #expect(parameters["additionalProperties"] as? Bool == false)
         #expect(session["tool_choice"] as? String == "auto")
     }
 
@@ -302,6 +347,103 @@ struct OpenAIRealtimeWireEventsTests {
         #expect(incomplete == .responseFailed)
         #expect(cancelled == .responseCompleted)
         #expect(completed == .responseCompleted)
+    }
+
+    @Test("response.done usage decodes every integer counter independently of status")
+    func responseUsageDecodesFullCounters() throws {
+        let data = try jsonData([
+            "type": "response.done",
+            "response": [
+                "id": "resp_do-not-retain",
+                "status": "completed",
+                "usage": [
+                    "input_tokens": 45,
+                    "output_tokens": 78,
+                    "total_tokens": 123,
+                    "input_token_details": [
+                        "text_tokens": 10,
+                        "audio_tokens": 35,
+                        "cached_tokens": 5,
+                    ],
+                    "output_token_details": [
+                        "text_tokens": 20,
+                        "audio_tokens": 58,
+                    ],
+                ],
+            ],
+        ])
+
+        let usage = try #require(OpenAIRealtimeWireDecoder.responseUsage(from: data))
+
+        #expect(usage.inputTokens == 45)
+        #expect(usage.outputTokens == 78)
+        #expect(usage.totalTokens == 123)
+        #expect(usage.cachedInputTokens == 5)
+        #expect(usage.inputTextTokens == 10)
+        #expect(usage.inputAudioTokens == 35)
+        #expect(usage.outputTextTokens == 20)
+        #expect(usage.outputAudioTokens == 58)
+
+        // Independent of the status-driven event mapping: a failed response
+        // still yields whatever counters the provider reported.
+        let failedData = try jsonData([
+            "type": "response.done",
+            "response": [
+                "status": "failed",
+                "usage": ["input_tokens": 3, "output_tokens": 0, "total_tokens": 3],
+            ],
+        ])
+        let failedUsage = try #require(OpenAIRealtimeWireDecoder.responseUsage(from: failedData))
+        #expect(failedUsage.inputTokens == 3)
+        #expect(failedUsage.totalTokens == 3)
+    }
+
+    @Test("response.done usage safely degrades missing or malformed fields to zero")
+    func responseUsageDegradesMissingFieldsToZero() throws {
+        let usageWithoutDetails = try #require(
+            OpenAIRealtimeWireDecoder.responseUsage(from: try jsonData([
+                "type": "response.done",
+                "response": [
+                    "status": "completed",
+                    "usage": ["total_tokens": 10],
+                ],
+            ]))
+        )
+        #expect(usageWithoutDetails.inputTokens == 0)
+        #expect(usageWithoutDetails.outputTokens == 0)
+        #expect(usageWithoutDetails.totalTokens == 10)
+        #expect(usageWithoutDetails.cachedInputTokens == 0)
+        #expect(usageWithoutDetails.inputTextTokens == 0)
+        #expect(usageWithoutDetails.inputAudioTokens == 0)
+        #expect(usageWithoutDetails.outputTextTokens == 0)
+        #expect(usageWithoutDetails.outputAudioTokens == 0)
+
+        let usageWithMalformedField = try #require(
+            OpenAIRealtimeWireDecoder.responseUsage(from: try jsonData([
+                "type": "response.done",
+                "response": [
+                    "status": "completed",
+                    "usage": ["total_tokens": "not-a-number", "input_tokens": -5],
+                ],
+            ]))
+        )
+        #expect(usageWithMalformedField.totalTokens == 0)
+        #expect(usageWithMalformedField.inputTokens == 0)
+    }
+
+    @Test("response.done usage returns nil without a usage object or wrong type")
+    func responseUsageReturnsNilWhenAbsent() throws {
+        #expect(OpenAIRealtimeWireDecoder.responseUsage(from: try jsonData([
+            "type": "response.done",
+            "response": ["status": "completed"],
+        ])) == nil)
+
+        #expect(OpenAIRealtimeWireDecoder.responseUsage(from: try jsonData([
+            "type": "response.created",
+            "response": ["usage": ["total_tokens": 10]],
+        ])) == nil)
+
+        #expect(OpenAIRealtimeWireDecoder.responseUsage(from: Data("not json".utf8)) == nil)
     }
 
     @Test("finalized function calls map only exact empty arguments")
@@ -471,6 +613,37 @@ struct OpenAIRealtimeWireEventsTests {
                     )
             )
         }
+    }
+
+    @Test("conversation closing decodes only an exact empty argument object")
+    func conversationClosingFunctionCallDecode() throws {
+        let valid = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.done",
+                "call_id": "closing-call",
+                "name": "end_conversation",
+                "arguments": "{}",
+            ])
+        )
+        #expect(
+            valid == .toolCall(
+                VoiceToolCall(callID: "closing-call", kind: .endConversation)
+            )
+        )
+
+        let invalid = OpenAIRealtimeWireDecoder.decode(
+            try jsonData([
+                "type": "response.function_call_arguments.done",
+                "call_id": "closing-invalid",
+                "name": "end_conversation",
+                "arguments": #"{"reason":"still-have-a-question"}"#,
+            ])
+        )
+        #expect(
+            invalid == .toolCall(
+                VoiceToolCall(callID: "closing-invalid", kind: .invalidArguments)
+            )
+        )
     }
 
     @Test("invalid names and call IDs fail closed without becoming voice failures")

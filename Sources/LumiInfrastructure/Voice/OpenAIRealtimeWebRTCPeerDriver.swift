@@ -5,6 +5,11 @@ import Foundation
 /// transport. WebRTC framework objects never cross this boundary.
 protocol OpenAIRealtimePeerDriver: OpenAIRealtimeMicrophoneLevelSource, Sendable {
     func prepare() async throws
+    /// Prepares the peer with local and remote media in the requested state.
+    /// A disabled preparation must set the local track state before it is
+    /// attached to the peer and before offer creation.
+    func prepare(mediaEnabled: Bool) async throws
+    func setMediaEnabled(_ enabled: Bool) async throws
     func createLocalOffer() async throws -> String
     func setRemoteAnswer(_ answerSDP: String) async throws
     func send(_ data: Data) async throws
@@ -82,10 +87,12 @@ final class OpenAIRealtimeWebRTCPeerDriver:
     private var localMicrophoneTrack: RTCAudioTrack?
     private var localMicrophoneSender: RTCRtpSender?
     private var dataChannel: RTCDataChannel?
+    private var remoteAudioTracks: [ObjectIdentifier: RTCMediaStreamTrack] = [:]
     private var pendingOffer: CheckedContinuation<String, any Error>?
     private var pendingRemoteAnswer: CheckedContinuation<Void, any Error>?
     private var isPrepared = false
     private var isClosed = false
+    private var mediaIsEnabled = false
 
     private enum RemoteAudioPolicy {
         static let gain = 2.0
@@ -112,6 +119,10 @@ final class OpenAIRealtimeWebRTCPeerDriver:
     var localMicrophoneTrackEnabled: Bool { localMicrophoneTrack?.isEnabled == true }
 
     func prepare() async throws {
+        try await prepare(mediaEnabled: true)
+    }
+
+    func prepare(mediaEnabled: Bool) async throws {
         guard !isClosed else { throw OpenAIRealtimePeerDriverError.closed }
         guard !isPrepared else { return }
 
@@ -135,11 +146,13 @@ final class OpenAIRealtimeWebRTCPeerDriver:
             with: audioSource,
             trackId: "lumi-microphone"
         )
+        // Set this before attaching the track. Standby must never negotiate an
+        // enabled outgoing microphone track and only enables it on promotion.
+        audioTrack.isEnabled = mediaEnabled
         guard let microphoneSender = peer.add(audioTrack, streamIds: ["lumi"]) else {
             peer.close()
             throw OpenAIRealtimePeerDriverError.microphoneTrackUnavailable
         }
-        audioTrack.isEnabled = true
 
         let dataChannelConfiguration = RTCDataChannelConfiguration()
         dataChannelConfiguration.isOrdered = true
@@ -157,6 +170,20 @@ final class OpenAIRealtimeWebRTCPeerDriver:
         self.localMicrophoneSender = microphoneSender
         self.dataChannel = dataChannel
         self.isPrepared = true
+        self.mediaIsEnabled = mediaEnabled
+    }
+
+    func setMediaEnabled(_ enabled: Bool) async throws {
+        guard !isClosed else { throw OpenAIRealtimePeerDriverError.closed }
+        guard isPrepared else {
+            throw OpenAIRealtimePeerDriverError.peerConnectionUnavailable
+        }
+
+        mediaIsEnabled = enabled
+        localMicrophoneTrack?.isEnabled = enabled
+        for track in remoteAudioTracks.values {
+            configureRemoteAudioTrack(track)
+        }
     }
 
     func createLocalOffer() async throws -> String {
@@ -295,7 +322,9 @@ final class OpenAIRealtimeWebRTCPeerDriver:
         peerConnection = nil
         localMicrophoneTrack = nil
         localMicrophoneSender = nil
+        remoteAudioTracks.removeAll()
         isPrepared = false
+        mediaIsEnabled = false
         eventContinuation.finish()
     }
 
@@ -352,8 +381,10 @@ final class OpenAIRealtimeWebRTCPeerDriver:
             return
         }
 
-        track.isEnabled = true
-        (track as? RTCAudioTrack)?.source.volume = RemoteAudioPolicy.gain
+        remoteAudioTracks[ObjectIdentifier(track)] = track
+        track.isEnabled = mediaIsEnabled
+        (track as? RTCAudioTrack)?.source.volume =
+            mediaIsEnabled ? RemoteAudioPolicy.gain : 0
     }
 
     // MARK: - RTCDataChannelDelegate

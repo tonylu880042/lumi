@@ -12,6 +12,8 @@ struct ContentView: View {
     @AppStorage(LumiHomeViewIntent.hintsStorageKey)
     private var showsApplicationHints = LumiHomeViewIntent.showsHintsByDefault
     @State private var isHomeSettingsPresented = false
+    @State private var isMemberMemoryManagementPresented = false
+    private let memberMemoryManagementModel: MemberMemoryManagementModel?
 
 #if DEBUG
     private let calibrationModel: DebugIdentityCalibrationModel?
@@ -35,8 +37,12 @@ struct ContentView: View {
 
     private let mapper = AvatarStateMapper()
 
-    init(simulationModel: SessionSimulationModel) {
+    init(
+        simulationModel: SessionSimulationModel,
+        memberMemoryManagementModel: MemberMemoryManagementModel? = nil
+    ) {
         self._simulationModel = ObservedObject(wrappedValue: simulationModel)
+        self.memberMemoryManagementModel = memberMemoryManagementModel
 #if DEBUG
         self.calibrationModel = nil
 #endif
@@ -45,10 +51,12 @@ struct ContentView: View {
 #if DEBUG
     init(
         simulationModel: SessionSimulationModel,
-        calibrationModel: DebugIdentityCalibrationModel
+        calibrationModel: DebugIdentityCalibrationModel,
+        memberMemoryManagementModel: MemberMemoryManagementModel? = nil
     ) {
         self._simulationModel = ObservedObject(wrappedValue: simulationModel)
         self.calibrationModel = calibrationModel
+        self.memberMemoryManagementModel = memberMemoryManagementModel
     }
 
     static func shouldShowCalibrationEntry(
@@ -58,6 +66,13 @@ struct ContentView: View {
         hasCalibrationModel && !supportsContinuousExperience
     }
 #endif
+
+    nonisolated static func shouldShowMemberMemoryManagementEntry(
+        hasManagementModel: Bool,
+        supportsContinuousExperience: Bool
+    ) -> Bool {
+        hasManagementModel && supportsContinuousExperience
+    }
 
     private var renderedAvatarState: AvatarVisualState {
         switch controlsMode {
@@ -210,6 +225,25 @@ struct ContentView: View {
                 .accessibilityIdentifier("debug-identity-calibration")
             }
 #endif
+            if Self.shouldShowMemberMemoryManagementEntry(
+                hasManagementModel: memberMemoryManagementModel != nil,
+                supportsContinuousExperience: simulationModel.supportsContinuousExperience
+            ) {
+                Button {
+                    isMemberMemoryManagementPresented = true
+                } label: {
+                    Image(systemName: "person.crop.circle.badge.clock")
+                }
+                .buttonStyle(.bordered)
+                .padding(16)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
+                .accessibilityLabel("會員互動記憶")
+                .accessibilityIdentifier("member-memory-management-entry")
+            }
         }
         .sheet(isPresented: $isHomeSettingsPresented) {
             LumiHomeSettingsView(
@@ -225,6 +259,18 @@ struct ContentView: View {
             }
         }
 #endif
+        .sheet(
+            isPresented: $isMemberMemoryManagementPresented,
+            onDismiss: {
+                // A reload happens in the management model after each
+                // successful mutation; dismissing leaves the model ready for
+                // the next Debug-Live operator visit.
+            }
+        ) {
+            if let memberMemoryManagementModel {
+                MemberMemoryManagementView(model: memberMemoryManagementModel)
+            }
+        }
         .task {
             if !simulationModel.supportsContinuousExperience {
                 simulationModel.startContinuousExperience()

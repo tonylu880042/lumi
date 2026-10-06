@@ -5,6 +5,23 @@ import Testing
 
 @Suite("Assistant session coordinator", .serialized)
 struct AssistantSessionCoordinatorTests {
+    @Test("natural closing stops voice once without an App listener and ignores queued old events")
+    func naturalClosingStopsOnceWithoutAppListener() async throws {
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(hardware: hardware, identity: identity, voice: voice)
+        try await enterSpeaking(coordinator: coordinator, hardware: hardware, identity: identity, voice: voice, result: .unknown)
+        await voice.emitBatch([.conversationEndRequested, .conversationEndRequested, .failure])
+        try #require(await waitUntil { await voice.stopCallCount >= 1 })
+        // The consumer's buffered events must drain without another stop or retry.
+        for _ in 0 ..< 100 { await Task.yield() }
+        #expect(await voice.stopCallCount == 1)
+        #expect(await coordinator.voiceRequiresRetry == false)
+        #expect(try await coordinator.endSession() == .idle)
+        #expect(await voice.stopCallCount == 1)
+    }
+
     @Test("ends an active session only after confirmed home arrival")
     func endSessionWaitsForConfirmedHomeArrival() async throws {
         let hardware = TestHardware()
@@ -381,6 +398,10 @@ struct AssistantSessionCoordinatorTests {
         #expect(await first.next() == .rotating)
         #expect(await second.next() == .rotating)
 
+        guard await waitUntil({ await hardware.hasPendingRotation }) else {
+            Issue.record("Timed out waiting for the rotation request")
+            return
+        }
         await hardware.completeRotation()
         #expect(try await operation.value == .recognizing)
         #expect(await first.next() == .recognizing)
@@ -1606,6 +1627,302 @@ struct AssistantSessionCoordinatorTests {
         #expect(await toolPort.sentResults.isEmpty)
         #expect(await coordinator.voiceRequiresRetry)
     }
+
+    @Test("later recognition uses departure context only after thirty minutes", arguments: [1799.0, 1800.0])
+    func laterRecognitionSelectsDepartureContext(elapsed: TimeInterval) async throws {
+        let memberID = try MemberID(rawValue: "M-departure-known")
+        let first = coordinatorDate("2026-10-02T09:00:00+08:00")
+        let now = first.addingTimeInterval(elapsed)
+        let store = CoordinatorMemoryStoreFake(
+            consent: .enabled(consentedAt: first),
+            events: [MemberMemoryEvent(
+                eventID: "first", interactionID: "first", kind: .meeting,
+                source: .lumiObserved, recordedAt: first, exerciseDisclosure: nil
+            )]
+        )
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware, identity: identity, voice: voice,
+            memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration(
+                store: store, now: { now }, sessionID: { "later" }
+            )
+        )
+        try await enterGreeting(
+            coordinator: coordinator, hardware: hardware, identity: identity,
+            result: .known(memberID: memberID, confidence: try RecognitionConfidence(value: 0.98))
+        )
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+        let contexts = await voice.startMemoryContexts
+        let context = try #require(contexts.first ?? nil)
+        #expect(context.departureWeeklyMeetingDayCount == (elapsed >= 1800 ? 1 : nil))
+        #expect(context.arrivalWeeklyMeetingDayCount == nil)
+        #expect(await store.events.count == 1)
+        await voice.completeStart()
+        _ = try await start.value
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("loads consented member memory before voice start and passes only the derived snapshot context")
+    func knownConsentedMemoryLoadsBeforeVoiceStart() async throws {
+        let memberID = try MemberID(rawValue: "M-memory-known")
+        let now = coordinatorDate("2026-09-18T12:00:00+08:00")
+        let store = CoordinatorMemoryStoreFake(
+            consent: .enabled(consentedAt: coordinatorDate("2026-09-01T09:00:00+08:00")),
+            events: [
+                MemberMemoryEvent(
+                    eventID: "meeting-old",
+                    interactionID: "old-session",
+                    kind: .meeting,
+                    source: .lumiObserved,
+                    recordedAt: coordinatorDate("2026-09-01T09:00:00+08:00"),
+                    exerciseDisclosure: nil
+                )
+            ]
+        )
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration(
+                store: store,
+                now: { now },
+                sessionID: { "memory-session" }
+            )
+        )
+
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.98)
+            )
+        )
+
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+
+        #expect(await store.loadBatchCallCount == 1)
+        #expect(
+            await voice.startMemoryContexts
+                == [.some(VoiceMemberMemoryContext(
+                    highlight: .longAbsent, arrivalWeeklyMeetingDayCount: 1,
+                    arrivalEncounterAt: now
+                ))]
+        )
+
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("records one known-member meeting only after a completed greeting, including duplicate reconnect events")
+    func completedGreetingRecordsMeetingOnce() async throws {
+        let memberID = try MemberID(rawValue: "M-memory-meeting")
+        let now = coordinatorDate("2026-09-18T12:00:00+08:00")
+        let store = CoordinatorMemoryStoreFake(
+            consent: .enabled(consentedAt: coordinatorDate("2026-09-01T09:00:00+08:00")),
+            events: []
+        )
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration(
+                store: store,
+                now: { now },
+                sessionID: { "meeting-session" }
+            )
+        )
+
+        try await enterSpeaking(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.97)
+            )
+        )
+
+        #expect(await store.appendCallCount == 0)
+        await voice.emitBatch([
+            .greetingCompleted,
+            .greetingCompleted,
+            .greetingCompleted
+        ])
+        #expect(await waitUntil { await store.appendCallCount == 1 })
+        for _ in 0 ..< 128 { await Task.yield() }
+
+        #expect(await store.appendCallCount == 1)
+        #expect(await store.events.count == 1)
+        #expect(await store.events.first?.kind == .meeting)
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("unknown visitors never load or persist member memory")
+    func unknownVisitorDoesNotUseMemberMemory() async throws {
+        let store = CoordinatorMemoryStoreFake(
+            consent: .enabled(consentedAt: coordinatorDate("2026-09-01T09:00:00+08:00")),
+            events: []
+        )
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort
+            ),
+            memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration(
+                store: store,
+                now: { coordinatorDate("2026-09-18T12:00:00+08:00") },
+                sessionID: { "unknown-session" }
+            )
+        )
+
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .unknown
+        )
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+
+        #expect(await store.consentStatusCallCount == 0)
+        #expect(await store.loadBatchCallCount == 0)
+        #expect(await voice.startMemoryContexts == [.none])
+        #expect(await toolPort.toolCallUpdatesCallCount == 0)
+
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+        _ = try await coordinator.endSession()
+        #expect(await store.events.isEmpty)
+    }
+
+    @Test("disabled member memory supplies no context and rejects persistence tools")
+    func disabledMemberMemoryDoesNotUsePersistence() async throws {
+        let memberID = try MemberID(rawValue: "M-memory-disabled")
+        let store = CoordinatorMemoryStoreFake(consent: .disabled, events: [])
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let toolPort = TestVoiceToolCallPort()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            voiceToolCallConfiguration: VoiceToolCallSessionConfiguration(
+                port: toolPort
+            ),
+            memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration(
+                store: store,
+                now: { coordinatorDate("2026-09-18T12:00:00+08:00") },
+                sessionID: { "disabled-session" }
+            )
+        )
+
+        try await enterGreeting(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.96)
+            )
+        )
+        let start = Task { try await coordinator.startVoiceSession() }
+        await voice.waitForStartRequest()
+        #expect(await store.consentStatusCallCount == 1)
+        #expect(await store.loadBatchCallCount == 0)
+        #expect(await voice.startMemoryContexts == [.none])
+
+        await voice.completeStart()
+        #expect(try await start.value == .speaking)
+        await toolPort.emit(
+            VoiceToolCall(
+                callID: "disabled-memory-write",
+                kind: .recordExerciseDisclosure(.completedToday)
+            )
+        )
+        await toolPort.waitUntilSentCount(1)
+        #expect(await toolPort.sentResults.first?.payload == .failure(.memberMemoryUnavailable))
+        #expect(await store.appendCallCount == 0)
+        #expect(await store.events.isEmpty)
+        _ = try await coordinator.endSession()
+    }
+
+    @Test("member-memory mutation invalidates an in-flight meeting write before clear or disable")
+    func memoryMutationInvalidatesInFlightMeetingWrite() async throws {
+        let memberID = try MemberID(rawValue: "M-memory-race")
+        let now = coordinatorDate("2026-09-18T12:00:00+08:00")
+        let store = CoordinatorMemoryStoreFake(
+            consent: .enabled(consentedAt: coordinatorDate("2026-09-01T09:00:00+08:00")),
+            events: [],
+            blockNextAppend: true
+        )
+        let hardware = TestHardware()
+        let identity = TestIdentity()
+        let voice = TestVoice()
+        let coordinator = AssistantSessionCoordinator(
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            memberMemoryConfiguration: MemberInteractionMemorySessionConfiguration(
+                store: store,
+                now: { now },
+                sessionID: { "race-session" }
+            )
+        )
+
+        try await enterSpeaking(
+            coordinator: coordinator,
+            hardware: hardware,
+            identity: identity,
+            voice: voice,
+            result: .known(
+                memberID: memberID,
+                confidence: try RecognitionConfidence(value: 0.95)
+            )
+        )
+        await voice.emit(.greetingCompleted)
+        #expect(await waitUntil { await store.appendCallCount == 1 })
+
+        try await coordinator.prepareForMemberMemoryMutation()
+        try await store.setConsent(
+            for: memberID,
+            status: .disabled
+        )
+        try await store.clearMemory(for: memberID)
+        await coordinator.invalidateMemberMemoryContext()
+        let invalidationsBeforeLateCompletion = await voice.invalidatedMemberMemoryContextCount
+
+        await store.releaseBlockedAppend()
+        for _ in 0 ..< 512 { await Task.yield() }
+
+        #expect(await voice.updatedMemberMemoryContexts.isEmpty)
+        #expect(
+            await voice.invalidatedMemberMemoryContextCount
+                >= invalidationsBeforeLateCompletion
+        )
+        #expect(await store.events.isEmpty)
+        #expect(await coordinator.state == .idle)
+    }
 }
 
 private func enterRecognizing(
@@ -1856,10 +2173,13 @@ private actor TestVoice: VoiceSessionPort {
     private(set) var startContexts: [VoiceContext] = []
     private(set) var startDirections: [VoiceConversationDirection] = []
     private(set) var startMemberAddresses: [VoiceMemberAddress?] = []
+    private(set) var startMemoryContexts: [VoiceMemberMemoryContext?] = []
     private(set) var startCallCount = 0
     private(set) var prewarmCallCount = 0
     private(set) var eventUpdatesCallCount = 0
     private(set) var stopCallCount = 0
+    private(set) var invalidatedMemberMemoryContextCount = 0
+    private(set) var updatedMemberMemoryContexts: [VoiceMemberMemoryContext] = []
     private let log: TestCallLog?
 
     private struct PendingStart {
@@ -1922,6 +2242,20 @@ private actor TestVoice: VoiceSessionPort {
         try await start(context: context, direction: direction)
     }
 
+    func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection,
+        memberAddress: VoiceMemberAddress?,
+        memoryContext: VoiceMemberMemoryContext?
+    ) async throws {
+        startMemoryContexts.append(memoryContext)
+        try await start(
+            context: context,
+            direction: direction,
+            memberAddress: memberAddress
+        )
+    }
+
     func eventUpdates() async -> AsyncStream<VoiceSessionEvent> {
         eventUpdatesCallCount += 1
         let subscriberID = nextSubscriberID
@@ -1949,6 +2283,14 @@ private actor TestVoice: VoiceSessionPort {
         for continuation in activeSubscribers {
             continuation.finish()
         }
+    }
+
+    func invalidateMemberMemoryContext() async {
+        invalidatedMemberMemoryContextCount += 1
+    }
+
+    func updateMemberMemoryContext(_ context: VoiceMemberMemoryContext) async {
+        updatedMemberMemoryContexts.append(context)
     }
 
     func completeStart() {
@@ -1983,6 +2325,13 @@ private actor TestVoice: VoiceSessionPort {
         guard active else { return }
         for continuation in subscribers.values {
             _ = continuation.yield(event)
+        }
+    }
+
+    func emitBatch(_ events: [VoiceSessionEvent]) {
+        guard active else { return }
+        for event in events {
+            for continuation in subscribers.values { continuation.yield(event) }
         }
     }
 
@@ -2267,6 +2616,112 @@ private actor CancellableToolRepository: MemberRepository {
             waiter.resume()
         }
     }
+}
+
+private actor CoordinatorMemoryStoreFake: MemberInteractionMemoryStore {
+    let consent: MemberMemoryConsentStatus
+    private(set) var events: [MemberMemoryEvent]
+    private(set) var revision: UInt64
+    private var blockNextAppend: Bool
+    private struct BlockedAppend: Sendable {
+        let event: MemberMemoryEvent
+        let expectedRevision: UInt64
+        let continuation: CheckedContinuation<MemberMemoryAppendResult, Never>
+    }
+    private var blockedAppend: BlockedAppend?
+    private(set) var consentStatusCallCount = 0
+    private(set) var loadBatchCallCount = 0
+    private(set) var appendCallCount = 0
+
+    init(
+        consent: MemberMemoryConsentStatus,
+        events: [MemberMemoryEvent],
+        revision: UInt64 = 7,
+        blockNextAppend: Bool = false
+    ) {
+        self.consent = consent
+        self.events = events
+        self.revision = revision
+        self.blockNextAppend = blockNextAppend
+    }
+
+    func consentStatus(for _: MemberID) async throws -> MemberMemoryConsentStatus {
+        consentStatusCallCount += 1
+        return consent
+    }
+
+    func loadBatch(for _: MemberID, at _: Date) async throws -> MemberMemoryEventBatch {
+        loadBatchCallCount += 1
+        return MemberMemoryEventBatch(events: events, revision: revision)
+    }
+
+    func append(
+        _ event: MemberMemoryEvent,
+        for _: MemberID,
+        expectedRevision: UInt64
+    ) async throws -> MemberMemoryAppendResult {
+        appendCallCount += 1
+
+        guard expectedRevision == revision else {
+            return MemberMemoryAppendResult(outcome: .rejected, revision: revision)
+        }
+
+        if blockNextAppend, blockedAppend == nil {
+            blockNextAppend = false
+            return await withCheckedContinuation { continuation in
+                blockedAppend = BlockedAppend(
+                    event: event,
+                    expectedRevision: expectedRevision,
+                    continuation: continuation
+                )
+            }
+        }
+
+        guard !events.contains(where: { $0.eventID == event.eventID }) else {
+            return MemberMemoryAppendResult(outcome: .duplicate, revision: revision)
+        }
+        events.append(event)
+        revision &+= 1
+        return MemberMemoryAppendResult(outcome: .appended, revision: revision)
+    }
+
+    func setConsent(
+        for _: MemberID,
+        status _: MemberMemoryConsentStatus
+    ) async throws {}
+
+    func clearMemory(for _: MemberID) async throws {
+        events.removeAll()
+        revision &+= 1
+    }
+
+    func releaseBlockedAppend() {
+        guard let blockedAppend else { return }
+        self.blockedAppend = nil
+        guard blockedAppend.expectedRevision == revision else {
+            blockedAppend.continuation.resume(
+                returning: MemberMemoryAppendResult(
+                    outcome: .rejected,
+                    revision: revision
+                )
+            )
+            return
+        }
+        events.append(blockedAppend.event)
+        revision &+= 1
+        blockedAppend.continuation.resume(
+            returning: MemberMemoryAppendResult(
+                outcome: .appended,
+                revision: revision
+            )
+        )
+    }
+}
+
+private func coordinatorDate(_ value: String) -> Date {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withColonSeparatorInTime]
+    return formatter.date(from: value)!
 }
 
 private enum ToolRepositoryError: Error, Equatable, Sendable {

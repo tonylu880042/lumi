@@ -72,7 +72,7 @@ struct OpenAIRealtimeEventMapperTests {
 
         #expect(await mapper.map(.outputAudioStarted) == [.voice(.assistantOutputStarted)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.assistantInterrupted)])
-        #expect(await mapper.map(.outputAudioCleared) == [.voice(.assistantOutputEnded)])
+        #expect(await mapper.map(.outputAudioCleared) == [.voice(.assistantOutputCleared)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
     }
 
@@ -85,7 +85,7 @@ struct OpenAIRealtimeEventMapperTests {
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
 
         #expect(await mapper.map(.outputAudioStarted) == [.voice(.assistantOutputStarted)])
-        #expect(await mapper.map(.outputAudioCleared) == [.voice(.assistantOutputEnded)])
+        #expect(await mapper.map(.outputAudioCleared) == [.voice(.assistantOutputCleared)])
         #expect(await mapper.map(.inputAudioSpeechStarted) == [.voice(.userSpeechStarted)])
     }
 

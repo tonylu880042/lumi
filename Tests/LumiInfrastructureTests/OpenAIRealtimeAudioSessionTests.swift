@@ -20,7 +20,21 @@ struct OpenAIRealtimeAudioSessionTests {
                 )
             ),
         ])
+        #expect(await backend.audioEnabledValues == [false, true])
         acceptsSendable(audioSession)
+    }
+
+    @Test("standby preparation keeps WebRTC audio disabled")
+    func standbyPreparationDisablesWebRTCAudio() async {
+        let backend = RecordingAudioSessionBackend()
+        let audioSession = OpenAIRealtimeAudioSession(backend: backend)
+
+        await audioSession.prepareForStandby()
+
+        #expect(await backend.audioEnabledValues == [false])
+        #expect(await backend.operations == [
+            .configureWebRTCDefaults([.defaultToSpeaker, .allowBluetoothHFP]),
+        ])
     }
 
     @Test("deactivation is ordered, idempotent, and never forces the speaker")
@@ -43,6 +57,7 @@ struct OpenAIRealtimeAudioSessionTests {
             ),
             .deactivate,
         ])
+        #expect(await backend.audioEnabledValues == [false, true, false])
         #expect(await backend.operations.contains(.deactivate))
     }
 
@@ -66,6 +81,7 @@ struct OpenAIRealtimeAudioSessionTests {
                 )
             ),
         ])
+        #expect(await backend.audioEnabledValues == [false])
 
         await audioSession.deactivate()
         #expect(await backend.operations.filter { $0 == .deactivate }.count == 0)
@@ -73,6 +89,23 @@ struct OpenAIRealtimeAudioSessionTests {
         let error = OpenAIRealtimeAudioSessionError.activationFailed
         #expect(!String(describing: error).contains(marker))
         #expect(!String(reflecting: error).contains(marker))
+    }
+
+    @Test("cancellation after backend activation balances the backend session")
+    func cancellationAfterBackendActivationDeactivatesBackend() async {
+        let backend = RecordingAudioSessionBackend(blockActivationReturn: true)
+        let audioSession = OpenAIRealtimeAudioSession(backend: backend)
+        let activation = Task { try await audioSession.activate() }
+
+        await backend.waitUntilActivationReturnIsBlocked()
+        activation.cancel()
+        await backend.releaseActivationReturn()
+
+        await #expect(throws: CancellationError.self) {
+            try await activation.value
+        }
+        #expect(await backend.operations.filter { $0 == .deactivate }.count == 1)
+        #expect(await backend.audioEnabledValues == [false, false])
     }
 
     @Test("configuration failure maps to a typed category error")
@@ -96,6 +129,7 @@ struct OpenAIRealtimeAudioSessionTests {
                 )
             ),
         ])
+        #expect(await backend.audioEnabledValues == [false])
     }
 
     @Test("mode configuration failure maps safely without deactivation side effects")
@@ -125,6 +159,7 @@ struct OpenAIRealtimeAudioSessionTests {
                 )
             ),
         ])
+        #expect(await backend.audioEnabledValues == [false])
         await audioSession.deactivate()
         #expect(await backend.operations.contains(.deactivate) == false)
     }
@@ -144,16 +179,26 @@ private actor RecordingAudioSessionBackend: OpenAIRealtimeAudioSessionBackend {
     }
 
     fileprivate(set) var operations: [Operation] = []
+    fileprivate(set) var audioEnabledValues: [Bool] = []
     private let failure: Failure?
+    private let blockActivationReturn: Bool
+    private var activationReturnContinuation: CheckedContinuation<Void, Never>?
+    private var activationReturnIsBlocked = false
 
-    init(failure: Failure? = nil) {
+    init(failure: Failure? = nil, blockActivationReturn: Bool = false) {
         self.failure = failure
+        self.blockActivationReturn = blockActivationReturn
     }
 
     func configureWebRTCDefaults(
         options: OpenAIRealtimeAudioSessionOptions
     ) async {
         operations.append(.configureWebRTCDefaults(options))
+        audioEnabledValues.append(false)
+    }
+
+    func setWebRTCAudioEnabled(_ enabled: Bool) async {
+        audioEnabledValues.append(enabled)
     }
 
     func activate(configurationIntent: OpenAIRealtimeAudioSessionIntent) async throws {
@@ -168,10 +213,28 @@ private actor RecordingAudioSessionBackend: OpenAIRealtimeAudioSessionBackend {
         case nil:
             break
         }
+        if blockActivationReturn {
+            activationReturnIsBlocked = true
+            await withCheckedContinuation { continuation in
+                activationReturnContinuation = continuation
+            }
+        }
     }
 
     func deactivate() async {
         operations.append(.deactivate)
+    }
+
+    func waitUntilActivationReturnIsBlocked() async {
+        while !activationReturnIsBlocked {
+            await Task.yield()
+        }
+    }
+
+    func releaseActivationReturn() {
+        activationReturnContinuation?.resume()
+        activationReturnContinuation = nil
+        activationReturnIsBlocked = false
     }
 }
 

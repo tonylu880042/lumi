@@ -7,6 +7,75 @@
 > Product: Curves Lumi
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 
+Customer-interview scope (2026-10-01): development must trace to the owner's
+customer interview and subsequent explicit amendments. Enrollment, arrival
+welcome, workout-based departure encouragement, weekly wording, monthly
+interview reminders and milestone audio remain product outcomes. Encounter
+encouragement is not a replacement for completed-workout counts or departure
+service. The owner subsequently selected 「我們看到一次就算一次」 as the first
+weekly-count and monthly-twelve milestone source, retaining the accepted
+at-most-one date count per day. This is a Lumi-observed count, not an official
+workout-completion record. The owner selected continuous camera absence as the
+departure trigger and reaffirmed same-member daily deduplication. The existing
+three-second usable-face absence condition was confirmed on 2026-10-02 for
+ending/rearming the interaction. Departure encouragement plays upon a later
+reliable recognition at least thirty minutes after that member's first saved
+observed greeting on the current Taipei date, while the member remains visible.
+Calendar-week counting, weekly arrival encouragement and the eligible departure
+opener are wired through consented memory. On 2026-10-06 the owner confirmed
+that the first arrival includes today's encounter in its spoken weekly ordinal,
+overriding the old historical opener; a revisit within thirty minutes says only
+「又見面啦，加油喔」 without repeating the count. Completed-greeting writes and
+same-date deduplication remain unchanged. Monthly milestones and interview
+delivery remain pending. See `docs/customer-interview-development-spec.md` for C0–C9 acceptance
+mapping and unresolved data/trigger contracts; technology choices must support
+these outcomes, not silently remove them.
+
+Owner amendment (2026-10-01): weekly encouragement uses consented Lumi
+encounters on distinct Asia/Taipei dates in the Monday–Sunday calendar week,
+counting a date at most once, with warmer encouragement for the first, second,
+and third-or-later encounter. These are not verified workouts. Monthly
+「量身面談」 reminders use calendar dates 1–10 inclusive, at most once per
+member per day until a coach confirms that month's completion through an
+operator entry point. Member self-report alone does not confirm completion.
+Weekly arrival/departure delivery is implemented; monthly interview delivery
+remains accepted product direction rather than implemented behavior. Completion-record
+consent/storage/correction, coach access, delivery deduplication, business-day
+data and reminder priority remain pending. See ADR-0021; rolling-seven-day history
+remains available, while weekly arrival wording takes opener priority.
+
+Owner amendment (2026-09-30): the next welcome interaction has two stages.
+For a distant single-face notice, Lumi says one generic 「你好」 without a name;
+if the person never approaches, it adds no further speech. Approach is judged
+from the face's size in the camera frame. Only after approach and reliable
+identity recognition may Lumi use a member's name or personal reminder. A face
+directed toward the camera may receive an Avatar blink. Numerical size/pose
+gates, repeat-greeting behavior and Live acceptance are still pending; the
+current production trigger remains unchanged. See
+`docs/two-stage-presence-greeting.md` and ADR-0020.
+
+Owner amendment (2026-09-23): Lumi's primary purpose is brief greetings and
+useful reminders. Members do not need to chat or answer a routine greeting or
+reminder. Deliver one relevant point, then leave silence without inviting
+small talk, expanding topics, or aiming to fill a thirty-second exchange.
+Necessary consent, naming, corrections and direct service-related replies stay
+available. This supersedes the earlier conversation-duration target, not the
+existing session lifecycle, consent or member-data permissions. No new timeout,
+automatic disconnect, refusal policy or reminder-data source is implied.
+See `docs/greeting-reminder-first.md` and ADR-0019 for the current work package.
+
+Owner amendment (2026-09-18, accepted for implementation): Debug-Live may keep
+independently consented local interaction memory and bounded self-reported
+exercise context. A known member's completed greeting records an encounter;
+frequency uses distinct Asia/Taipei dates (three dates in the last seven dates),
+long-time-no-see uses fourteen calendar days, and structured events are retained
+for ninety days. These are encounters with Lumi, not official workout records.
+Permitted memory can select one contextual opener in place of the generic
+recording. Clear/disable controls, current-session identity binding, expiry and
+minimal provider disclosure are required. See the approved rules in
+`docs/member-interaction-memory-draft.md` section 7 and ADR-0017. This approval
+does not imply completed implementation, Release enablement, or device acceptance.
+
 ---
 
 # 1. Product Overview
@@ -28,7 +97,7 @@ Lumi is not positioned as a generic kiosk, a simple face-recognition terminal, o
 
 Its intended role is:
 
-> **A friendly AI member assistant that notices members, turns toward them, recognizes them when possible, understands their exercise context, talks naturally, and encourages continued participation.**
+> **A friendly store assistant that notices and recognizes members when possible, greets them briefly, gives relevant authorized reminders, and encourages continued participation without requiring a conversation.**
 
 ---
 
@@ -45,13 +114,11 @@ Target end-to-end experience:
 ↓
 個人化迎賓
 ↓
-讀取會員運動情境
+選擇可用且已授權的一個提醒／鼓勵重點
 ↓
-聽會員說話
+簡短表達，會員不必回答
 ↓
-自然回答
-↓
-鼓勵運動
+需要時處理同意、稱呼、更正或服務相關短回應
 ↓
 會員離開
 ↓
@@ -71,11 +138,11 @@ Identify Visitor
 ↓
 Personalized Greeting
 ↓
-Load Member Context
+Select One Available, Authorized Reminder / Encouragement
 ↓
-Realtime Conversation
+Brief Delivery; No Reply Required
 ↓
-Exercise Guidance / Encouragement
+Necessary Consent / Naming / Correction / Short Service Reply
 ↓
 Session Ends
 ↓
@@ -131,6 +198,8 @@ Baseline persona guidance:
 你會記得會員的運動情境，並鼓勵她持續運動。
 使用台灣繁體中文。
 一般回覆控制在 1–2 句。
+以簡短打招呼與提醒為主，一次一個重點，說完留白，會員不必回答。
+不邀請閒聊、不主動展開新話題；必要同意、稱呼、更正及服務回應仍完整處理。
 語氣自然、口語、親切。
 可愛但不要幼稚，不要過度撒嬌。
 遇到達標時可以明顯表現開心。
@@ -652,6 +721,22 @@ Breaking protocol changes require a new protocol version.
 ---
 
 # 16. Voice Interaction
+
+Owner pilot amendment (2026-09-15): the configured local pilot may reuse the
+eight accepted Marin recordings for greetings. Arrival-driven vitality uses
+non-identifying camera-presence proxy events, independent of checkouts or voice
+interaction. See `docs/phase-3-store-arrival-vitality-draft.md` and ADR-0015 for
+the three-second rearm, ten-minute vitality window, greeting selection, and
+microphone/output lifecycle requirements. This does not establish exact store
+traffic or authorize new identity tracking. Realtime remains responsible for
+the subsequent conversation.
+
+Owner amendment (2026-09-17, duration target superseded by ADR-0019 on
+2026-09-23): use natural closing for brief welcoming interactions. Avoid unnecessary
+follow-up questions; keep helping when the visitor has questions. An explicit
+contextual goodbye triggers one short farewell and a controlled session end.
+An unchanged camera presence must not immediately reopen the conversation.
+See `docs/natural-conversation-closing.md` and ADR-0016 for this lifecycle change.
 
 Lumi should use natural realtime speech, not traditional robotic TTS.
 

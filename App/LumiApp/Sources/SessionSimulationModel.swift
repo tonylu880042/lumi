@@ -93,6 +93,7 @@ final class SessionSimulationModel: ObservableObject {
     enum EndSessionCause: Equatable {
         case timeout
         case visitorLeft
+        case conversationEnded
 
         var label: String {
             switch self {
@@ -100,6 +101,8 @@ final class SessionSimulationModel: ObservableObject {
                 "逾時"
             case .visitorLeft:
                 "訪客離開"
+            case .conversationEnded:
+                "對話自然收尾"
             }
         }
     }
@@ -198,6 +201,7 @@ final class SessionSimulationModel: ObservableObject {
     @Published private(set) var isWakingUp = false
     @Published private(set) var recognitionDisplayStatus: RecognitionDisplayStatus = .waiting
     @Published private(set) var enrolledMemberCount: Int?
+    @Published private(set) var arrivalVitality: StoreArrivalVitality = .calm
 
     private let coordinator: AssistantSessionCoordinator
     private let hardware: MockHardwareControlPort
@@ -206,6 +210,7 @@ final class SessionSimulationModel: ObservableObject {
     private let memberAddressResolver:
         @Sendable (MemberID) async -> VoiceMemberAddress?
     private let visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)?
+    private let storeArrivalVitalityService: StoreArrivalVitalityService?
     private let identityEnrollmentSummary: (any IdentityEnrollmentSummaryPort)?
     private let onAuthorizationRequired: @MainActor () -> Void
     private let onContinuousExperienceDiagnostic:
@@ -239,9 +244,11 @@ final class SessionSimulationModel: ObservableObject {
     private var stateUpdatesTask: Task<Void, Never>?
     private var authorizationRegistrationTask: Task<AsyncStream<Void>, Never>?
     private var authorizationUpdatesTask: Task<Void, Never>?
+    private var conversationEndUpdatesTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
     private var continuousExperienceTask: Task<Void, Never>?
     private var continuousExperienceTeardownTask: Task<Void, Never>?
+    private var vitalityRefreshTask: Task<Void, Never>?
     private var continuousExperienceTeardownGeneration: UInt64 = 0
     private var actionGeneration: UInt64 = 0
     private var continuousExperienceGeneration: UInt64 = 0
@@ -254,6 +261,7 @@ final class SessionSimulationModel: ObservableObject {
         memberAddressResolver: @escaping @Sendable (MemberID) async ->
             VoiceMemberAddress? = { _ in nil },
         visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
+        storeArrivalVitalityService: StoreArrivalVitalityService? = nil,
         identityEnrollmentSummary: (any IdentityEnrollmentSummaryPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
@@ -268,15 +276,17 @@ final class SessionSimulationModel: ObservableObject {
         self.voiceSimulationControls = voiceSimulationControls
         self.memberAddressResolver = memberAddressResolver
         self.visitorPresenceMonitor = visitorPresenceMonitor
+        self.storeArrivalVitalityService = storeArrivalVitalityService
         self.identityEnrollmentSummary = identityEnrollmentSummary
         self.onAuthorizationRequired = onAuthorizationRequired
         self.onContinuousExperienceDiagnostic = onContinuousExperienceDiagnostic
         self.mapper = mapper
         self.eventMapper = eventMapper
         self.assistantState = .idle
-        self.avatarState = mapper.map(.idle)
+        self.avatarState = mapper.map(.idle, vitality: .calm)
         subscribeToStateUpdates()
         subscribeToAuthorizationUpdates()
+        subscribeToConversationEndRequests()
     }
 
     convenience init(
@@ -312,6 +322,7 @@ final class SessionSimulationModel: ObservableObject {
         memberAddressResolver: @escaping @Sendable (MemberID) async ->
             VoiceMemberAddress? = { _ in nil },
         visitorPresenceMonitor: (any VisitorPresenceMonitoringPort)? = nil,
+        storeArrivalVitalityService: StoreArrivalVitalityService? = nil,
         identityEnrollmentSummary: (any IdentityEnrollmentSummaryPort)? = nil,
         mapper: AvatarStateMapper = AvatarStateMapper(),
         eventMapper: AvatarEventCommandMapper = AvatarEventCommandMapper(),
@@ -327,6 +338,7 @@ final class SessionSimulationModel: ObservableObject {
             voiceSimulationControls: voiceSimulationControls,
             memberAddressResolver: memberAddressResolver,
             visitorPresenceMonitor: visitorPresenceMonitor,
+            storeArrivalVitalityService: storeArrivalVitalityService,
             identityEnrollmentSummary: identityEnrollmentSummary,
             mapper: mapper,
             eventMapper: eventMapper,
@@ -361,7 +373,9 @@ final class SessionSimulationModel: ObservableObject {
         stateUpdatesTask?.cancel()
         authorizationRegistrationTask?.cancel()
         authorizationUpdatesTask?.cancel()
+        conversationEndUpdatesTask?.cancel()
         actionTask?.cancel()
+        vitalityRefreshTask?.cancel()
         continuousExperienceTask?.cancel()
         continuousExperienceTeardownTask?.cancel()
     }
@@ -449,8 +463,8 @@ final class SessionSimulationModel: ObservableObject {
     }
 
     /// Starts the owner-approved kiosk loop. One usable face arms one welcome;
-    /// the monitor must then observe ten continuous seconds without a usable
-    /// face before another welcome can be armed.
+    /// the monitor must then observe the configured continuous absence interval
+    /// before another welcome can be armed.
     func startContinuousExperience() {
         guard supportsContinuousExperience, continuousExperienceTask == nil,
               let visitorPresenceMonitor else { return }
@@ -460,8 +474,9 @@ final class SessionSimulationModel: ObservableObject {
         isContinuousExperienceRunning = true
         continuousExperienceGeneration &+= 1
         let acceptedGeneration = continuousExperienceGeneration
+        startVitalityRefresh(generation: acceptedGeneration)
         let predecessor = continuousExperienceTeardownTask
-        continuousExperienceTask = Task { [weak self] in
+        continuousExperienceTask = Task { [weak self, storeArrivalVitalityService] in
             if let predecessor {
                 await predecessor.value
             }
@@ -498,6 +513,12 @@ final class SessionSimulationModel: ObservableObject {
                 }
                 guard !Task.isCancelled else { break }
 
+                if let vitalityService = storeArrivalVitalityService {
+                    let update = await vitalityService.recordArrival()
+                    guard !Task.isCancelled else { break }
+                    self?.applyArrivalVitality(update.vitality)
+                }
+
                 stage = .welcomeIdentityAndVoice
                 self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                 guard self != nil else { break }
@@ -523,12 +544,11 @@ final class SessionSimulationModel: ObservableObject {
                 stage = .waitForDeparture
                 self?.recordContinuousExperienceDiagnostic(.stageStarted(stage))
                 do {
-                    try await Self.runContinuousOperation(
-                        .waitForDeparture,
-                        record: recordDiagnostic
-                    ) {
-                        try await visitorPresenceMonitor.waitForDeparture()
-                    }
+                    try await self?.waitForDepartureAndRefreshVitality(
+                        monitor: visitorPresenceMonitor,
+                        service: storeArrivalVitalityService,
+                        recordDiagnostic: recordDiagnostic
+                    )
                 } catch is CancellationError {
                     break
                 } catch {
@@ -635,6 +655,8 @@ final class SessionSimulationModel: ObservableObject {
     func stopContinuousExperience() {
         continuousExperienceGeneration &+= 1
         isContinuousExperienceRunning = false
+        vitalityRefreshTask?.cancel()
+        vitalityRefreshTask = nil
         guard continuousExperienceTask != nil else { return }
         guard let visitorPresenceMonitor else {
             continuousExperienceTask?.cancel()
@@ -663,6 +685,59 @@ final class SessionSimulationModel: ObservableObject {
             return
         }
         startContinuousExperience()
+    }
+
+    /// Quiesces the kiosk before an operator changes member-memory consent or
+    /// clears a member's local memory. The continuous presence loop is stopped
+    /// and fully torn down first so a late arrival cannot start a voice session
+    /// while the storage mutation is in flight. The coordinator then cancels
+    /// any startup/voice work, invalidates its session-bound memory context,
+    /// and returns the hardware home. A failed shutdown leaves the caller
+    /// unable to report the storage mutation as successful.
+    func prepareForMemberMemoryMutation() async -> Bool {
+        stopContinuousExperience()
+        if let teardown = continuousExperienceTeardownTask {
+            await teardown.value
+        }
+
+        guard !Task.isCancelled else { return false }
+
+        let coordinator = coordinator
+        let hardware = hardware
+        let shutdownTask = Task {
+            try await coordinator.prepareForMemberMemoryMutation()
+        }
+
+        // MockHardwareControlPort waits for an explicit Home confirmation in
+        // the same way as the Simulator's existing end-session flow. Keep a
+        // watcher alive until the coordinator has either requested Home or
+        // finished an idle/no-op shutdown, then cancel it deterministically.
+        let homeCompletionTask = Task {
+            while !Task.isCancelled {
+                if await hardware.hasPendingReturnHome {
+                    await hardware.completeCurrentOrNextReturnHome()
+                    return
+                }
+                await Task.yield()
+            }
+        }
+
+        do {
+            try await withTaskCancellationHandler(operation: {
+                try await shutdownTask.value
+            }, onCancel: {
+                shutdownTask.cancel()
+            })
+            homeCompletionTask.cancel()
+            await homeCompletionTask.value
+            return !Task.isCancelled
+        } catch {
+            shutdownTask.cancel()
+            _ = try? await shutdownTask.value
+            homeCompletionTask.cancel()
+            await homeCompletionTask.value
+            return false
+        }
     }
 
     private func scheduleContinuousExperienceTeardown(
@@ -695,6 +770,79 @@ final class SessionSimulationModel: ObservableObject {
         guard continuousExperienceGeneration == generation else { return }
         isContinuousExperienceRunning = false
         continuousExperienceTask = nil
+        vitalityRefreshTask?.cancel()
+        vitalityRefreshTask = nil
+    }
+
+    private func waitForDepartureAndRefreshVitality(
+        monitor: any VisitorPresenceMonitoringPort,
+        service: StoreArrivalVitalityService?,
+        recordDiagnostic:
+            @MainActor (ContinuousExperienceDiagnostic) -> Void
+    ) async throws {
+        try await Self.runContinuousOperation(
+            .waitForDeparture,
+            record: recordDiagnostic
+        ) {
+            try await monitor.waitForDeparture()
+        }
+        try Task.checkCancellation()
+
+        guard let service else { return }
+        let vitality = await service.markDeparture()
+        try Task.checkCancellation()
+        applyArrivalVitality(vitality)
+    }
+
+    private func startVitalityRefresh(generation: UInt64) {
+        guard let service = storeArrivalVitalityService,
+              vitalityRefreshTask == nil else { return }
+
+        vitalityRefreshTask = Task { [weak self, service] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
+
+                guard let self,
+                      self.continuousExperienceGeneration == generation,
+                      self.isContinuousExperienceRunning,
+                      !Task.isCancelled else {
+                    return
+                }
+
+                let vitality = await service.snapshot()
+                guard !Task.isCancelled,
+                      self.continuousExperienceGeneration == generation,
+                      self.isContinuousExperienceRunning else {
+                    return
+                }
+                self.applyArrivalVitality(vitality)
+            }
+        }
+    }
+
+    /// Refreshes the rolling window without adding an arrival. The timestamp
+    /// overload keeps App tests deterministic and makes idle expiry explicit.
+    func refreshArrivalVitality() async {
+        guard let service = storeArrivalVitalityService else { return }
+        let vitality = await service.snapshot()
+        guard !Task.isCancelled else { return }
+        applyArrivalVitality(vitality)
+    }
+
+    func refreshArrivalVitality(at time: Duration) async {
+        guard let service = storeArrivalVitalityService else { return }
+        let vitality = await service.snapshot(at: time)
+        guard !Task.isCancelled else { return }
+        applyArrivalVitality(vitality)
+    }
+
+    private func applyArrivalVitality(_ vitality: StoreArrivalVitality) {
+        arrivalVitality = vitality
+        avatarState = mapper.map(assistantState, vitality: vitality)
     }
 
     private func refreshEnrollmentSummary() async {
@@ -1288,10 +1436,31 @@ final class SessionSimulationModel: ObservableObject {
         }
     }
 
+    private func subscribeToConversationEndRequests() {
+        let coordinator = coordinator
+        conversationEndUpdatesTask = Task { [weak self] in
+            let updates = await coordinator.conversationEndRequests()
+            for await _ in updates {
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                guard self.canEndSession else { continue }
+
+                // The coordinator has already stopped voice and emitted this
+                // payload-free signal. Reuse the normal end-session path so
+                // the mock and physical hardware both confirm Home before the
+                // state becomes idle. The continuous loop remains in its
+                // existing waitForDeparture stage, so presence cannot trigger
+                // an immediate re-greeting.
+                self.endSession(cause: .conversationEnded)
+                await self.hardware.completeCurrentOrNextReturnHome()
+            }
+        }
+    }
+
     private func receive(_ state: AssistantState) {
         let previousState = assistantState
         assistantState = state
-        avatarState = mapper.map(state)
+        avatarState = mapper.map(state, vitality: arrivalVitality)
 
         if state == .idle, previousState != .idle {
             visitorGreeting = nil

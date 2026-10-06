@@ -14,6 +14,7 @@ public enum MockVoiceSessionError: Error, Equatable, Sendable {
 public actor MockVoiceSessionPort: VoiceSessionPort {
     public private(set) var startContexts: [VoiceContext] = []
     public private(set) var startDirections: [VoiceConversationDirection] = []
+    public private(set) var startMemoryContexts: [VoiceMemberMemoryContext?] = []
     public private(set) var startCallCount = 0
     public private(set) var stopCallCount = 0
     public private(set) var prewarmCallCount = 0
@@ -76,6 +77,16 @@ public actor MockVoiceSessionPort: VoiceSessionPort {
         }, onCancel: {
             Task { await self.cancelPendingStart(id: requestID) }
         })
+    }
+
+    public func start(
+        context: VoiceContext,
+        direction: VoiceConversationDirection,
+        memberAddress _: VoiceMemberAddress?,
+        memoryContext: VoiceMemberMemoryContext?
+    ) async throws {
+        startMemoryContexts.append(memoryContext)
+        try await start(context: context, direction: direction)
     }
 
     /// Completes the active startup request and marks the voice session ready.

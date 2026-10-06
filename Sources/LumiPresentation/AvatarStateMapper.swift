@@ -8,6 +8,20 @@ public struct AvatarStateMapper: Sendable {
     public init() {}
 
     public func map(_ state: AssistantState) -> AvatarVisualState {
+        map(state, vitality: .calm)
+    }
+
+    /// Maps the semantic state first, then applies the arrival-driven warmth
+    /// layer. Vitality never owns lifecycle feedback such as waveform, effect,
+    /// or the semantic expression of an active assistant state.
+    public func map(
+        _ state: AssistantState,
+        vitality: StoreArrivalVitality
+    ) -> AvatarVisualState {
+        applyVitality(vitality, to: baseMap(state), for: state)
+    }
+
+    private func baseMap(_ state: AssistantState) -> AvatarVisualState {
         switch state {
         case .idle:
             return AvatarVisualState(
@@ -175,6 +189,75 @@ public struct AvatarStateMapper: Sendable {
                 transition: .init(duration: 0.70, curve: .easeInOut)
             )
         }
+    }
+
+    private func applyVitality(
+        _ vitality: StoreArrivalVitality,
+        to base: AvatarVisualState,
+        for state: AssistantState
+    ) -> AvatarVisualState {
+        guard vitality != .calm else { return base }
+
+        // Offline is a product availability state. It stays dim and sleepy
+        // even when the last known arrival window was busy.
+        if state == .offline { return base }
+
+        let level = vitality == .happy ? 1.0 : 2.0
+        let preservesSemanticExpression: Bool = switch state {
+        case .listening, .thinking, .reminding, .confused:
+            true
+        default:
+            false
+        }
+
+        let mouthStyle: MouthStyle
+        if preservesSemanticExpression {
+            mouthStyle = base.mouthStyle
+        } else {
+            switch vitality {
+            case .calm:
+                mouthStyle = base.mouthStyle
+            case .happy:
+                mouthStyle = switch state {
+                case .idle, .detected(direction: _), .recognizing:
+                    .smile
+                default:
+                    base.mouthStyle
+                }
+            case .excited:
+                mouthStyle = switch state {
+                case .idle, .detected(direction: _), .recognizing, .greeting:
+                    .wideSmile
+                default:
+                    base.mouthStyle
+                }
+            }
+        }
+
+        return AvatarVisualState(
+            eyeOpenAmount: base.eyeOpenAmount,
+            eyeSquintAmount: base.eyeSquintAmount,
+            irisScale: base.irisScale,
+            irisBrightness: base.irisBrightness + 0.08 * level,
+            pupilOffset: base.pupilOffset,
+            pupilScale: base.pupilScale,
+            highlightIntensity: base.highlightIntensity + 0.08 * level,
+            highlightScale: base.highlightScale,
+            softGlossOpacity: base.softGlossOpacity + 0.08 * level,
+            eyelidStyle: base.eyelidStyle,
+            eyebrowStyle: base.eyebrowStyle,
+            eyebrowTilt: base.eyebrowTilt,
+            blushOpacity: base.blushOpacity + 0.08 * level,
+            mouthStyle: mouthStyle,
+            mouthOpenAmount: base.mouthOpenAmount,
+            audioAmplitude: base.audioAmplitude,
+            sparkleIntensity: base.sparkleIntensity + 0.08 * level,
+            waveformMode: base.waveformMode,
+            effect: base.effect,
+            effectIntensity: base.effectIntensity,
+            overallBrightness: base.overallBrightness + 0.04 * level,
+            transition: base.transition
+        )
     }
 }
 

@@ -6,6 +6,90 @@
 > Applies to: iPad App, Identity Recognition, Realtime Voice, Member Data, Smart Rotation Base
 > Principles: Clean Architecture + TDD + Ask-if-Unclear
 
+Weekly encouragement / interview amendment (2026-10-01): the owner accepted
+distinct Asia/Taipei Monday–Sunday encounter dates for weekly encouragement,
+and calendar dates 1–10, at most one reminder per member per day until coach
+confirmation of that month's 「量身面談」. Domain now derives the distinct observed
+calendar-week count in the consented memory snapshot. The owner confirmed on
+2026-10-02 that departure encouragement replaces the opener on a later reliable
+recognition at least thirty minutes after today's first saved observed greeting;
+three seconds without a usable face only ends/rearms the interaction. Domain
+owns the eligibility and date boundary; Application maps a bound consented
+snapshot to the observed count in the voice context. Infrastructure replaces
+the recorded welcome with one contextual opener and prevents reconnect replay.
+First-record timestamps and IDs stay local. On 2026-10-06 the owner confirmed
+weekly arrival wording and short-revisit behavior. Domain derives the first
+daily arrival ordinal including this encounter without persisting an unfinished
+greeting. Application passes only the bounded count and keeps validity metadata
+local; Infrastructure gives departure priority, then weekly arrival, then a short
+same-day greeting. Arrival context expires at Taipei midnight or clock rollback.
+Interview reminders remain unwired. Domain owns calendar/eligibility rules; Application owns current-member
+binding and authorized operations; Infrastructure implements persistence;
+Presentation exposes the coach entry point through owned values. Coach access,
+interview-record consent/lifecycle, delivery deduplication and message priority
+must be specified before affected implementation. See
+`decisions/ADR-0021-weekly-encounters-and-interview-reminders.md`.
+
+Two-stage presence amendment (2026-09-30): the owner approved one anonymous
+distant 「你好」, face-size-based approach, no additional speech without approach,
+and optional Avatar blinking when the face is directed at the camera. The
+current Live pipeline still proceeds from a fully usable face directly to
+identity and voice; no new trigger is enabled. Geometry and any pose signal
+originate in Infrastructure, Application owns the staged visit lifecycle,
+Domain owns provider-neutral gate policy, and Presentation maps Avatar response
+without importing Vision into UI. The numerical gates and remaining UX/audio
+details require calibration and confirmation. See
+`two-stage-presence-greeting.md` and ADR-0020.
+
+Greeting/reminder amendment (2026-09-23): prioritize one brief greeting or
+authorized reminder without requiring a member reply. Realtime supports the
+necessary consent, naming, correction and short service-response path; it is
+not an invitation to open-ended conversation. The initial slice changes the
+Infrastructure prompt catalog and its tests only. Application retains session
+ownership and all existing ports, permissions, shutdown and rearm semantics.
+No silence timer, automatic disconnect, new data access or new controller is
+introduced. See `greeting-reminder-first.md` and ADR-0019.
+
+Member-memory amendment (2026-09-18, accepted for implementation): consented
+Debug-Live interactions and bounded self-reports may persist through an
+Application storage port implemented locally by Infrastructure. Domain derives
+date-based context; the coordinator retains session ownership. Known-member
+binding, stale-write rejection, retention and clear/disable controls are
+required. A minimal permitted semantic summary may drive one generated opener
+instead of the generic recording, without exposing MemberID or full history.
+Official/synthetic exercise data remains separate. See
+`member-interaction-memory-draft.md` section 7 and
+`decisions/ADR-0017-member-interaction-memory.md`; implementation validation is
+reported separately from this architecture approval.
+
+Local pilot amendment (2026-09-15): camera-presence observations feed an
+Application-owned arrival latch and a Domain vitality policy. Presentation maps
+vitality into existing Avatar values; no camera or member identity data crosses
+that boundary. Infrastructure bundles the accepted Marin recordings and can
+replace the provider-generated opener while preserving the voice port lifecycle
+and protecting microphone input during local playback. App composition shares
+the same vitality service between visual state and greeting selection. See
+`phase-3-store-arrival-vitality-draft.md` and
+`decisions/ADR-0015-arrival-vitality-and-recorded-greetings.md` for scope and
+acceptance requirements.
+
+Natural closing amendment (2026-09-17): contextual visitor goodbyes can request
+a controlled voice-session end. Infrastructure owns provider intent and local
+farewell playback; Application retains session and return-Home ownership.
+The existing presence wait prevents immediate re-greeting after goodbye.
+See `natural-conversation-closing.md` and
+`decisions/ADR-0016-natural-conversation-closing.md`. ADR-0019 supersedes the
+roughly thirty-second conversational target with greeting/reminder-first
+delivery; it preserves the existing explicit-goodbye lifecycle.
+
+Recorded-audio calibration amendment (2026-09-17): after the owner reported
+quieter recordings than Live speech and approved leveling, bundled Marin clips
+may be mastered offline for consistent loudness with peak protection. Keep
+originals and reproducible provenance outside the App bundle. Runtime routing,
+microphone protection, and the approved Live gain remain owned by the existing
+Infrastructure composition. See `audio-loudness-calibration.md` for measured
+asset results and the separate physical-device acceptance boundary.
+
 ---
 
 # 1. Purpose

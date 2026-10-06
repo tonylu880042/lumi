@@ -170,6 +170,39 @@ struct SQLiteFaceEmbeddingStoreTests {
         ])
     }
 
+    @Test("member profile projection reads only enrolled spoken labels")
+    func projectsLocalMemberProfilesWithoutIdentityFallback() async throws {
+        let databaseURL = try temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let store = try SQLiteFaceEmbeddingStore(databaseURL: databaseURL)
+        let first = try MemberID(rawValue: "member-a")
+        let second = try MemberID(rawValue: "member-b")
+        let embedding = try makeEmbedding(axis: 0)
+        let firstAddress = try VoiceMemberAddress(spokenLabel: "小美")
+        let secondAddress = try VoiceMemberAddress(spokenLabel: "小芳")
+
+        try await store.commitVisitorEnrollment(
+            memberID: first,
+            address: firstAddress,
+            consentedAt: Date(timeIntervalSince1970: 1),
+            completedAt: Date(timeIntervalSince1970: 2),
+            embeddings: [embedding, embedding, embedding]
+        )
+        try await store.commitVisitorEnrollment(
+            memberID: second,
+            address: secondAddress,
+            consentedAt: Date(timeIntervalSince1970: 3),
+            completedAt: Date(timeIntervalSince1970: 4),
+            embeddings: [embedding, embedding, embedding]
+        )
+
+        let projectedProfiles = try await store.localMemberProfiles()
+        #expect(projectedProfiles == [
+            MemberMemoryProfile(memberID: first, spokenLabel: "小美"),
+            MemberMemoryProfile(memberID: second, spokenLabel: "小芳"),
+        ])
+    }
+
     @Test("typed reads fail the whole query for a corrupt exact-version row")
     func corruptTypedRowFailsClosedWithoutPartialResult() async throws {
         let databaseURL = try temporaryDatabaseURL()

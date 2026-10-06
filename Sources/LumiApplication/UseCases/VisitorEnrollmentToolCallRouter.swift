@@ -44,13 +44,19 @@ public actor VisitorEnrollmentToolCallRouter {
 
         let payload: VoiceToolResultPayload
         switch call.kind {
+        case .recordExerciseDisclosure,
+             .correctMemberExerciseDisclosure,
+             .getMemberWeeklySummary,
+             .endConversation:
+            payload = .failure(.unsupportedTool)
+
         case .beginVisitorEnrollment:
             payload = try await beginEnrollment()
 
         case let .completeVisitorEnrollment(address):
             payload = try await completeEnrollment(address: address)
 
-        case .getMemberWeeklySummary, .unsupported:
+        case .unsupported:
             payload = .failure(.unsupportedTool)
 
         case .invalidArguments:

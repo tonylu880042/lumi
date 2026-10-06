@@ -11,15 +11,26 @@ import LumiDomain
 /// intentionally deferred to the stream runner.
 public actor VoiceToolCallRouter {
     private let memberID: MemberID
-    private let weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+    private let weeklySummaryUseCase: GetMemberWeeklySummaryUseCase?
+    private let memorySession: MemberInteractionMemorySession?
+    private let now: @Sendable () -> Date
+    private let memoryContextDidChange:
+        (@Sendable (MemberExerciseDisclosure?, Date) async -> Void)?
     private var completedCalls: [String: CompletedCall] = [:]
 
     public init(
         memberID: MemberID,
-        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase
+        weeklySummaryUseCase: GetMemberWeeklySummaryUseCase? = nil,
+        memorySession: MemberInteractionMemorySession? = nil,
+        now: @escaping @Sendable () -> Date = { Date() },
+        memoryContextDidChange:
+            (@Sendable (MemberExerciseDisclosure?, Date) async -> Void)? = nil
     ) {
         self.memberID = memberID
         self.weeklySummaryUseCase = weeklySummaryUseCase
+        self.memorySession = memorySession
+        self.now = now
+        self.memoryContextDidChange = memoryContextDidChange
     }
 
     /// Returns the deterministic result for one normalized voice call.
@@ -44,6 +55,10 @@ public actor VoiceToolCallRouter {
         let payload: VoiceToolResultPayload
         switch call.kind {
         case .getMemberWeeklySummary:
+            guard let weeklySummaryUseCase else {
+                payload = .failure(.memberDataUnavailable)
+                break
+            }
             do {
                 let summary = try await weeklySummaryUseCase.execute(for: memberID)
                 try Task.checkCancellation()
@@ -68,7 +83,65 @@ public actor VoiceToolCallRouter {
                 }
             }
 
-        case .beginVisitorEnrollment, .completeVisitorEnrollment:
+        case let .recordExerciseDisclosure(disclosure):
+            guard let memorySession else {
+                payload = .failure(.memberMemoryUnavailable)
+                break
+            }
+            do {
+                let recordedAt = now()
+                let write = try await memorySession.recordExerciseDisclosure(
+                    disclosure,
+                    at: recordedAt
+                )
+                try Task.checkCancellation()
+                switch write.outcome {
+                case .appended, .duplicate, .ignored:
+                    // `.ignored` is the intentional Application result for
+                    // session-only states. It is accepted in the current
+                    // session and must still reach the provider context;
+                    // only the SQLite persistence write is skipped.
+                    await memoryContextDidChange?(disclosure, recordedAt)
+                    payload = .exerciseDisclosureRecorded(disclosure)
+                case .rejected:
+                    payload = .failure(.memberMemoryUnavailable)
+                }
+            } catch {
+                if error is CancellationError || Task.isCancelled {
+                    throw CancellationError()
+                }
+                payload = .failure(.memberMemoryUnavailable)
+            }
+
+        case .correctMemberExerciseDisclosure:
+            guard let memorySession else {
+                payload = .failure(.memberMemoryUnavailable)
+                break
+            }
+            do {
+                let correctedAt = now()
+                let correction = try await memorySession.correctExerciseDisclosure(
+                    at: correctedAt
+                )
+                try Task.checkCancellation()
+                switch correction.outcome {
+                case .corrected:
+                    await memoryContextDidChange?(nil, correctedAt)
+                    payload = .exerciseDisclosureCorrected
+                case .notFound:
+                    await memoryContextDidChange?(nil, correctedAt)
+                    payload = .exerciseDisclosureCorrectionNotFound
+                case .rejected:
+                    payload = .failure(.memberMemoryUnavailable)
+                }
+            } catch {
+                if error is CancellationError || Task.isCancelled {
+                    throw CancellationError()
+                }
+                payload = .failure(.memberMemoryUnavailable)
+            }
+
+        case .beginVisitorEnrollment, .completeVisitorEnrollment, .endConversation:
             payload = .failure(.unsupportedTool)
 
         case .unsupported:

@@ -135,6 +135,17 @@ spoken label, image, embedding, transcript, model input, framework error text,
 or raw provider error. Cancellation and an explicit stop are not reported as
 stage failures.
 
+Local diagnostic amendment (2026-10-06): after a phone test showed recognition
+followed by voice-start failure and immediate return to recognition, Debug
+Infrastructure adds `realtime-startup` Console events. Fixed codes distinguish
+credential acquisition, transport connection, standby activation, provider
+readiness and output start. Failures map known typed errors to closed broker,
+authorization, microphone, audio, peer or signaling categories; arbitrary errors
+become `unclassified`. These diagnostics change no lifecycle, timeout, greeting
+policy or recognition threshold. Output-start indicates the adapter's output
+lifecycle event, not a microphone measurement of audible sound. Phone verification
+and root-cause identification remain pending.
+
 Owner amendment (2026-08-25): a frame-pipeline failure during presence-only
 observation is a transient unusable frame, not a terminal continuous-stage
 failure. The presence monitor keeps its camera lease and waits for a newer
@@ -343,15 +354,28 @@ Debug-Live may also show the same validated label locally as
 `<spokenLabel>，歡迎回來～` after recognition and before voice startup; unknown,
 invalid-label, and Release paths stay anonymous.
 
-Owner amendment (2026-08-23): the Debug-Live visitor surface automatically
-starts recognition and voice after one usable arrival, then rearms only after
-ten continuous seconds without a usable face. A known session must begin its
-spoken greeting with the validated `<名稱>，歡迎回來`; it may then use exactly
-one of `漂亮姊姊`, `寶貝`, or `公主殿下` with a short positive sentence. An
-unknown enrollment-capable session begins with
-`漂亮姊姊，我好像還不認識妳` and retains the existing disclosure and explicit
-consent gate. These phrases do not add member data to the broker request and do
-not authorize fabricated profile or exercise facts.
+Owner amendment (2026-08-23, revised by the natural-conversation policy below):
+the Debug-Live visitor surface automatically starts recognition and voice after
+one usable arrival, then rearms only after ten continuous seconds without a
+usable face. A known session may use its validated `<名稱>` when that label is
+available, while a session without a validated label uses a generic welcome-back
+greeting. An unknown enrollment-capable session uses a natural generic greeting
+before the existing disclosure and explicit consent gate. The greeting wording
+does not add member data to the broker request and does not authorize fabricated
+profile or exercise facts.
+
+Owner amendment (2026-09-06, natural conversation): the catalog keeps a short,
+natural Taiwan Mandarin default of 1–2 sentences without a rigid character
+ceiling. Lumi first responds to the visitor's latest utterance or situation and
+only then offers encouragement or a next step when useful; necessary privacy,
+consent, safety, and enrollment explanations may be as complete as needed.
+Validated spoken labels are optional, user-provided address data and may be used
+naturally and sparingly. Generic returning-member and visitor contexts do not
+invent names, intimate titles, or repeated openings. This is provider prompt
+guidance rather than a deterministic output guarantee. Opening tool calls,
+on-demand tool authorization, enrollment timing, consent, three-sample capture,
+and naming order remain unchanged. The pending manual conversational examples
+are documented in ADR-0014 and require physical Debug-Live validation.
 
 The same Debug-Live surface exposes Apple's native `MPVolumeView` so the user
 can change system output volume. `AVAudioSession.outputVolume` remains

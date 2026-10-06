@@ -69,10 +69,15 @@ actor OpenAIRealtimeEventMapper {
             }
             return [.voice(.assistantOutputStarted)]
 
-        case .outputAudioStopped, .outputAudioCleared:
+        case .outputAudioStopped:
             guard isOutputActive else { return [] }
             isOutputActive = false
             return [.voice(.assistantOutputEnded)]
+
+        case .outputAudioCleared:
+            guard isOutputActive else { return [] }
+            isOutputActive = false
+            return [.voice(.assistantOutputCleared)]
 
         case .responseStarted, .responseCompleted:
             return []

@@ -53,6 +53,15 @@ protocol IdentityCalibrationStore: Sendable {
     func sFaceSamples(for memberID: MemberID) async throws -> [StoredFaceEmbeddingSample]
 
     func deleteRecords(for memberID: MemberID) async throws
+
+    func localMemberProfiles() async throws -> [MemberMemoryProfile]
+}
+
+extension IdentityCalibrationStore {
+    /// Existing calibration test stores may omit the management projection;
+    /// production SQLiteFaceEmbeddingStore overrides this with the real
+    /// `local_member_profiles` query.
+    func localMemberProfiles() async throws -> [MemberMemoryProfile] { [] }
 }
 
 /// Atomic persistence boundary for a completed conversational enrollment.
@@ -80,7 +89,8 @@ public actor CoreMLIdentityCalibrationService:
     IdentityCalibrationPort,
     IdentityEnrollmentSummaryPort,
     VisitorEnrollmentPort,
-    VoiceMemberAddressRepository
+    VoiceMemberAddressRepository,
+    MemberMemoryProfileDirectory
 {
     private let frameSource: any IdentityCalibrationFrameSource
     private let photoFrameSource: any IdentityCalibrationPhotoFrameSource
@@ -233,6 +243,25 @@ public actor CoreMLIdentityCalibrationService:
             let address = try await visitorEnrollmentStore.address(for: memberID)
             try Task.checkCancellation()
             return address
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw IdentityCalibrationError.failed
+        }
+    }
+
+    /// Returns only locally enrolled identity labels for the Debug-Live
+    /// operator memory surface. No embeddings, consent timestamps, or raw
+    /// SQLite rows cross this projection boundary.
+    public func memberMemoryProfiles() async throws -> [MemberMemoryProfile] {
+        do {
+            try Task.checkCancellation()
+            let profiles = try await store.localMemberProfiles()
+            try Task.checkCancellation()
+            return profiles
         } catch let cancellation as CancellationError {
             throw cancellation
         } catch {
